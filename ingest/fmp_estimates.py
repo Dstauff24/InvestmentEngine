@@ -153,13 +153,20 @@ def snapshot_symbol(
     return db.executemany(UPSERT, rows) if rows else 0
 
 
-def probe_endpoint(client: FMPClient) -> bool:
-    """Is the estimates endpoint reachable on this plan? One cheap call."""
+def plan_blocks_estimates(client: FMPClient) -> bool:
+    """Is the estimates endpoint plan-gated right now? One cheap call.
+
+    True ONLY on a 402. Any other error means the endpoint might well work, so
+    the job stays critical and fails normally — a transient network problem must
+    not be mistaken for a billing decision and quietly let the day complete.
+    """
     try:
         client.analyst_estimates("AAPL", period="quarter", limit=1)
     except FMPPlanError:
+        return True
+    except Exception:
         return False
-    return True
+    return False
 
 
 def run(client: FMPClient | None = None, *, symbols: list[str] | None = None) -> int:
@@ -173,10 +180,18 @@ def run(client: FMPClient | None = None, *, symbols: list[str] | None = None) ->
             "no active tickers; run `python -m ingest.universe` before the snapshot jobs"
         )
 
-    with job_run(JOB_NAME, session_date=day, is_critical=True, triggered_by="manual") as job:
-        # Check the plan gate ONCE rather than failing 500 times. On the free
-        # tier this is the expected path (D29).
-        if not probe_endpoint(client):
+    # Check the plan gate ONCE rather than failing 500 times, and BEFORE opening
+    # the job_runs row — because the answer decides whether this job is a gate.
+    #
+    # While the endpoint 402s the job is recorded NON-critical. That is not a
+    # loosening of D7: a job that cannot possibly succeed is not a gate, and
+    # holding `day_complete` hostage to a billing decision would mean the chain
+    # snapshot clock could never start either. The flag flips back the moment a
+    # probe passes, which is also the day the estimate-revision clock starts.
+    blocked = plan_blocks_estimates(client)
+
+    with job_run(JOB_NAME, session_date=day, is_critical=not blocked, triggered_by="manual") as job:
+        if blocked:
             job.skip("analyst-estimates is plan-gated (D29); estimate clock not started")
             raise EstimatesPlanBlocked(
                 "/stable/analyst-estimates is 402 on this plan. The D7 estimate-revision "
