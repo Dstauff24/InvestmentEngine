@@ -54,10 +54,96 @@ def expect_error(tmp_path: Path, filename: str, data: dict, match: str) -> None:
 
 
 def test_d2_pillar_weights():
-    """D2: Technical 35 / Fundamental 25 / Catalyst 20 / Sentiment 20."""
+    """SUPERSEDED by D32 — see `test_d32_pillar_weights`.
+
+    D2 set Technical 35 / Fundamental 25 / Catalyst 20 / Sentiment 20. D32
+    reweighted to 40/30/20/10 on Oct 20 2026. This test is kept as a pointer
+    rather than deleted, because D2 is still the decision that establishes the
+    four-pillar model and a reader grepping for `D2` should land somewhere that
+    tells them the weights moved, not find nothing.
+    """
     w = cfg.scoring().pillar_weights
-    assert (w.technical, w.fundamental, w.catalyst, w.sentiment) == (35, 25, 20, 20)
+    assert (w.technical, w.fundamental, w.catalyst, w.sentiment) != (35, 25, 20, 20), (
+        "the D2 weights are back in config — either D32 was reverted without "
+        "updating the decision log, or this pointer is stale"
+    )
+
+
+def test_d32_pillar_weights():
+    """D32: Technical 40 / Fundamental 30 / Catalyst 20 / Sentiment 10."""
+    w = cfg.scoring().pillar_weights
+    assert (w.technical, w.fundamental, w.catalyst, w.sentiment) == (40, 30, 20, 10)
     assert sum(w.as_fractions().values()) == pytest.approx(1.0)
+    # The demotion is only safe while the conflict veto still bites: D32 demoted
+    # Sentiment, it did not disable it. A pillar below `conflict_below` caps the
+    # composite regardless of how little weight it carries.
+    assert cfg.scoring().composite.conflict_below > cfg.scoring().composite.scale_min
+    assert w.sentiment < w.technical
+
+
+def test_d33_cross_sectional_ranking():
+    """D33: rank by percentile within the universe; cap the digest by rank."""
+    r = cfg.scoring().ranking
+    assert r.rank_within_universe is True
+    assert r.max_ideas_per_day == 5  # [OPEN] #32
+    # Ranking selects AMONG ideas that already cleared a D12 gate; it must not
+    # become a second, looser route to surfacing.
+    assert cfg.scoring().min_surfaceable_composite >= cfg.scoring().tiers.b.min_composite - 1e-9
+
+
+def test_d35_barbell_sleeves_and_ratchet():
+    """D35: Core 65 / Growth 35, separate benchmarks, one-way ratchet."""
+    s = cfg.risk().sleeves
+    assert (s.core.target_pct, s.growth.target_pct) == (65, 35)
+    assert s.core.benchmark == "blend"
+    assert s.growth.benchmark == "spy_total_return"
+    assert set(s.core.buckets) == {"etf", "hold"}
+    assert set(s.growth.buckets) == {"swing", "option", "cash"}
+    # The asymmetry IS the decision: gains sweep out permanently, drawdowns are
+    # never topped back up mid-quarter.
+    assert s.ratchet.permanent is True
+    assert s.ratchet.replenish_drawdowns is False
+    assert s.ratchet.trigger_excess_points == 3.0  # [OPEN] #35
+    assert s.ratchet.sweep_fraction == 0.5  # [OPEN] #36
+
+
+def test_d36_iv_rank_selects_the_vehicle():
+    """D36: three bands, always defined risk, always event-checked."""
+    v = cfg.risk().vehicle_by_iv_rank
+    assert v.enabled is True
+    assert v.iv_vehicle_low == 30  # [OPEN] #33
+    assert v.iv_vehicle_high == 50  # [OPEN] #34
+    assert v.iv_vehicle_low < v.iv_vehicle_high, "the shares-by-default band must exist"
+    assert v.defined_risk_only is True  # D17
+    assert v.check_binary_events_in_expiration is True  # D19
+
+
+def test_d37_pyramiding_never_raises_initial_risk():
+    """D37: adds are funded by locked-in safety, not by raising the ante."""
+    p = cfg.risk().pyramiding
+    assert p.require_stop_at_breakeven is True
+    assert p.cap_at_original_allocation is True
+
+
+def test_d38_sector_correlation_guard():
+    """D38: two swings per sector; the third surfaces watch-only."""
+    g = cfg.risk().sector_guard
+    assert g.max_concurrent_swings_per_sector == 2
+    # Flagged, not suppressed: that the sector is working is information worth
+    # keeping even when the concentration is refused.
+    assert g.surface_excess_as_watch_only is True
+    # D38 must actually bind before the D17 swing cap does, or it is decorative.
+    assert g.max_concurrent_swings_per_sector < cfg.risk().max_concurrent_swings
+
+
+def test_d32_sentiment_reinstatement_condition():
+    """D32: the route back to weight 20, recorded as a test not a mood."""
+    s = cfg.scoring().sentiment_reinstatement
+    assert s.min_sentiment_score == 60
+    assert s.min_sample == 30  # [OPEN] #37
+    assert s.restore_toward == 20
+    # D39(2) sets the same floor for any weight change; the two must not drift.
+    assert s.min_sample >= 30
 
 
 def test_d12_tier_gates():
@@ -380,8 +466,9 @@ def test_pillar_weights_that_do_not_total_100_are_rejected(tmp_path):
     expect_error(
         tmp_path,
         "scoring.yaml",
+        # D32 weights: technical is 40, so 30 leaves 90.
         mutate("scoring.yaml", ["pillar_weights", "technical"], 30),
-        "must total 100, got 95",
+        "must total 100, got 90",
     )
 
 
@@ -788,8 +875,8 @@ def documented_parameters() -> dict[int, str]:
     }
 
 
-def test_the_doc_lists_exactly_31_parameters():
-    assert len(documented_parameters()) == 31
+def test_the_doc_lists_exactly_37_parameters():
+    assert len(documented_parameters()) == 37
 
 
 def test_every_tagged_value_is_documented():
@@ -815,8 +902,8 @@ def test_the_tag_numbering_is_contiguous():
 
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
-    assert "D31" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 31
+    assert "D39" in doc  # the doc states the decision range it was built against
+    assert len(tagged_parameters()) == 37
 
 
 # ══════════════════════════════════════════════════════════════════════════

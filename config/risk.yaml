@@ -70,6 +70,55 @@ options:
   # assignment costs money.
   assignment_extrinsic_buffer: 1.25   # [OPEN] #15
 
+# ── Vehicle selection by IV rank (D36) ──────────────────────────────────────
+# IV rank picks the vehicle on every Tier A idea, and the choice is PRINTED on
+# the card so the human can see why and overrule it.
+#
+#   below `low`   -> long call / debit spread candidate: optionality is cheap
+#   low..high     -> shares by default
+#   above `high`  -> shares, or a defined-risk premium-SELLING structure
+#
+# This is where the Growth sleeve's convexity comes from (D35): paying for
+# optionality when it is cheap and selling it when it is rich, instead of
+# defaulting to one vehicle and hoping the vol regime suits it. Needs the
+# self-built IV rank (D7/D22) — which is why the chain snapshot clock matters
+# more right now than the estimate one.
+vehicle_by_iv_rank:
+  enabled: true                 # D36
+  # D36 states the three bands and gives no boundaries. These two numbers decide
+  # how often the engine buys optionality versus sells it.
+  iv_vehicle_low: 30            # [OPEN] #33
+  iv_vehicle_high: 50           # [OPEN] #34
+  # Non-negotiable regardless of band (D17/D12), and re-stated here because this
+  # is the block a future reader will edit when changing vehicle policy.
+  defined_risk_only: true       # D17
+  check_binary_events_in_expiration: true   # D19
+
+# ── Pyramiding (D37) ────────────────────────────────────────────────────────
+# The only way to a larger position without a larger bet: the second tranche is
+# funded by the first tranche's locked-in safety, not by raising the ante.
+# Initial risk never rises; winners earn their size.
+pyramiding:
+  enabled: true                       # D37
+  # An add is permitted ONLY once the stop is at breakeven or better.
+  require_stop_at_breakeven: true     # D37
+  # Total open risk after an add must not exceed the ORIGINAL per-trade
+  # allocation (D17). Not a fresh allocation per tranche.
+  cap_at_original_allocation: true    # D37
+
+# ── Sector correlation guard, active sleeve (D38) ───────────────────────────
+# Six positions in one sector is one trade wearing six costumes. The heat cap
+# (D17) measures count and size and is blind to correlation, so it would
+# happily approve six semiconductor swings as a diversified book.
+#
+# The third same-sector idea surfaces FLAGGED WATCH-ONLY rather than being
+# suppressed: the information that the sector is working is worth keeping; the
+# concentration is not. Complements `stable_buckets.max_sector_pct`, which
+# governs the Core sleeve.
+sector_guard:
+  max_concurrent_swings_per_sector: 2   # D38
+  surface_excess_as_watch_only: true    # D38
+
 # ── Circuit breaker (D17) ───────────────────────────────────────────────────
 circuit_breaker:
   consecutive_losing_weeks: 2      # D17
@@ -144,6 +193,40 @@ allocation_targets:
   # D17 risk-off trigger: SPY below its 200-day MA AND VIX above 25.
   risk_off_spy_below_ma: 200
   risk_off_vix_above: 25
+
+# ── Barbell sleeves and the profit ratchet (D35) ────────────────────────────
+# Two named sleeves with SEPARATE SCOREBOARDS. Separate benchmarks matter as
+# much as separate targets: a Growth sleeve beating its own history while losing
+# to SPY is not working.
+#
+# The ratchet is the asymmetry that makes this a barbell rather than a label on
+# a drifting allocation. Winners raise the floor; losses never pull compounded
+# gains back into the trading sleeve. Without it, a good year silently becomes a
+# bigger bet instead of a bigger base.
+sleeves:
+  core:
+    target_pct: 65                  # D35
+    # Benchmarked against its own blend, not against SPY: holding ETFs and long
+    # holds to a SPY yardstick would read every defensive quarter as failure.
+    benchmark: blend                # D35
+    buckets: [etf, hold]            # D35
+  growth:
+    target_pct: 35                  # D35
+    benchmark: spy_total_return     # D35 / D19(1)
+    buckets: [swing, option, cash]  # D35 — "tactical cash" lives here
+  ratchet:
+    enabled: true                   # D35
+    cadence: quarterly              # D35
+    # Sweep fires when realized gains push Growth more than this many POINTS of
+    # account weight above its target. D35 states 3 and the sweep fraction as
+    # judgement calls, not derived numbers — hence [OPEN].
+    trigger_excess_points: 3.0      # [OPEN] #35
+    # Half the excess moves to Core. PERMANENTLY: it is not lent.
+    sweep_fraction: 0.5             # [OPEN] #36
+    permanent: true                 # D35
+    # Drawdowns are NOT replenished mid-quarter; rebalancing toward targets
+    # happens only at scheduled rebalances.
+    replenish_drawdowns: false      # D35
 
 # ── Dividends (D19) ─────────────────────────────────────────────────────────
 dividends:

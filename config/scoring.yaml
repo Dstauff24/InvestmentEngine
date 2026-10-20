@@ -15,15 +15,25 @@
 
 version: 1
 
-# ── Pillar weights (D2) ─────────────────────────────────────────────────────
-# Technical 35 / Fundamental 25 / Catalyst 20 / Sentiment 20. Must total 100.
+# ── Pillar weights (D32, superseding D2) ────────────────────────────────────
+# Technical 40 / Fundamental 30 / Catalyst 20 / Sentiment 10. Must total 100.
+#
+# D32 demoted Sentiment from 20: free-tier news is the thinnest input the engine
+# has, and a pillar fed noise adds noise to every composite it touches.
+# Fundamental took the weight in anticipation of the estimate-revision signal,
+# which is still dark while FMP's analyst-estimates endpoint 402s (D29).
+#
+# Demoting is not disabling. `composite.conflict_below` vetoes Tier A when ANY
+# pillar scores below it, so strongly negative sentiment still caps an idea at
+# `capped_at` no matter how little weight it carries. A demoted pillar can veto.
+#
 # D13: these get re-weighted from Shadow Book evidence at quarterly review —
 # which is only possible because they live here and not in scoring/composite.py.
 pillar_weights:
-  technical: 35
-  fundamental: 25
+  technical: 40
+  fundamental: 30
   catalyst: 20
-  sentiment: 20
+  sentiment: 10
 
 # ── Composite scale (D2) ────────────────────────────────────────────────────
 composite:
@@ -66,6 +76,30 @@ tiers:
 
 # D1 / edge-source #1: the engine can say "nothing today". Below this, silence.
 min_surfaceable_composite: 55
+
+# ── Cross-sectional ranking (D33) ───────────────────────────────────────────
+# An absolute score decides nothing: a composite of 72 means one thing when it
+# is the best in the universe and another when forty names beat it. Ideas are
+# ranked by composite PERCENTILE within the universe each day, and the digest
+# surfaces at most `max_ideas_per_day` by rank.
+#
+# Ranking selects AMONG ideas that already passed their D12 tier gate. It never
+# promotes an idea that failed one — the absolute gates apply first.
+ranking:
+  rank_within_universe: true   # D33
+  # How many ideas the daily digest may surface, highest rank first. D33 states
+  # the rule and gives no number; 5 is a reading limit, not a market fact.
+  max_ideas_per_day: 5         # [OPEN] #32
+
+# ── Sentiment reinstatement (D32) ───────────────────────────────────────────
+# The condition under which Sentiment earns its weight back, recorded so it is
+# a test rather than a mood. Nothing reads this until the Shadow Book exists.
+sentiment_reinstatement:
+  min_sentiment_score: 60       # D32 — "ideas where sentiment scored 60+"
+  # Closed Shadow Book ideas required before the question may even be asked.
+  # D32 says "30 or more"; the floor itself is a judgement about sample size.
+  min_sample: 30                # [OPEN] #37
+  restore_toward: 20            # D32 — back to the pre-demotion weight
 
 # ── Phase 1 recipes ─────────────────────────────────────────────────────────
 # Parameters for the three setups in the decision log, in implementation order.

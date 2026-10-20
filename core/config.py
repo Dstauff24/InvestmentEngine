@@ -236,6 +236,25 @@ class Recipes(Base):
     post_earnings_drift: DriftRecipe
 
 
+class Ranking(Base):
+    """D33: ideas are ranked by composite percentile within the universe."""
+
+    rank_within_universe: bool
+    max_ideas_per_day: PositiveInt  # [OPEN] #32
+
+
+class SentimentReinstatement(Base):
+    """D32: the condition under which Sentiment earns its weight back.
+
+    Validated so a typo fails at startup; nothing reads it until the Shadow
+    Book can produce the evidence.
+    """
+
+    min_sentiment_score: Score
+    min_sample: PositiveInt  # [OPEN] #37
+    restore_toward: Score
+
+
 class ScoringConfig(Base):
     version: PositiveInt
     pillar_weights: PillarWeights
@@ -243,6 +262,8 @@ class ScoringConfig(Base):
     pillar_agreement: PillarAgreement
     tiers: Tiers
     min_surfaceable_composite: Score
+    ranking: Ranking
+    sentiment_reinstatement: SentimentReinstatement
     recipes: Recipes
 
     @model_validator(mode="after")
@@ -258,6 +279,18 @@ class ScoringConfig(Base):
                 f"composite.capped_at ({self.composite.capped_at:g}) is at or above "
                 f"tiers.a.min_composite ({self.tiers.a.min_composite:g}); an idea with a "
                 f"conflicting pillar could still reach Tier A"
+            )
+        # D32: the demotion only stays safe because the conflict veto still
+        # bites. If sentiment could score below `conflict_below` and NOT cap the
+        # composite, a 10-weight pillar would be decorative — which is the thing
+        # D32 explicitly declined to do (it demoted sentiment, it did not
+        # disable it). This asserts the veto is reachable rather than assuming.
+        if self.composite.conflict_below <= self.composite.scale_min:
+            raise ValueError(
+                f"composite.conflict_below ({self.composite.conflict_below:g}) is at or "
+                f"below scale_min; no pillar could ever register as conflicting, so "
+                f"D32's demoted Sentiment pillar would lose its veto as well as its "
+                f"weight"
             )
         if self.pillar_agreement.min_score >= self.tiers.a.min_composite:
             raise ValueError(
@@ -499,6 +532,117 @@ class Cash(Base):
     has_risk_profile: bool
 
 
+class VehicleByIVRank(Base):
+    """D36: IV rank selects the vehicle on every Tier A idea."""
+
+    enabled: bool
+    iv_vehicle_low: Score  # [OPEN] #33
+    iv_vehicle_high: Score  # [OPEN] #34
+    defined_risk_only: bool
+    check_binary_events_in_expiration: bool
+
+    @model_validator(mode="after")
+    def _bands_are_ordered_and_leave_a_middle(self):
+        if self.iv_vehicle_low >= self.iv_vehicle_high:
+            raise ValueError(
+                f"iv_vehicle_low ({self.iv_vehicle_low:g}) must be below iv_vehicle_high "
+                f"({self.iv_vehicle_high:g}); D36 defines THREE bands and equal bounds "
+                f"erase the middle one, where shares are the default vehicle"
+            )
+        if not self.defined_risk_only:
+            raise ValueError("D17/D12: defined_risk_only cannot be turned off")
+        return self
+
+
+class Pyramiding(Base):
+    """D37: adds are funded by locked-in safety, never by raising the ante."""
+
+    enabled: bool
+    require_stop_at_breakeven: bool
+    cap_at_original_allocation: bool
+
+    @model_validator(mode="after")
+    def _the_two_guards_cannot_be_disabled_while_enabled(self):
+        # D37 is the two conditions. Pyramiding with either one off is simply
+        # "bigger entries", which the decision exists to forbid.
+        if self.enabled and not (
+            self.require_stop_at_breakeven and self.cap_at_original_allocation
+        ):
+            raise ValueError(
+                "D37: pyramiding requires BOTH require_stop_at_breakeven and "
+                "cap_at_original_allocation. Without them an add raises initial risk, "
+                "which is the behaviour the decision forbids"
+            )
+        return self
+
+
+class SectorGuard(Base):
+    """D38: correlation guard the heat cap is blind to."""
+
+    max_concurrent_swings_per_sector: PositiveInt
+    surface_excess_as_watch_only: bool
+
+
+class Sleeve(Base):
+    target_pct: Percent
+    benchmark: Literal["blend", "spy_total_return"]
+    buckets: list[Literal["etf", "hold", "swing", "option", "cash"]]
+
+
+class Ratchet(Base):
+    """D35: winners raise the floor; losses never pull gains back."""
+
+    enabled: bool
+    cadence: Literal["quarterly"]
+    trigger_excess_points: Percent  # [OPEN] #35
+    sweep_fraction: Fraction  # [OPEN] #36
+    permanent: bool
+    replenish_drawdowns: bool
+
+    @model_validator(mode="after")
+    def _the_asymmetry_is_intact(self):
+        if not 0 < self.sweep_fraction <= 1:
+            raise ValueError(
+                f"sweep_fraction ({self.sweep_fraction}) must be in (0, 1]; sweeping "
+                f"nothing disables the ratchet and sweeping more than the excess would "
+                f"take capital the Growth sleeve never gained"
+            )
+        if self.enabled and self.replenish_drawdowns:
+            raise ValueError(
+                "D35: replenish_drawdowns must stay false while the ratchet is enabled. "
+                "Sweeping gains out while topping losses back up is a one-way valve "
+                "pointed the wrong way — it would ratchet the trading sleeve DOWN in "
+                "good years and refill it in bad ones"
+            )
+        if self.enabled and not self.permanent:
+            raise ValueError("D35: a swept gain is moved permanently, not lent")
+        return self
+
+
+class Sleeves(Base):
+    """D35: the barbell, with separate targets AND separate benchmarks."""
+
+    core: Sleeve
+    growth: Sleeve
+    ratchet: Ratchet
+
+    @model_validator(mode="after")
+    def _targets_total_100_and_buckets_are_partitioned(self):
+        total = self.core.target_pct + self.growth.target_pct
+        if abs(total - 100) > 1e-9:
+            raise ValueError(
+                f"sleeve targets total {total:g}, not 100 — every bucket belongs to "
+                f"exactly one sleeve, so the targets must partition the account"
+            )
+        overlap = set(self.core.buckets) & set(self.growth.buckets)
+        if overlap:
+            raise ValueError(
+                f"buckets {sorted(overlap)} appear in BOTH sleeves; a bucket counted "
+                f"twice would let the ratchet sweep capital to and from itself"
+            )
+        return self
+
+
 class RiskConfig(Base):
     version: PositiveInt
     percent_basis: Literal["current_account_value", "high_water_mark"]
@@ -512,6 +656,10 @@ class RiskConfig(Base):
     exits: Exits
     stable_buckets: StableBuckets
     allocation_targets: AllocationTargets
+    vehicle_by_iv_rank: VehicleByIVRank
+    pyramiding: Pyramiding
+    sector_guard: SectorGuard
+    sleeves: Sleeves
     dividends: Dividends
     cash: Cash
 

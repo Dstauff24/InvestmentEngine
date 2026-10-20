@@ -1,6 +1,6 @@
 # Open Parameters (rebuild baseline, Oct 20 2026)
 
-Config values no decision (D1–D31) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. All were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. D13's quarterly Shadow Book review is where they stop being guesses.
+Config values no decision (D1–D39) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. D13's quarterly Shadow Book review is where they stop being guesses.
 
 Everything NOT tagged `[OPEN]` traces to a decision and is asserted by a named test in `tests/test_config.py`.
 
@@ -51,6 +51,22 @@ Sensitivity: High = changes which ideas surface or how they are sized. Medium = 
 | 29 | `events.forward_days` | `90` | Must exceed the longest recipe horizon (45d) | Event radar depth. | Low |
 | 30 | `events.backward_days` | `7` | Catches actuals landing on known dates | | Low |
 | 31 | `fmp.daily_call_budget` | `250` | D29 free-tier operation | Keeps the fundamentals crawl inside the free plan; raise on upgrade. | Medium |
+
+## Added by the D32–D39 strategy refinements (Oct 20 2026)
+
+These bind layers that **do not exist yet** — scoring, decision, allocation. They
+are validated by the loader so a typo fails at startup, and nothing reads them
+until those layers are built. Their defaults are therefore weaker than rows
+1–31: those at least describe data the engine already handles.
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 32 | `ranking.max_ideas_per_day` | `5` | D33 ranks by percentile and caps the digest; sets no number | How much the digest shows. A reading limit, not a market fact — but set it high and the ranking stops being a filter, set it to 1 and a single bad day's top rank becomes the whole recommendation. | High |
+| 33 | `vehicle_by_iv_rank.iv_vehicle_low` | `30` | D36 defines three bands, no boundaries | Below this the engine BUYS optionality. Too high and it pays up for premium in ordinary vol; too low and the convexity D35 wants never appears. | High |
+| 34 | `vehicle_by_iv_rank.iv_vehicle_high` | `50` | Same | Above this premium SELLING is allowed. The loader rejects `high <= low`, which would erase the shares-by-default middle band. | High |
+| 35 | `sleeves.ratchet.trigger_excess_points` | `3.0` | D35 fixes the ratchet, calls 3 points a judgement | How far Growth may run above its 35% target before gains are swept. Smaller = the floor rises often in small steps; larger = fewer, bigger sweeps and more time spent over-allocated to risk. | High |
+| 36 | `sleeves.ratchet.sweep_fraction` | `0.5` | Same | How much of the excess moves to Core permanently. 1.0 would pin Growth to its target and forfeit compounding inside the sleeve; 0 disables the ratchet, which the loader rejects. | High |
+| 37 | `sentiment_reinstatement.min_sample` | `30` | D32 says "30 or more closed ideas"; the floor is itself a sample-size judgement | How much evidence Sentiment must produce before its weight may be restored toward 20. Too low and noise gets promoted on a lucky streak — which is exactly how the pillar earned its demotion. | Medium |
 
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.
