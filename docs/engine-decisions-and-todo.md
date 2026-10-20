@@ -1,5 +1,5 @@
 # Investment Engine — Decision Log & To-Do Tracker
-**v2.1 (rebuild complete) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
+**v2.2 (gate 1a live, gate 2 live) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
 
 Companion: `CLAUDE.md` (conventions + validated findings), `docs/open-parameters.md`, `docs/REBUILD_KICKOFF.md`.
 
@@ -97,12 +97,49 @@ pinned by tests so they cannot drift into a plausible-looking guess.
 
 ---
 
+## 🔬 WHAT THE FIRST LIVE RUN FOUND (Oct 20, 2026 — `64be4fd`)
+
+Six defects, all the same shape: **something that could not possibly work still
+reported success.** None were findable without real providers; every one is now
+pinned by a test.
+
+| # | Defect | Why it mattered |
+|---|--------|-----------------|
+| 1 | Batched `/stable/quote` is plan-gated (one symbol per call on free) | Universe enrichment died on its first call. Descriptive pass now abandoned wholesale rather than retried per symbol — it feeds no field the D14 filter needs. |
+| 2 | Enrichment treated a systemic provider error as one bad symbol, 225 times | FMP signals a spent allowance with **HTTP 200 + an `Error Message` body**. The blanket `except Exception` logged and carried on, leaving a 22-symbol universe that looked like a legitimate narrow result. Now aborts on the first `FMPAuthError`, plus the 25%/10-sample guard `for_each_symbol` applies and this hand-rolled loop bypassed. |
+| 3 | A spent budget killed the universe job outright | `BudgetExhausted` escaped `fetch_constituents` (caught only `FMPPlanError`), so the last run of the day would destroy a converged universe that the static file + stored volumes rebuild with **zero** calls. |
+| 4 | `fmp_estimates` reported `success / 0 rows` on a CRITICAL job | `v_day_status` certified `day_complete = true` on a snapshot nobody took — the exact silent zero-row success D7/D22/D27 exist to prevent. Also: the plan probe swallowed `BudgetExhausted` into `return False`, reporting "the plan covers it" on a question never put. |
+| 5 | `job_run` recorded `failed` for ANY exception | `job.skip()` before a raise was dead code — **including on the pre-existing plan-gated path, which has been writing failed rows, not the skipped ones the step 7 report claimed.** New explicit `clean_stop` allowlist (not "honour skip() if called", so a job that skips then crashes unrelatedly is still failed). This decides the exit code: a critical `failed` row blocks the day and exits 1; a skipped one leaves `day_complete` false and exits 0 on the known gap. |
+| 6 | **The D14 options gate could never fire** | `schwab_chains` writes `has_options` correctly and the upsert COALESCEs it, but every rebuild constructed candidates with `has_options=None` and **nothing read the column back**, so the gate abstained on every symbol for ever. The writeback was working and no one was reading it. Verified live: the universe now rejects a symbol marked as having no chain (22 -> 21). |
+
+**`extrinsicValue` — the CLAUDE.md finding, re-confirmed and worse.** 5,247 of
+8,214 contracts disagree with `timeValue` (63.9%, up from 48% in September), and
+4,113 report an `extrinsicValue` **larger than their own mark**, which is
+impossible. The worst case names the bug: a Jan-2027 SPY put at strike 50 with
+spot 771.38 is marked 0.01, `timeValue` 0.01, `extrinsicValue` 721.39 — exactly
+`spot - strike`. The field returns distance-from-the-money, not extrinsic value.
+Treat it as unusable, not merely imprecise.
+
+**Honest state of the day's data:** the dev database was wiped mid-session by my
+own integration suite (`tests/dbguard.py` permits destructive runs against a
+test-named database, which this is). Nothing irreplaceable was lost — the D7
+clock starts at gate 4 on the VM, not here.
+
+**Known divergence to watch:** the engine's `api_budget` counter and FMP's own
+accounting are independent. The counter starts each ET day at zero regardless of
+what the provider already served, so a probe run outside the engine makes the
+engine over-optimistic. That is what caused finding 2 to bite. The counter is a
+courtesy guard, not a source of truth; the systemic-abort in finding 2 is the
+real protection.
+
+---
+
 ## 📋 GO-LIVE CHECKLIST (rebuilt)
 
 **Gate 0 — Rebuild the repo. ✅ DONE Oct 20, 2026 (`426cde7`).** All 7 steps rebuilt from this log + CLAUDE.md + the resumed session transcript, each ending in a pushed commit (D30). 658 unit + 74 integration tests green.
-**Gate 1a — Free-tier live.** FMP/Finnhub keys in `.env` (keys still exist in their dashboards); probe confirms `/stable/`; universe from static constituents; events + news + degraded fundamentals running.
+**Gate 1a — Free-tier live. ⚠️ MOSTLY DONE Oct 20, 2026 (`64be4fd`).** Probe confirms `/stable/`, 10/15 usable, the 402s are exactly the known five. Universe builds from static constituents; news ran live (2,598 rows / 22 symbols). **Blocked on quota, not on code:** the free daily allowance was already largely spent when the first live universe run started, so only 22 of 519 symbols got a verified volume. Re-run on a fresh allowance to continue converging (250 -> 500 -> 519). Also learned: **batched `/stable/quote` is plan-gated — one symbol per call on free**, so the descriptive enrichment pass is skipped entirely and the whole budget goes to average volume (the only field the D14 filter needs).
 **Gate 1b — Premium unlock (deferred).** Upgrade → re-probe 15/15 → estimates flips to is_critical → record the estimate-clock start date → universe from API.
-**Gate 2 — Schwab live.** App credentials still exist in the Dev Portal (approvals persist; nothing to re-apply for). Keys into `.env` → `python scripts/schwab_auth.py` (manual flow) → fixture diff against a fresh live chain → `has_options` backfill → universe re-run.
+**Gate 2 — Schwab live. ✅ DONE Oct 20, 2026 (`64be4fd`).** Token written Oct 20, **expires Oct 27** (7-day refresh life); live SPY quote verified. Fixture diff against a fresh live chain: **zero drift in 47 days** — same 20 top-level keys, same 54 contract fields, no renames, no type changes, all four `expirationType` values present (S 2088 / W 4912 / Q 650 / M 564). `has_options` writeback confirmed for all 22 active tickers, **and the D14 gate it arms was found permanently disarmed and fixed** (see below). End-to-end live: schwab_prices 6,094 rows, schwab_chains 2,908 rows, schwab_iv 22 rows.
 **Gate 3 — VM.** Provision (Hetzner/DO), Postgres 16 + Timescale, deploy, `--backfill-actions`, restore-test the backup.
 **Gate 4 — Cron on.** First `day_complete = true`; record the date; the D7 IV clock starts. After gate 4 the engine is collecting, not yet deciding: scoring, recipes, decision layer, Shadow Book, digest are the remaining Phase 1 work.
 
@@ -111,4 +148,5 @@ pinned by tests so they cannot drift into a plausible-looking guess.
 ## 🗒 SESSION NOTES
 - Aug 30 – Sep 3: original build, steps 1–7 complete and live-validated (see CLAUDE.md "Validated API findings" for everything learned). Full detail preserved in the design chat and the prior Claude Code session transcript.
 - Oct 20: loss discovered (unpushed Codespace auto-deleted). D30, D31 adopted. Rebuild package authored: CLAUDE.md, this log v2.0, open-parameters.md, REBUILD_KICKOFF.md.
+- Oct 20 (later): **gate 1a mostly live, gate 2 live (`64be4fd`).** Schwab token written Oct 20, **expires Oct 27**. Chain fixture diff: zero drift in 47 days. Six defects found and fixed by running against real providers — see "WHAT THE FIRST LIVE RUN FOUND". **The estimate-revision clock remains STOPPED**: `/stable/analyst-estimates` is still 402 on this plan, so no snapshot has ever been taken and D7's revision history has not begun. It starts on FMP upgrade day, and that date must be recorded here. Next: fresh FMP allowance -> re-run the universe to convergence, then gate 3 (VM).
 - Oct 20: **rebuild complete through step 7 (`426cde7`).** Reconstructed in one session; everything pushed as it was built. Three things the rebuild got *better* than the original: the FMP call budget is now a shared DB-backed day-level counter rather than per-job caps (two jobs could previously stay within budget and jointly exceed the day); universe enrichment seeds from stored volumes so coverage converges instead of oscillating, and spends leftover budget on the stalest symbols first; and `jobs/daily_close.py` reads `day_complete` from `v_day_status` rather than from its own step results, so a drifting job list cannot produce a false "complete". Next session: gate 1a — keys into `.env`, re-probe FMP, then Schwab auth and the chain fixture diff (gate 2).
