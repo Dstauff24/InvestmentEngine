@@ -22,8 +22,21 @@ import pytest
 from psycopg.rows import dict_row
 
 from core import settings
+from tests.dbguard import assert_safe_database
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _guard_database():
+    """Refuse to wipe anything that is not a scratch database.
+
+    Module-scoped and autouse so it fires before any fixture connects, let
+    alone deletes. See tests/dbguard.py for why the override is not readable
+    from `.env`.
+    """
+    return assert_safe_database(settings.database_url())
+
 
 DAY = date(2026, 10, 20)
 TS = datetime(2026, 10, 20, 20, 0, tzinfo=UTC)
@@ -32,7 +45,9 @@ PREFIX = "ZZTEST"
 
 @pytest.fixture
 def conn():
-    with psycopg.connect(settings.database_url(), row_factory=dict_row) as c:
+    dsn = settings.database_url()
+    assert_safe_database(dsn)  # re-checked here: nothing connects unguarded
+    with psycopg.connect(dsn, row_factory=dict_row) as c:
         c.autocommit = True
         yield c
 
