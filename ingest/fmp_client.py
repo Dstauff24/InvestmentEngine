@@ -37,6 +37,7 @@ from tenacity import (
 )
 
 from core import clock, netguard, settings
+from core.budget import BudgetExhausted, DayBudget
 from core.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,12 @@ class FMPAuthError(FMPError):
     """Bad or exhausted API key. Retrying will not help."""
 
 
+# Re-exported so call sites can catch budget exhaustion without importing
+# core.budget directly. It is deliberately NOT an FMPError subclass: it is not a
+# provider problem, and the retry decorator must not treat it as transient.
+FMPBudgetExhausted = BudgetExhausted
+
+
 class FMPPlanError(FMPAuthError):
     """HTTP 402: the endpoint exists but the plan does not cover it.
 
@@ -77,11 +84,16 @@ class FMPClient:
         api_key: str | None = None,
         base_url: str | None = None,
         limiter: RateLimiter | None = None,
+        budget: DayBudget | None = None,
         session: requests.Session | None = None,
     ) -> None:
         self.api_key = api_key or settings.fmp_api_key()
         self.base_url = (base_url or settings.fmp_base_url()).rstrip("/")
         self.limiter = limiter or RateLimiter(settings.fmp_rate_limit(), 60.0, name="fmp")
+        # D29: the day-level budget is drawn HERE so every call site is covered
+        # automatically — the probe, universe enrichment, fundamentals,
+        # estimates, events. Nothing has to remember to opt in.
+        self.budget = budget if budget is not None else DayBudget.for_fmp()
         self.session = session or requests.Session()
 
     # ── transport ───────────────────────────────────────────────────────────
@@ -94,9 +106,12 @@ class FMPClient:
     )
     def get(self, path: str, **params: Any) -> Any:
         """GET an FMP endpoint. `path` is everything after the base URL."""
-        # D27: the gate sits ahead of the limiter and the session, so a blocked
-        # call consumes no rate-limit slot and opens no socket.
+        # Order matters. D27 consent first: a blocked call must consume no
+        # budget, no rate-limit slot and no socket. Then the day budget, because
+        # a call that fails still spent quota at the provider, so it has to be
+        # reserved BEFORE the request rather than counted after.
         netguard.require_live_calls("FMP", path)
+        self.budget.spend_or_raise(1)
         self.limiter.acquire()
 
         url = f"{self.base_url}/{path.lstrip('/')}"

@@ -684,13 +684,63 @@ def test_an_event_radar_shorter_than_the_longest_horizon_is_rejected(tmp_path):
 
 
 def test_a_call_budget_too_small_for_one_symbol_is_rejected(tmp_path):
-    """D29: fundamentals cost 5 calls/symbol; below that nothing could refresh."""
+    """D29: fundamentals cost 5 calls/symbol; below that nothing could refresh.
+
+    4 rather than 3, so this trips the budget-floor rule rather than the
+    reserve rule (3 would collide with reserve_for_events=3 first).
+    """
     expect_error(
         tmp_path,
         "universe.yaml",
-        mutate("universe.yaml", ["fmp", "daily_call_budget"], 3),
+        mutate("universe.yaml", ["fmp", "daily_call_budget"], 4),
         "no symbol could ever be refreshed",
     )
+
+
+def test_the_events_reserve_matches_the_number_of_calendar_endpoints():
+    """Not an [OPEN] guess: it is exactly the calendars the events job calls.
+
+    If a fourth market-wide calendar is added, this fails and the reservation
+    has to move with it — otherwise the event radar silently loses a call to a
+    fundamentals crawl that ran earlier in the evening.
+    """
+    import inspect
+
+    from ingest import fmp_client
+
+    calendars = [
+        name
+        for name, _ in inspect.getmembers(fmp_client.FMPClient, inspect.isfunction)
+        if name.endswith("_calendar")
+    ]
+    assert sorted(calendars) == ["dividend_calendar", "earnings_calendar", "split_calendar"]
+    assert cfg.universe().fmp.reserve_for_events == len(calendars) == 3
+
+
+def test_a_reserve_that_consumes_the_whole_budget_is_rejected(tmp_path):
+    expect_error(
+        tmp_path,
+        "universe.yaml",
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 250),
+        "must be below",
+    )
+
+
+def test_a_reserve_above_the_budget_is_rejected(tmp_path):
+    expect_error(
+        tmp_path,
+        "universe.yaml",
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 500),
+        "must be below",
+    )
+
+
+def test_a_zero_reserve_is_allowed(tmp_path):
+    """On a paid plan the reservation stops mattering; zero must stay legal."""
+    data = mutate("universe.yaml", ["fmp", "reserve_for_events"], 0)
+    (tmp_path / "universe.yaml").write_text(yaml.safe_dump(data))
+    loaded = cfg.load_file("universe.yaml", config_dir=tmp_path)
+    assert loaded.fmp.reserve_for_events == 0
 
 
 def test_empty_estimate_period_types_are_rejected(tmp_path):

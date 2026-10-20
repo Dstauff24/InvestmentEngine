@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 
 from core import clock, config, db
+from core.budget import BudgetExhausted
 from core.jobs import job_run
 from ingest.fmp_client import FMPClient, FMPPlanError
 
@@ -394,6 +395,8 @@ def enrich_with_liquidity(
     candidates: list[Candidate],
     *,
     lookback_days: int,
+    # Kept for tests that want a hard local cap; production relies on the
+    # SHARED day budget enforced inside FMPClient.get() (D29).
     call_budget: int | None = None,
     known_volumes: Mapping[str, int] | None = None,
     volume_asof: Mapping[str, date] | None = None,
@@ -407,11 +410,12 @@ def enrich_with_liquidity(
     `lookback_days` average needs one historical call per symbol, because FMP's
     own `avgVolume` uses an undocumented window and D14 specifies 20 sessions.
 
-    `call_budget` caps the second pass (D29). Without `known_volumes` that is
-    destructive on the free tier: 519 symbols against a 250-call budget would
-    leave 269 with `avg_volume=None`, the filter would reject them, and the next
-    run would do the same to a different 269 — the universe would oscillate
-    instead of converging.
+    The pass stops when the SHARED day budget is exhausted (D29) — the client
+    raises on an empty grant, so this does not carry its own cap. Without
+    `known_volumes` that is destructive on the free tier: 519 symbols against a
+    250-call budget would leave 269 with `avg_volume=None`, the filter would
+    reject them, and the next run would do the same to a different 269 — the
+    universe would oscillate instead of converging.
 
     So `known_volumes` seeds each candidate from what `tickers` already holds,
     and the budgeted pass visits UNKNOWN symbols first. Successive runs then
@@ -475,27 +479,18 @@ def enrich_with_liquidity(
         )
 
     spent = 0
+    declined = 0
     for symbol in [*unknown, *refresh]:
         if call_budget is not None and spent >= call_budget:
-            still_unknown = sum(1 for c in by_symbol.values() if c.avg_volume is None)
-            if still_unknown:
-                log.warning(
-                    "stopped volume lookups after %d calls (fmp.daily_call_budget=%s). "
-                    "%d symbol(s) still have no volume data and will be filtered out; "
-                    "the next run prioritises them, so coverage expands each time.",
-                    spent,
-                    call_budget,
-                    still_unknown,
-                )
-            else:
-                log.info(
-                    "volume budget of %s calls exhausted while refreshing already-known "
-                    "symbols; every symbol has a volume, so nothing is filtered out",
-                    call_budget,
-                )
+            declined = len(unknown) + len(refresh) - spent
             break
         try:
             bars = client.daily_bars(symbol, days=lookback_days)
+        except BudgetExhausted as exc:
+            # DECLINED SPEND, not a failure (D29). Stop cleanly and report.
+            declined = len(unknown) + len(refresh) - spent
+            log.info("volume lookups stopped on the shared day budget: %s", exc)
+            break
         except Exception as exc:  # one bad symbol must not kill the universe
             log.warning("volume lookup failed for %s: %s", symbol, exc)
             if on_error:
@@ -512,6 +507,24 @@ def enrich_with_liquidity(
             by_symbol[symbol] = replace(by_symbol[symbol], avg_volume=fresh, volume_asof=today)
         elif by_symbol[symbol].avg_volume is None:
             by_symbol[symbol] = replace(by_symbol[symbol], avg_volume=None)
+
+    if declined:
+        still_unknown = sum(1 for c in by_symbol.values() if c.avg_volume is None)
+        if still_unknown:
+            log.warning(
+                "stopped volume lookups after %d calls; %d symbol(s) still have no volume "
+                "data and will be filtered out. The next run prioritises them, so coverage "
+                "expands each time (%d lookups declined today).",
+                spent,
+                still_unknown,
+                declined,
+            )
+        else:
+            log.info(
+                "budget reached while refreshing already-known symbols (%d declined); every "
+                "symbol has a volume, so nothing is filtered out",
+                declined,
+            )
 
     return sorted(by_symbol.values(), key=lambda c: c.symbol)
 
@@ -640,7 +653,6 @@ def build_universe(
         client,
         candidates,
         lookback_days=cfg.liquidity.avg_volume_lookback_days,
-        call_budget=cfg.fmp.daily_call_budget,
         **dict(zip(("known_volumes", "volume_asof"), stored_volumes(), strict=True)),
         today=day,
     )

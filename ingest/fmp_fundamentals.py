@@ -33,6 +33,7 @@ from datetime import date
 from functools import partial
 
 from core import clock, config, db
+from core.budget import BudgetExhausted
 from core.jobs import job_run
 from ingest.fmp_client import CALLS_PER_SYMBOL_FUNDAMENTALS, FMPClient, FMPPlanError
 from ingest.runner import as_float, as_int, for_each_symbol, safe_ratio
@@ -332,21 +333,17 @@ def run(
         else stale_symbols(universe, refresh_after_days=scope.refresh_after_days)
     )
 
-    # D29: each symbol costs CALLS_PER_SYMBOL_FUNDAMENTALS x 2 period types.
-    per_symbol = CALLS_PER_SYMBOL_FUNDAMENTALS * 2
-    affordable = max(1, cfg.fmp.daily_call_budget // per_symbol)
-    if len(targets) > affordable:
-        log.warning(
-            "%d symbol(s) are stale but the daily budget (%d calls) affords %d at "
-            "%d calls each; the rest wait for the next run",
-            len(targets),
-            cfg.fmp.daily_call_budget,
-            affordable,
-            per_symbol,
-        )
-        targets = targets[:affordable]
-
-    log.info("fundamentals: refreshing %d of %d symbols", len(targets), len(universe))
+    # No local cap: the SHARED day budget is enforced inside FMPClient.get()
+    # (D29), so a symbol simply stops being affordable mid-run and the loop
+    # reports declined spend. A per-job cap here was the bug — two jobs could
+    # each stay "within budget" and jointly blow the day.
+    per_symbol = CALLS_PER_SYMBOL_FUNDAMENTALS * len(("quarter", "annual"))
+    log.info(
+        "fundamentals: %d of %d symbols are stale (~%d calls each)",
+        len(targets),
+        len(universe),
+        per_symbol,
+    )
 
     with job_run(JOB_NAME, session_date=clock.session_date(), triggered_by="manual") as job:
         if not targets:
@@ -357,13 +354,23 @@ def run(
             lambda s: load_symbol(client, s, scope=scope),
             run=job,
             label="fundamentals",
+            stop_on=BudgetExhausted,
         )
         job.note(
             failed_symbols=sorted(outcome.failed)[:50],
-            refreshed=len(targets),
+            refreshed=len(outcome.ok),
+            stale=len(targets),
+            declined_spend=outcome.declined,
             universe=len(universe),
             unavailable_endpoints=unavailable_endpoints(),
         )
+        if outcome.declined:
+            log.warning(
+                "stopped on the shared FMP day budget with %d of %d stale symbol(s) "
+                "unrefreshed; they are picked up on the next run (D29)",
+                outcome.declined,
+                len(targets),
+            )
         if _UNAVAILABLE:
             log.warning(
                 "wrote fundamentals WITHOUT %s; valuation and quality columns are NULL",

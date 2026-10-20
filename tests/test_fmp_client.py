@@ -14,6 +14,7 @@ from datetime import date
 
 import pytest
 
+from core.budget import NullBudget
 from core.ratelimit import NullRateLimiter
 from ingest.fmp_client import (
     FMPAuthError,
@@ -79,12 +80,19 @@ def no_retry_sleep(monkeypatch):
 
 
 def client(*responses) -> tuple[FMPClient, FakeSession]:
+    """A client with no rate limit, no day budget and a recording session.
+
+    `NullBudget` keeps these tests DB-free: the real DayBudget writes to
+    `api_budget` on every call, which is correct in production and wrong in a
+    unit test. tests/test_budget_db.py covers the real one.
+    """
     session = FakeSession(*responses)
     return (
         FMPClient(
             api_key="TESTKEY",
             base_url="https://fmp.example",
             limiter=NullRateLimiter(),
+            budget=NullBudget(),
             session=session,
         ),
         session,

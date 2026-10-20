@@ -698,6 +698,37 @@ CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts (created_at DESC);
 
 
 -- ============================================================================
+-- 13. API BUDGET  (relational)  — day-level provider spend (D29)
+-- ============================================================================
+
+-- The free-tier FMP budget is a DAY-level limit shared by every call site, and
+-- the jobs run as separate `python -m` invocations from cron — so the counter
+-- has to survive process boundaries. Enforcing it per job instead would let two
+-- jobs in one evening jointly exceed the budget while each believed it was
+-- within bounds.
+--
+-- Keyed on the ET session date (core.clock), so it resets on the trading-day
+-- boundary rather than at UTC midnight.
+-- Added by db/migrations/002_add_api_budget.sql.
+CREATE TABLE IF NOT EXISTS api_budget (
+    provider       TEXT NOT NULL,
+    session_date   DATE NOT NULL,
+    calls_spent    INTEGER NOT NULL DEFAULT 0,
+    -- Calls a job asked for and did not get. Recorded so a run that stopped on
+    -- budget can REPORT the shortfall instead of looking like a clean run that
+    -- happened to do less work.
+    calls_declined INTEGER NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT pk_api_budget PRIMARY KEY (provider, session_date),
+    CONSTRAINT ck_api_budget_nonneg CHECK (calls_spent >= 0 AND calls_declined >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS ix_api_budget_date ON api_budget (session_date DESC);
+
+
+-- ============================================================================
 -- 13. JOB RUNS  (relational)  — the audit trail every job writes to
 -- ============================================================================
 

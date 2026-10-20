@@ -103,3 +103,10 @@ news:
 # so a day's spend stays inside the plan. Raise this on upgrade.
 fmp:
   daily_call_budget: 250       # [OPEN] #31
+  # Calls held back from the general pool for the market-wide calendars. NOT an
+  # [OPEN] guess: it is exactly the number of calendar endpoints the events job
+  # calls (earnings, dividends, splits), and a named test asserts it stays in
+  # step with the client. The event radar is what keeps the engine from opening
+  # a position blind to earnings (D19/Pillar C), so it must never be crowded out
+  # by a fundamentals crawl that ran earlier in the evening.
+  reserve_for_events: 3

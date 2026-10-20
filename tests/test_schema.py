@@ -46,6 +46,17 @@ def test_expected_hypertables_match_schema():
     assert set(CREATE_HYPERTABLE.findall(SCHEMA)) == set(EXPECTED_HYPERTABLES)
 
 
+def test_the_api_budget_table_is_keyed_per_provider_and_day():
+    """D29: the counter must be shared across processes and roll over with the
+    ET trading day, so its key is (provider, session_date) — not a global row
+    and not a UTC timestamp."""
+    pk = re.search(r"CONSTRAINT pk_api_budget\s*\n?\s*PRIMARY KEY \(([^)]*)\)", SCHEMA)
+    assert pk
+    assert {p.strip() for p in pk.group(1).split(",")} == {"provider", "session_date"}
+    body = _table_body("api_budget")
+    assert "calls_declined" in body, "a declined-spend count is needed for reporting"
+
+
 def test_expected_views_match_schema():
     assert set(CREATE_VIEW.findall(SCHEMA)) == set(EXPECTED_VIEWS)
 

@@ -30,6 +30,7 @@ MIGRATIONS_DIR = DB_DIR / "migrations"
 # half-built database.
 EXPECTED_TABLES = [
     "alerts",
+    "api_budget",
     "corporate_actions",
     "estimate_snapshots",
     "events",

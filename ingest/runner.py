@@ -34,6 +34,11 @@ class SymbolOutcome:
     ok: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     rows: int = 0
+    # Symbols never attempted because the run stopped cleanly (day budget
+    # exhausted, D29). DECLINED is not FAILED: nothing went wrong, there was
+    # simply no quota left, and the work resumes on the next run.
+    declined: int = 0
+    stopped_early: str | None = None
 
     @property
     def attempted(self) -> int:
@@ -56,6 +61,7 @@ def for_each_symbol(
     label: str = "symbols",
     max_fail_ratio: float = DEFAULT_MAX_FAIL_RATIO,
     min_sample: int = MIN_SAMPLE_FOR_RATIO,
+    stop_on: type[BaseException] | tuple[type[BaseException], ...] | None = None,
     progress_every: int = 100,
 ) -> SymbolOutcome:
     """Call `handler(symbol)` for each symbol; it returns the rows it wrote.
@@ -69,12 +75,29 @@ def for_each_symbol(
       * more than `max_fail_ratio` of at least `min_sample` symbols failed.
         Small runs are exempt from THIS rule only: on a three-symbol debug run a
         single failure is a bad symbol, not a broken provider.
+
+    `stop_on` names exceptions that end the loop CLEANLY rather than counting as
+    a failure — currently `BudgetExhausted` (D29). The unvisited symbols land in
+    `outcome.declined`, and neither guard above fires, because running out of
+    quota is not evidence that anything is broken.
     """
     outcome = SymbolOutcome()
+    remaining = list(symbols)
+    # An empty tuple in an `except` clause never matches, which is exactly the
+    # behaviour we want when no clean-stop exception was named.
+    stop_types: tuple[type[BaseException], ...] = (
+        () if stop_on is None else stop_on if isinstance(stop_on, tuple) else (stop_on,)
+    )
 
     for index, symbol in enumerate(symbols, start=1):
+        remaining.remove(symbol)
         try:
             written = handler(symbol)
+        except stop_types as exc:
+            outcome.declined = len(remaining) + 1  # this symbol was not written either
+            outcome.stopped_early = f"{type(exc).__name__}: {exc}"
+            log.info("%s: stopped cleanly after %d symbol(s): %s", label, index - 1, exc)
+            break
         except Exception as exc:  # one bad symbol must not stop the other 499
             log.warning("%s: %s failed: %s", label, symbol, exc)
             outcome.failed[symbol] = f"{type(exc).__name__}: {exc}"
@@ -112,10 +135,11 @@ def for_each_symbol(
         )
 
     log.info(
-        "%s: %d ok, %d failed, %d rows",
+        "%s: %d ok, %d failed, %d declined, %d rows",
         label,
         len(outcome.ok),
         len(outcome.failed),
+        outcome.declined,
         outcome.rows,
     )
     return outcome

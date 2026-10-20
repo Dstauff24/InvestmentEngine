@@ -637,6 +637,17 @@ class NewsScope(Base):
 
 class FmpBudget(Base):
     daily_call_budget: PositiveInt
+    reserve_for_events: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def _reserve_leaves_room(self):
+        if self.reserve_for_events >= self.daily_call_budget:
+            raise ValueError(
+                f"fmp.reserve_for_events ({self.reserve_for_events}) must be below "
+                f"daily_call_budget ({self.daily_call_budget}); otherwise no other job "
+                f"could ever spend a call"
+            )
+        return self
 
 
 class UniverseConfig(Base):
