@@ -692,3 +692,95 @@ def test_ingestion_scope_comes_from_config():
     assert u.events.forward_days == 90
     assert u.estimates.quarters_ahead == 4
     assert u.fmp.daily_call_budget == 250
+
+
+# ── every FMP-budget job must stop cleanly on a spent budget ──────────────────
+
+
+def test_fmp_budget_jobs_pass_stop_on_budget_exhausted():
+    """A spent day budget is declined spend (D29), never a symbol failure.
+
+    Found live on 2026-10-20: `fmp_fundamentals` passed `stop_on=BudgetExhausted`
+    and `fmp_estimates` did not, so when the shared counter ran dry every symbol
+    "failed", `for_each_symbol` raised TooManyFailures on its all-failed rule,
+    and a CRITICAL job failed for a reason the design classifies as normal —
+    blocking `day_complete` for the rest of the day.
+
+    Static, not behavioural: this must hold for every current and future module
+    that spends FMP budget inside `for_each_symbol`, and a per-module runtime
+    test would be forgotten for the next one added.
+    """
+    import ast
+    from pathlib import Path
+
+    # Modules whose `for_each_symbol` handler draws on the shared FMP budget.
+    # Schwab and Finnhub are excluded: they have their own rate limiters and
+    # never raise BudgetExhausted, so requiring it there would be cargo cult.
+    fmp_budget_modules = [
+        "ingest/fmp_estimates.py",
+        "ingest/fmp_fundamentals.py",
+        "ingest/fmp_events.py",
+    ]
+
+    missing = []
+    for rel in fmp_budget_modules:
+        tree = ast.parse(Path(rel).read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "for_each_symbol"
+            ):
+                kwargs = {kw.arg for kw in node.keywords}
+                if "stop_on" not in kwargs:
+                    missing.append(f"{rel}:{node.lineno}")
+
+    assert not missing, (
+        "for_each_symbol call(s) spending FMP budget without "
+        f"stop_on=BudgetExhausted: {missing}. A spent budget would be counted as "
+        "symbol failures and fail the job."
+    )
+
+
+# ── the estimates plan probe must not answer a question it could not ask ──────
+
+
+def test_plan_probe_propagates_budget_exhaustion_instead_of_answering_false():
+    """ "Could not afford to ask" is not "asked, and the plan covers it".
+
+    Found live on 2026-10-20: the probe's blanket `except Exception: return False`
+    swallowed BudgetExhausted, so with the day's allowance gone it reported
+    "not plan-gated" on the strength of a question never put. The job then stayed
+    CRITICAL and failed for a reason that had nothing to do with the plan.
+    """
+    from core.budget import BudgetExhausted
+    from ingest.fmp_estimates import plan_blocks_estimates
+
+    class Spent:
+        def analyst_estimates(self, *a, **k):
+            raise BudgetExhausted("fmp daily call budget is exhausted")
+
+    with pytest.raises(BudgetExhausted):
+        plan_blocks_estimates(Spent())
+
+
+def test_plan_probe_still_reports_false_for_ordinary_errors():
+    """Only a 402 is a billing answer; a transient error keeps the job critical."""
+    from ingest.fmp_estimates import plan_blocks_estimates
+
+    class Broken:
+        def analyst_estimates(self, *a, **k):
+            raise RuntimeError("connection reset")
+
+    assert plan_blocks_estimates(Broken()) is False
+
+
+def test_plan_probe_reports_true_only_on_402():
+    from ingest.fmp_client import FMPPlanError
+    from ingest.fmp_estimates import plan_blocks_estimates
+
+    class Gated:
+        def analyst_estimates(self, *a, **k):
+            raise FMPPlanError("402")
+
+    assert plan_blocks_estimates(Gated()) is True

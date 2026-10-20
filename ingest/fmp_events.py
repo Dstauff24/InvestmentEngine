@@ -33,6 +33,7 @@ import sys
 from datetime import date, timedelta
 
 from core import clock, config, db
+from core.budget import BudgetExhausted
 from core.jobs import job_run
 from ingest.fmp_client import FMPClient
 from ingest.runner import as_float, for_each_symbol
@@ -288,7 +289,12 @@ def run(client: FMPClient | None = None) -> dict[str, int]:
 
     counts = {"earnings": 0, "dividends": 0, "splits": 0, "actions": 0, "cuts": 0}
 
-    with job_run(JOB_NAME, session_date=today, triggered_by="manual") as job:
+    # A spent day budget is declined spend, not a failure (D29), so the row
+    # records as skipped rather than leaving a plan-gated free tier showing a
+    # failed events job every single day.
+    with job_run(
+        JOB_NAME, session_date=today, triggered_by="manual", clean_stop=BudgetExhausted
+    ) as job:
         earnings = parse_earnings(client.earnings_calendar(start, end), universe)
         counts["earnings"] = db.executemany(UPSERT_EVENT, earnings)
 
@@ -328,7 +334,9 @@ def backfill_actions(client: FMPClient | None = None, *, symbols: list[str] | No
     with job_run(
         BACKFILL_JOB_NAME, session_date=clock.session_date(), triggered_by="manual"
     ) as job:
-        outcome = for_each_symbol(universe, one, run=job, label="corporate actions")
+        outcome = for_each_symbol(
+            universe, one, run=job, label="corporate actions", stop_on=BudgetExhausted
+        )
         cuts = flag_dividend_cuts()
         job.note(failed_symbols=sorted(outcome.failed)[:50], dividend_cuts_flagged=cuts)
     return outcome.rows

@@ -32,6 +32,7 @@ import sys
 from datetime import date
 
 from core import clock, config, db
+from core.budget import BudgetExhausted
 from core.jobs import job_run
 from ingest.fmp_client import FMPClient, FMPPlanError
 from ingest.runner import as_float, as_int, for_each_symbol
@@ -164,6 +165,12 @@ def plan_blocks_estimates(client: FMPClient) -> bool:
         client.analyst_estimates("AAPL", period="quarter", limit=1)
     except FMPPlanError:
         return True
+    except BudgetExhausted:
+        # NOT a billing answer — we could not afford to ask. Swallowing this
+        # into `return False` would report "the plan covers it" on the strength
+        # of a question never put, leaving the job critical and about to fail
+        # for a reason that has nothing to do with the plan. The caller decides.
+        raise
     except Exception:
         return False
     return False
@@ -188,9 +195,39 @@ def run(client: FMPClient | None = None, *, symbols: list[str] | None = None) ->
     # holding `day_complete` hostage to a billing decision would mean the chain
     # snapshot clock could never start either. The flag flips back the moment a
     # probe passes, which is also the day the estimate-revision clock starts.
-    blocked = plan_blocks_estimates(client)
+    try:
+        blocked = plan_blocks_estimates(client)
+    except BudgetExhausted as exc:
+        # The day's FMP allowance is gone, so this job cannot run AT ALL — it
+        # cannot even find out whether it is allowed to.
+        #
+        # Recorded CRITICAL and skipped, unlike the plan-gated case. The
+        # difference is knowledge, not inconvenience: a confirmed 402 is a
+        # standing answer that the snapshot is unobtainable on this plan, so
+        # treating it as a non-gate is a decision already taken (D29). A spent
+        # budget tells us only that we could not ask today, and defaulting
+        # "don't know" to "not a gate" would let a genuinely broken estimates
+        # job certify a complete day. A skipped critical job keeps
+        # `day_complete` false while the orchestrator still exits 0 on the
+        # known gap, which is the honest reading: nothing is broken, and the
+        # snapshot was not taken.
+        with job_run(
+            JOB_NAME,
+            session_date=day,
+            is_critical=True,
+            triggered_by="manual",
+            clean_stop=BudgetExhausted,
+        ) as job:
+            job.skip(f"no FMP budget left to probe or snapshot estimates: {exc}")
+        raise
 
-    with job_run(JOB_NAME, session_date=day, is_critical=not blocked, triggered_by="manual") as job:
+    with job_run(
+        JOB_NAME,
+        session_date=day,
+        is_critical=not blocked,
+        triggered_by="manual",
+        clean_stop=(EstimatesPlanBlocked, BudgetExhausted),
+    ) as job:
         if blocked:
             job.skip("analyst-estimates is plan-gated (D29); estimate clock not started")
             raise EstimatesPlanBlocked(
@@ -205,8 +242,30 @@ def run(client: FMPClient | None = None, *, symbols: list[str] | None = None) ->
             lambda s: snapshot_symbol(client, s, snapshot_date=day, scope=scope),
             run=job,
             label="estimates",
+            # D29: a spent day budget is DECLINED SPEND, not 500 bad symbols.
+            # Without this the shared counter running dry makes every symbol
+            # "fail", `for_each_symbol` raises TooManyFailures on the all-failed
+            # rule, and a critical job fails for a reason the design calls
+            # normal — which blocks `day_complete` for the whole day.
+            stop_on=BudgetExhausted,
         )
         job.note(failed_symbols=sorted(outcome.failed)[:50], snapshot_date=str(day))
+
+        if outcome.stopped_early and not outcome.rows:
+            # Stopped cleanly on the budget before writing a single snapshot.
+            # `stop_on` keeps that from being counted as N symbol failures (D29),
+            # but the job still collected NOTHING, and a critical job reporting
+            # `success / 0 rows` is the silent zero-row success the whole design
+            # is built to prevent — `v_day_status` would then certify a
+            # `day_complete` that rests on a snapshot nobody took.
+            job.skip(f"no estimates written: {outcome.stopped_early}")
+            raise BudgetExhausted(
+                f"estimates stopped on the FMP day budget before writing anything "
+                f"({outcome.declined} symbol(s) declined). Treated as a known gap, "
+                f"not a failure (D29) — but the day is NOT complete, because this "
+                f"snapshot was not taken."
+            )
+
     return outcome.rows
 
 

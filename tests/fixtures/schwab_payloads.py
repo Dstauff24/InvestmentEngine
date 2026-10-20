@@ -6,6 +6,13 @@ parser reads was confirmed present and correctly spelled — there were no
 renames. What the diff DID find is recorded here so the next reader does not
 re-learn it:
 
+RE-VALIDATED 2026-10-20 against a fresh live SPY chain (8,214 contracts, 23
+expirations, spot 771.38). ZERO DRIFT in 47 days: same 20 top-level keys, same
+54 contract fields, no renames, no type changes, all four `expirationType`
+values still present (S 2088, W 4912, Q 650, M 564). The two findings below
+both still hold, and the `extrinsicValue` defect has got WORSE in a way that
+reveals what the field actually computes — see below.
+
   * `expirationType` has FOUR values, not the three the docs imply: 'S' standard
     monthly (third Friday), 'W' weekly, 'Q' quarter-end, and **'M' MONTH-END**.
     'M' reads like "monthly" and is not — month-end lands on whatever weekday it
@@ -19,6 +26,14 @@ re-learn it:
     `extrinsicValue` with THE SAME WRONGNESS the real payload has, pinned by
     regression test, so a future edit that "helpfully" switches to the
     better-named field fails.
+
+    2026-10-20 re-check: 5,247 of 8,214 contracts disagree (63.9%, up from 48%),
+    and 4,113 of them report an `extrinsicValue` LARGER THAN THEIR OWN MARK,
+    which is arithmetically impossible for extrinsic value. The worst case names
+    the bug outright: a Jan-2027 PUT at strike 50 with spot 771.38 is marked 0.01
+    with `timeValue` 0.01, and reports `extrinsicValue` 721.39 — that is
+    `spot - strike` to the cent. The field is returning distance-from-the-money,
+    not extrinsic value. Treat it as unusable, not merely imprecise.
   * `volatility` is a PERCENT and can be garbage on illiquid contracts — the
     live chain ranged 7.5 to 2473, median 21.6. Nothing above 300 survived the
     D22 filter (they live in 0-DTE weeklies and far strikes), so no clamp is

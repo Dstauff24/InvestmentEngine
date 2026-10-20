@@ -95,23 +95,52 @@ def job_run(
     session_date: date | None = None,
     is_critical: bool = False,
     triggered_by: str = "manual",
+    clean_stop: type[BaseException] | tuple[type[BaseException], ...] = (),
 ) -> Iterator[JobRun]:
-    """Open a `job_runs` row, yield a handle, and ALWAYS close the row."""
+    """Open a `job_runs` row, yield a handle, and ALWAYS close the row.
+
+    `clean_stop` names exceptions that mean "this job stopped for a reason we
+    already decided to accept" — a plan-gated endpoint, a spent day budget —
+    and records the row as SKIPPED rather than failed, while still re-raising
+    so the caller sees it.
+
+    It is an explicit allowlist rather than "honour `skip()` if it was called",
+    because a job that calls `skip()` and then crashes for an unrelated reason
+    must still be recorded as failed. Naming the types keeps a real bug from
+    inheriting a skip's immunity.
+
+    This matters past bookkeeping: `failed_critical_jobs()` reads this column,
+    and a critical job recorded `failed` is reported as BLOCKING the day, which
+    exits 1. A skipped critical job leaves `day_complete` false — the snapshot
+    genuinely was not taken — but lets the orchestrator exit 0 on a gap it
+    already knows about.
+    """
     day = session_date or clock.session_date()
     run_id = _start(job_name, day, is_critical=is_critical, triggered_by=triggered_by)
     run = JobRun(run_id, job_name, day)
+    stop_types: tuple[type[BaseException], ...] = (
+        clean_stop if isinstance(clean_stop, tuple) else (clean_stop,)
+    )
     try:
         yield run
     except BaseException as exc:
         # BaseException, not Exception: a KeyboardInterrupt or a SystemExit must
         # still close the row. An unattended job that leaves 'running' behind
         # wedges every later run of itself via uq_job_runs_inflight.
-        _finish(
-            run,
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
-            details={**run.details, "traceback": traceback.format_exc()[-4000:]},
-        )
+        if stop_types and isinstance(exc, stop_types):
+            _finish(
+                run,
+                status="skipped",
+                error=run._skipped_reason or f"{type(exc).__name__}: {exc}",
+                details=run.details,
+            )
+        else:
+            _finish(
+                run,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+                details={**run.details, "traceback": traceback.format_exc()[-4000:]},
+            )
         raise
     else:
         _finish(run, status=run.status, error=run._skipped_reason, details=run.details)

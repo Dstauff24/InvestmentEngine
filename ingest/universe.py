@@ -34,7 +34,8 @@ from datetime import date
 from core import clock, config, db
 from core.budget import BudgetExhausted
 from core.jobs import job_run
-from ingest.fmp_client import FMPClient, FMPPlanError
+from ingest.fmp_client import FMPAuthError, FMPClient, FMPPlanError
+from ingest.runner import DEFAULT_MAX_FAIL_RATIO, MIN_SAMPLE_FOR_RATIO
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,22 @@ STATIC_FILE_STALE_AFTER_DAYS = 120
 
 # Quote endpoint accepts a comma-separated batch; this many per call.
 QUOTE_BATCH_SIZE = 100
+
+# Set when the plan turns out not to cover BATCHED quotes (free tier allows one
+# symbol per call). Module-level like `fmp_fundamentals._UNAVAILABLE`, for the
+# same reason: the discovery happens deep in a loop and the job report needs it.
+_BATCH_QUOTES_GATED = False
+
+
+def batch_quotes_gated() -> bool:
+    """Did this process find `/stable/quote` to be single-symbol-only?"""
+    return _BATCH_QUOTES_GATED
+
+
+def reset_quote_availability() -> None:
+    """Forget what was discovered. For tests."""
+    global _BATCH_QUOTES_GATED
+    _BATCH_QUOTES_GATED = False
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -341,10 +358,15 @@ def fetch_constituents(
             ndx = client.nasdaq100_constituents() if cfg.sources.nasdaq100 else []
             log.info("constituents from FMP: sp500=%d nasdaq100=%d", len(sp500), len(ndx))
             return sp500, ndx, "fmp"
-        except FMPPlanError as exc:
+        except (FMPPlanError, BudgetExhausted) as exc:
+            # BudgetExhausted belongs here with the 402: both mean "FMP will not
+            # answer this today", and a converged universe can be rebuilt from
+            # the static file plus the volumes already in `tickers` without
+            # spending a single call. Failing the job because our OWN budget is
+            # spent would make the last run of the day destroy the universe.
             if not cfg.sources.allow_static_fallback:
                 raise
-            log.warning("FMP constituents are plan-gated (%s); using the static file", exc)
+            log.warning("FMP constituents unavailable (%s); using the static file", exc)
 
     if not cfg.sources.allow_static_fallback and static_requested and not offline:
         raise UniverseError("static fallback is disabled in config but FMP is unavailable")
@@ -400,6 +422,7 @@ def enrich_with_liquidity(
     call_budget: int | None = None,
     known_volumes: Mapping[str, int] | None = None,
     volume_asof: Mapping[str, date] | None = None,
+    options_flags: Mapping[str, bool] | None = None,
     today: date | None = None,
     on_error: Callable[[str, Exception], None] | None = None,
 ) -> list[Candidate]:
@@ -431,33 +454,68 @@ def enrich_with_liquidity(
     """
     known_volumes = known_volumes or {}
     volume_asof = volume_asof or {}
+    options_flags = options_flags or {}
     today = today or clock.session_date()
 
     by_symbol: dict[str, Candidate] = {}
     for c in candidates:
-        if c.avg_volume is not None:
-            by_symbol[c.symbol] = c
+        # `has_options` is seeded from the database for EVERY candidate,
+        # whether or not its volume is already known: it is what arms the D14
+        # options gate, and a fresh candidate always arrives with None.
+        seeded = (
+            c if c.has_options is not None else replace(c, has_options=options_flags.get(c.symbol))
+        )
+        if seeded.avg_volume is not None:
+            by_symbol[seeded.symbol] = seeded
         else:
-            by_symbol[c.symbol] = replace(
-                c,
-                avg_volume=known_volumes.get(c.symbol),
-                volume_asof=volume_asof.get(c.symbol),
+            by_symbol[seeded.symbol] = replace(
+                seeded,
+                avg_volume=known_volumes.get(seeded.symbol),
+                volume_asof=volume_asof.get(seeded.symbol),
             )
 
     # Pass 1 — batched quotes for the cheap fields.
-    for chunk in _chunks(sorted(by_symbol), QUOTE_BATCH_SIZE):
-        for quote in client.quotes(chunk):
-            symbol = normalize_symbol(str(quote.get("symbol", "")))
-            candidate = by_symbol.get(symbol)
-            if candidate is None:
-                continue
-            by_symbol[symbol] = replace(
-                candidate,
-                company_name=candidate.company_name or quote.get("name"),
-                exchange=quote.get("exchange"),
-                market_cap=quote.get("marketCap"),
-                last_price=quote.get("price"),
-            )
+    #
+    # ABANDONED WHOLESALE on a 402 rather than retried one symbol at a time.
+    # The free tier allows exactly one symbol per `/stable/quote` call, so the
+    # per-symbol fallback would cost one call per name — and pass 1 feeds only
+    # `company_name`, `exchange`, `market_cap` and `last_price`, none of which
+    # the D14 filter needs: `last_price` ABSTAINS when None and the rest are
+    # descriptive. Pass 2 is the one the filter cannot do without. Spending the
+    # day's budget on cosmetic metadata while the volume data that decides
+    # membership goes unfetched would invert the priority, so the budget goes
+    # to pass 2 and these columns stay NULL until the plan is upgraded (D29).
+    # The upsert COALESCEs, so anything learned on an earlier run survives.
+    global _BATCH_QUOTES_GATED
+    try:
+        for chunk in _chunks(sorted(by_symbol), QUOTE_BATCH_SIZE):
+            for quote in client.quotes(chunk):
+                symbol = normalize_symbol(str(quote.get("symbol", "")))
+                candidate = by_symbol.get(symbol)
+                if candidate is None:
+                    continue
+                by_symbol[symbol] = replace(
+                    candidate,
+                    company_name=candidate.company_name or quote.get("name"),
+                    exchange=quote.get("exchange"),
+                    market_cap=quote.get("marketCap"),
+                    last_price=quote.get("price"),
+                )
+    except BudgetExhausted as exc:
+        # Declined spend, not a failure (D29). Pass 2 declines cleanly too, and
+        # candidates keep whatever `known_volumes` seeded them with.
+        log.info("skipping the descriptive quote pass: %s", exc)
+    except FMPPlanError as exc:
+        _BATCH_QUOTES_GATED = True
+        log.warning(
+            "FMP plan does not cover BATCHED /stable/quote (one symbol per call "
+            "only) — skipping the descriptive pass entirely so the whole budget "
+            "goes to the %d-session average volume the D14 filter actually "
+            "needs. company_name/exchange/market_cap/last_price stay as already "
+            "stored until the plan is upgraded (D29). (%s)",
+            lookback_days,
+            exc,
+        )
 
     # Pass 2 — the exact N-session average volume the config asks for.
     # Unknown symbols first, so a tight budget buys new coverage rather than
@@ -480,6 +538,7 @@ def enrich_with_liquidity(
 
     spent = 0
     declined = 0
+    failed = 0
     for symbol in [*unknown, *refresh]:
         if call_budget is not None and spent >= call_budget:
             declined = len(unknown) + len(refresh) - spent
@@ -491,11 +550,44 @@ def enrich_with_liquidity(
             declined = len(unknown) + len(refresh) - spent
             log.info("volume lookups stopped on the shared day budget: %s", exc)
             break
+        except FMPAuthError as exc:
+            # SYSTEMIC, not per-symbol. The key is rejected, or the provider's
+            # own daily allowance is gone — FMP signals quota exhaustion with
+            # HTTP 200 and an "Error Message" body, which lands here. Every
+            # remaining symbol will fail identically, so retrying 500 times
+            # produces 500 warnings, hammers the provider, and leaves a
+            # plausible-looking short universe behind. Stop on the first one.
+            #
+            # This is the distinction the old blanket `except Exception` lost:
+            # a bad symbol is a data point, a rejected key is the end of the
+            # pass. Note FMPPlanError subclasses FMPAuthError, so a 402 on the
+            # per-symbol endpoint stops here too.
+            raise UniverseError(
+                f"volume lookups aborted after {spent} call(s): the provider "
+                f"rejected the request for {symbol} in a way that will repeat "
+                f"for every remaining symbol ({exc}). Refusing to write a "
+                f"universe assembled from a failed pass — an empty or short "
+                f"universe written as though it were authoritative is worse "
+                f"than no write at all. Check the key and the provider's daily "
+                f"allowance, then re-run."
+            ) from exc
         except Exception as exc:  # one bad symbol must not kill the universe
             log.warning("volume lookup failed for %s: %s", symbol, exc)
             if on_error:
                 on_error(symbol, exc)
+            failed += 1
             spent += 1
+            if spent >= MIN_SAMPLE_FOR_RATIO and failed / spent > DEFAULT_MAX_FAIL_RATIO:
+                # The same rule `for_each_symbol` applies to jobs, which this
+                # pass bypasses by looping itself. Without it a mass failure
+                # degrades into ordinary-looking "no volume data" rejections
+                # and the filter treats them as real.
+                raise UniverseError(
+                    f"volume lookups aborted: {failed} of {spent} attempted "
+                    f"lookups failed, above the {DEFAULT_MAX_FAIL_RATIO:.0%} "
+                    f"threshold. Refusing to write a universe built from a "
+                    f"mostly-failed pass. Last error on {symbol}: {exc}"
+                ) from exc
             continue
         spent += 1
         fresh = average_volume(bars, lookback_days)
@@ -610,6 +702,25 @@ def deactivate_absent(kept_symbols: set[str], *, session_date: date, grace_days:
     )
 
 
+def stored_options_flags() -> dict[str, bool]:
+    """What `tickers.has_options` already knows, for the D14 options gate.
+
+    WITHOUT THIS THE GATE CAN NEVER FIRE. `ingest/schwab_chains.py` writes the
+    flag from whether Schwab returned a chain, and the upsert COALESCEs it so a
+    rebuild never erases it — but every rebuild constructs its candidates from
+    the constituents file with `has_options=None`, and `apply_liquidity_filter`
+    only rejects a definite `False`. So the gate abstained on every symbol on
+    every run, for ever, no matter how many chain jobs had succeeded. The
+    writeback was working and nothing was reading it back.
+    """
+    return {
+        row["symbol"]: row["has_options"]
+        for row in db.fetch_all(
+            "SELECT symbol, has_options FROM tickers WHERE has_options IS NOT NULL"
+        )
+    }
+
+
 def stored_volumes() -> tuple[dict[str, int], dict[str, date]]:
     """Average volumes already in `tickers`, and when each was verified.
 
@@ -654,6 +765,7 @@ def build_universe(
         candidates,
         lookback_days=cfg.liquidity.avg_volume_lookback_days,
         **dict(zip(("known_volumes", "volume_asof"), stored_volumes(), strict=True)),
+        options_flags=stored_options_flags(),
         today=day,
     )
     result = apply_liquidity_filter(candidates, cfg.liquidity)
@@ -684,6 +796,13 @@ def _report(result: FilterResult, source: str, *, wrote: bool, offline: bool) ->
     if offline:
         print("  note: --offline merged the static file only; no liquidity filtering ran")
         return
+
+    if batch_quotes_gated():
+        print(
+            "  note: batched /stable/quote is plan-gated (one symbol per call), so "
+            "the descriptive pass was skipped and the whole budget went to average "
+            "volume. company_name/exchange/market_cap stay as stored (D29)."
+        )
 
     unknown = sum(1 for c in result.kept if c.has_options is None)
     if unknown:

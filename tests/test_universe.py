@@ -13,6 +13,7 @@ from datetime import date
 import pytest
 
 from core import config
+from ingest.runner import MIN_SAMPLE_FOR_RATIO
 from ingest.universe import (
     STATIC_FILE_STALE_AFTER_DAYS,
     Candidate,
@@ -689,3 +690,188 @@ def test_coverage_still_takes_priority_over_freshness():
         today=TODAY,
     )
     assert client.bar_calls == ["ZS"]
+
+
+# ── systemic failure must stop the pass, not degrade it ────────────────────────
+#
+# Found live on 2026-10-20: the provider's daily allowance ran out mid-run, FMP
+# answered HTTP 200 with an "Error Message" body (-> FMPAuthError), and the old
+# blanket `except Exception` treated that as one bad symbol 225 times in a row.
+# The run finished "successfully" with a 22-symbol universe that looked real.
+
+
+class QuotaExhaustedFMP(StubFMP):
+    """Serves `after` symbols, then fails the way a spent allowance fails."""
+
+    def __init__(self, *, after: int, **kwargs):
+        super().__init__(**kwargs)
+        self.after = after
+
+    def daily_bars(self, symbol, *, days):
+        self.bar_calls.append(symbol)
+        if len(self.bar_calls) > self.after:
+            from ingest.fmp_client import FMPAuthError
+
+            raise FMPAuthError("FMP plan/quota error on /stable/historical-price-eod/full")
+        volume = self.volumes.get(symbol)
+        return fx.daily_bars(volume, days=days) if volume is not None else []
+
+
+def test_quota_exhaustion_aborts_instead_of_hammering_every_symbol():
+    client = QuotaExhaustedFMP(
+        after=3, volumes=dict.fromkeys((f"S{i}" for i in range(200)), 5_000_000)
+    )
+    with pytest.raises(UniverseError, match="repeat for every remaining symbol"):
+        enrich_with_liquidity(client, [make(f"S{i}") for i in range(200)], lookback_days=20)
+    # The point of the fix: it stopped on the FIRST systemic error. Four calls
+    # total — three served, one rejected — not two hundred.
+    assert len(client.bar_calls) == 4
+
+
+def test_plan_gated_per_symbol_endpoint_also_aborts():
+    """FMPPlanError subclasses FMPAuthError, so a 402 here is systemic too."""
+
+    class PlanGated(StubFMP):
+        def daily_bars(self, symbol, *, days):
+            self.bar_calls.append(symbol)
+            from ingest.fmp_client import FMPPlanError
+
+            raise FMPPlanError("402 for /stable/historical-price-eod/full")
+
+    client = PlanGated()
+    with pytest.raises(UniverseError, match="repeat for every remaining symbol"):
+        enrich_with_liquidity(client, [make(f"S{i}") for i in range(50)], lookback_days=20)
+    assert len(client.bar_calls) == 1
+
+
+def test_mass_per_symbol_failure_trips_the_rate_guard():
+    """The 25%/10-sample rule `for_each_symbol` applies, which this pass bypasses."""
+    symbols = [f"S{i}" for i in range(100)]
+    # Every symbol raises a plain per-symbol error, none of them systemic.
+    client = StubFMP(fail_for=set(symbols), volumes=dict.fromkeys(symbols, 5_000_000))
+    with pytest.raises(UniverseError, match="above the 25% threshold"):
+        enrich_with_liquidity(client, [make(s) for s in symbols], lookback_days=20)
+    # Trips at the minimum sample, not after burning the whole universe.
+    assert len(client.bar_calls) == MIN_SAMPLE_FOR_RATIO
+
+
+def test_a_few_bad_symbols_still_pass():
+    """The guard must not fire on ordinary sparse-data symbols."""
+    symbols = [f"S{i}" for i in range(100)]
+    client = StubFMP(fail_for={"S3", "S7"}, volumes=dict.fromkeys(symbols, 5_000_000))
+    enriched = enrich_with_liquidity(client, [make(s) for s in symbols], lookback_days=20)
+    assert len(client.bar_calls) == 100
+    assert {c.symbol for c in enriched if c.avg_volume is None} == {"S3", "S7"}
+
+
+def test_budget_exhaustion_is_still_declined_spend_not_failure():
+    """Regression: the new guards must not turn a clean budget stop into an error."""
+    from core.budget import BudgetExhausted
+
+    class BudgetStop(StubFMP):
+        def daily_bars(self, symbol, *, days):
+            # Does NOT delegate to super(): that would append to bar_calls twice.
+            self.bar_calls.append(symbol)
+            if len(self.bar_calls) > 5:
+                raise BudgetExhausted("fmp daily call budget is exhausted")
+            return fx.daily_bars(self.volumes.get(symbol), days=days)
+
+    symbols = [f"S{i}" for i in range(50)]
+    client = BudgetStop(volumes=dict.fromkeys(symbols, 5_000_000))
+    enriched = enrich_with_liquidity(client, [make(s) for s in symbols], lookback_days=20)
+    assert len(client.bar_calls) == 6
+    assert sum(1 for c in enriched if c.avg_volume is not None) == 5
+
+
+def test_batch_quote_plan_gate_skips_pass_one_without_per_symbol_fallback():
+    """Free tier allows one symbol per quote call; falling back would starve pass 2."""
+    import ingest.universe as uni
+
+    uni.reset_quote_availability()
+
+    class BatchGated(StubFMP):
+        def quotes(self, symbols):
+            self.quote_batches.append(list(symbols))
+            from ingest.fmp_client import FMPPlanError
+
+            raise FMPPlanError("402 for /stable/quote")
+
+    symbols = [f"S{i}" for i in range(50)]
+    client = BatchGated(volumes=dict.fromkeys(symbols, 5_000_000))
+    enriched = enrich_with_liquidity(client, [make(s) for s in symbols], lookback_days=20)
+    assert uni.batch_quotes_gated() is True
+    # One attempt, then abandoned — NOT 50 single-symbol retries.
+    assert len(client.quote_batches) == 1
+    # Pass 2 still ran for every symbol: the budget went where the filter needs it.
+    assert len(client.bar_calls) == 50
+    assert all(c.avg_volume == 5_000_000 for c in enriched)
+    assert all(c.last_price is None for c in enriched)
+    uni.reset_quote_availability()
+
+
+def test_spent_budget_degrades_to_static_file_instead_of_failing():
+    """The last run of the day must not destroy a converged universe.
+
+    Found live on 2026-10-20: with the budget spent, BudgetExhausted escaped
+    `fetch_constituents` (which caught only FMPPlanError) and killed the job,
+    even though the static file plus stored volumes needed no calls at all.
+    """
+    from core.budget import BudgetExhausted
+    from ingest.universe import fetch_constituents
+
+    class Spent(StubFMP):
+        def sp500_constituents(self):
+            raise BudgetExhausted("fmp daily call budget is exhausted")
+
+        def nasdaq100_constituents(self):  # pragma: no cover - never reached
+            raise AssertionError("should not be called after the first refusal")
+
+    sp500, _ndx, source = fetch_constituents(Spent(), config.universe())
+    assert source.startswith("static:")
+    assert len(sp500) > 400
+
+
+# ── the D14 options gate must actually arm ────────────────────────────────────
+#
+# Found live on 2026-10-20: `schwab_chains` wrote has_options=true for all 22
+# active tickers, the upsert COALESCEd it so nothing was erased, and the next
+# universe run STILL reported "options availability unknown for 22 symbol(s)".
+# Every rebuild constructed candidates with has_options=None and nothing read
+# the column back, so the gate abstained on every symbol for ever.
+
+
+def test_options_flags_are_seeded_so_the_gate_can_reject():
+    cfg = config.universe().liquidity
+    assert cfg.require_options, "this test is meaningless if the gate is off"
+
+    client = StubFMP(volumes={"HAS": 5_000_000, "HASNT": 5_000_000})
+    enriched = enrich_with_liquidity(
+        client,
+        [make("HAS"), make("HASNT")],
+        lookback_days=20,
+        options_flags={"HAS": True, "HASNT": False},
+    )
+    by = {c.symbol: c for c in enriched}
+    assert by["HAS"].has_options is True
+    assert by["HASNT"].has_options is False
+
+    result = apply_liquidity_filter(enriched, cfg)
+    assert [c.symbol for c in result.kept] == ["HAS"]
+    assert result.reasons.get("no options chain") == 1
+
+
+def test_an_unseeded_symbol_still_abstains():
+    """Abstain is the correct answer before any chain job has run."""
+    cfg = config.universe().liquidity
+    client = StubFMP(volumes={"NEW": 5_000_000})
+    enriched = enrich_with_liquidity(client, [make("NEW")], lookback_days=20, options_flags={})
+    assert enriched[0].has_options is None
+    assert [c.symbol for c in apply_liquidity_filter(enriched, cfg).kept] == ["NEW"]
+
+
+def test_seeding_does_not_override_a_flag_already_on_the_candidate():
+    client = StubFMP(volumes={"X": 5_000_000})
+    enriched = enrich_with_liquidity(
+        client, [make("X", has_options=True)], lookback_days=20, options_flags={"X": False}
+    )
+    assert enriched[0].has_options is True

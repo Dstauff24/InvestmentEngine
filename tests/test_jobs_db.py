@@ -17,7 +17,7 @@ from datetime import date
 import psycopg
 import pytest
 
-from core import db
+from core import clock, db
 from core.jobs import (
     JobAlreadyRunning,
     clear_stale_runs,
@@ -264,3 +264,121 @@ def test_a_broken_finish_write_does_not_swallow_the_jobs_own_exception(monkeypat
             job_run("demo2", session_date=DAY),
         ):
             raise RuntimeError("the real problem")
+
+
+# ── a critical snapshot job must never record success having done nothing ────
+#
+# Found live on 2026-10-20. With `stop_on=BudgetExhausted` added, a spent budget
+# stopped the estimates loop cleanly — and the job then recorded
+# `status=success, is_critical=true, rows_written=0, symbols_ok=0`, on the
+# strength of which `v_day_status` certified `day_complete=true`. The day's
+# estimate snapshot had not been taken by anyone.
+
+
+def test_budget_stop_before_any_write_is_a_skip_not_a_success():
+    from core.budget import BudgetExhausted
+    from ingest import fmp_estimates
+
+    class Spent:
+        """Allows the plan probe, then has nothing left for the real work."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def analyst_estimates(self, *a, **k):
+            self.calls += 1
+            if self.calls == 1:
+                return []  # the probe succeeds: not plan-gated
+            raise BudgetExhausted("fmp daily call budget is exhausted")
+
+    with pytest.raises(BudgetExhausted):
+        fmp_estimates.run(Spent(), symbols=["AAPL", "MSFT", "NVDA"])
+
+    r = row(fmp_estimates.JOB_NAME)
+    assert r["status"] == "skipped", "a job that wrote nothing must not report success"
+    assert r["is_critical"] is True
+    assert r["rows_written"] == 0
+    # And therefore the day is NOT complete on the strength of this row.
+    assert not day_is_complete(clock.session_date())
+
+
+def test_no_budget_even_to_probe_is_a_critical_skip():
+    """ "Could not ask" stays a gate; only a confirmed 402 stops being one."""
+    from core.budget import BudgetExhausted
+    from ingest import fmp_estimates
+
+    class Broke:
+        def analyst_estimates(self, *a, **k):
+            raise BudgetExhausted("fmp daily call budget is exhausted")
+
+    with pytest.raises(BudgetExhausted):
+        fmp_estimates.run(Broke(), symbols=["AAPL"])
+
+    r = row(fmp_estimates.JOB_NAME)
+    assert r["status"] == "skipped"
+    assert r["is_critical"] is True, (
+        "a spent budget means we never learned whether the plan covers this; "
+        "defaulting that to 'not a gate' would let a broken job certify a day"
+    )
+    assert not day_is_complete(clock.session_date())
+
+
+def test_a_confirmed_402_is_a_non_critical_skip_and_the_day_can_complete():
+    """Contrast: a standing billing answer IS a decision already taken (D29)."""
+    from ingest import fmp_estimates
+    from ingest.fmp_client import FMPPlanError
+
+    class Gated:
+        def analyst_estimates(self, *a, **k):
+            raise FMPPlanError("402 for /stable/analyst-estimates")
+
+    with pytest.raises(fmp_estimates.EstimatesPlanBlocked):
+        fmp_estimates.run(Gated(), symbols=["AAPL"])
+
+    r = row(fmp_estimates.JOB_NAME)
+    assert r["status"] == "skipped"
+    assert r["is_critical"] is False
+
+
+def test_clean_stop_does_not_mask_an_unrelated_crash():
+    """A job that skips and then crashes for another reason is still FAILED.
+
+    This is why `clean_stop` is an explicit allowlist rather than "honour
+    skip() if it was called": a real bug must not inherit a skip's immunity.
+    """
+    from core.budget import BudgetExhausted
+
+    with (
+        pytest.raises(ZeroDivisionError),
+        job_run("canary", session_date=DAY, clean_stop=BudgetExhausted) as run,
+    ):
+        run.skip("decided to stop")
+        raise ZeroDivisionError("an unrelated bug")
+
+    assert row("canary")["status"] == "failed"
+
+
+def test_clean_stop_records_skipped_for_a_named_exception():
+    from core.budget import BudgetExhausted
+
+    with (
+        pytest.raises(BudgetExhausted),
+        job_run("canary", session_date=DAY, clean_stop=BudgetExhausted) as run,
+    ):
+        run.skip("budget gone")
+        raise BudgetExhausted("spent")
+
+    r = row("canary")
+    assert r["status"] == "skipped"
+    assert r["error"] == "budget gone"
+
+
+def test_an_unnamed_exception_is_still_failed_without_clean_stop():
+    """Regression: the default must be unchanged for every existing caller."""
+    from core.budget import BudgetExhausted
+
+    with pytest.raises(BudgetExhausted), job_run("canary", session_date=DAY) as run:
+        run.skip("budget gone")
+        raise BudgetExhausted("spent")
+
+    assert row("canary")["status"] == "failed"
