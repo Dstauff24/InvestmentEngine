@@ -560,3 +560,132 @@ def test_unverified_symbols_are_still_never_admitted(liquidity):
     result = apply_liquidity_filter(enriched, liquidity)
     assert result.kept == []
     assert result.reasons == {"no volume data": 2}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Leftover budget refreshes the stalest volumes, oldest-first
+# ══════════════════════════════════════════════════════════════════════════
+
+TODAY = date(2026, 10, 20)
+
+
+def test_leftover_budget_refreshes_the_stalest_known_volumes_first():
+    """Unknown symbols are covered first; what is left goes to the oldest dates."""
+    client = StubFMP()
+    candidates = [make(s) for s in ("AAPL", "MSFT", "JNJ", "ZS")]
+    enrich_with_liquidity(
+        client,
+        candidates,
+        lookback_days=20,
+        call_budget=3,
+        known_volumes={"AAPL": 1, "MSFT": 1, "JNJ": 1},
+        volume_asof={
+            "AAPL": date(2026, 10, 19),  # freshest
+            "MSFT": date(2026, 8, 1),  # stalest of the dated
+            "JNJ": date(2026, 9, 1),
+        },
+        today=TODAY,
+    )
+    # ZS is unknown so it goes first, then MSFT (Aug), then JNJ (Sep).
+    assert client.bar_calls == ["ZS", "MSFT", "JNJ"]
+
+
+def test_an_undated_known_volume_counts_as_maximally_stale():
+    """A volume stored before the asof column existed must be re-verified first."""
+    client = StubFMP()
+    enrich_with_liquidity(
+        client,
+        [make("AAPL"), make("MSFT")],
+        lookback_days=20,
+        call_budget=1,
+        known_volumes={"AAPL": 1, "MSFT": 1},
+        volume_asof={"AAPL": date(2026, 10, 19)},  # MSFT has no date at all
+        today=TODAY,
+    )
+    assert client.bar_calls == ["MSFT"]
+
+
+def test_a_converged_universe_still_spends_its_budget():
+    """Otherwise coverage stops at 100% and the data silently ages forever."""
+    client = StubFMP()
+    candidates = merge_constituents(fx.SP500, fx.NASDAQ100, [])
+    known = {c.symbol: 5_000_000 for c in candidates}  # fully converged
+    asof = {c.symbol: date(2026, 1, 1) for c in candidates}
+
+    enrich_with_liquidity(
+        client,
+        candidates,
+        lookback_days=20,
+        call_budget=3,
+        known_volumes=known,
+        volume_asof=asof,
+        today=TODAY,
+    )
+    assert len(client.bar_calls) == 3  # budget spent, not idled
+
+
+def test_the_oldest_verification_date_advances_every_run():
+    """The property that keeps a converged universe's liquidity data current."""
+    candidates = merge_constituents(fx.SP500, fx.NASDAQ100, [])  # 6 symbols
+    known = {c.symbol: 5_000_000 for c in candidates}
+    asof = {c.symbol: date(2026, 1, 1) for c in candidates}
+
+    oldest_seen = [min(asof.values())]
+    for run in range(3):
+        client = StubFMP()
+        enriched = enrich_with_liquidity(
+            client,
+            candidates,
+            lookback_days=20,
+            call_budget=2,
+            known_volumes=known,
+            volume_asof=asof,
+            today=date(2026, 10, 20 + run),
+        )
+        asof = {c.symbol: c.volume_asof for c in enriched if c.volume_asof}
+        known = {c.symbol: c.avg_volume for c in enriched if c.avg_volume}
+        oldest_seen.append(min(asof.values()))
+        assert len(client.bar_calls) == 2
+
+    # After three runs at 2 calls each, all six are re-dated and the oldest
+    # verification date has moved forward from the January baseline.
+    assert len(asof) == len(candidates)
+    assert oldest_seen[-1] > oldest_seen[0]
+    assert oldest_seen == sorted(oldest_seen)  # monotonic, never regresses
+
+
+def test_a_fresh_pull_stamps_the_verification_date():
+    client = StubFMP()
+    enriched = enrich_with_liquidity(client, [make("AAPL")], lookback_days=20, today=TODAY)
+    assert enriched[0].avg_volume == 52_000_000
+    assert enriched[0].volume_asof == TODAY
+
+
+def test_an_empty_pull_does_not_advance_the_date():
+    """A run of empty responses must not make a stale volume look fresh."""
+    client = StubFMP(volumes={})  # daily_bars returns []
+    enriched = enrich_with_liquidity(
+        client,
+        [make("AAPL")],
+        lookback_days=20,
+        known_volumes={"AAPL": 9_000_000},
+        volume_asof={"AAPL": date(2026, 1, 1)},
+        today=TODAY,
+    )
+    assert enriched[0].avg_volume == 9_000_000  # value kept
+    assert enriched[0].volume_asof == date(2026, 1, 1)  # date NOT advanced
+
+
+def test_coverage_still_takes_priority_over_freshness():
+    """An unknown symbol beats even a year-old known one."""
+    client = StubFMP()
+    enrich_with_liquidity(
+        client,
+        [make("AAPL"), make("ZS")],
+        lookback_days=20,
+        call_budget=1,
+        known_volumes={"AAPL": 1},
+        volume_asof={"AAPL": date(2020, 1, 1)},
+        today=TODAY,
+    )
+    assert client.bar_calls == ["ZS"]

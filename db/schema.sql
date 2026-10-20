@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS tickers (
 
     -- D14 liquidity gate. `avg_volume_20d` is what the filter was applied to.
     avg_volume_20d      BIGINT,
+    -- When that average was last verified. NOT `updated_at`, whose trigger
+    -- fires on any column change and would make a stale volume look fresh.
+    -- Orders the leftover D29 call budget, oldest first. Added by
+    -- db/migrations/001_add_avg_volume_asof.sql.
+    avg_volume_asof     DATE,
     -- NULL = nobody has checked yet. ingest/schwab_chains.py sets it from
     -- whether Schwab returned a chain; the D14 options gate abstains on NULL
     -- and enforces once populated.
@@ -79,6 +84,8 @@ CREATE TABLE IF NOT EXISTS tickers (
 
 CREATE INDEX IF NOT EXISTS ix_tickers_active ON tickers (is_active) WHERE is_active;
 CREATE INDEX IF NOT EXISTS ix_tickers_sector ON tickers (sector);
+CREATE INDEX IF NOT EXISTS ix_tickers_volume_staleness
+    ON tickers (avg_volume_asof NULLS FIRST) WHERE is_active;
 
 
 -- ============================================================================

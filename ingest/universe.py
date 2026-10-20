@@ -69,6 +69,9 @@ class Candidate:
     in_watchlist: bool = False
 
     avg_volume: int | None = None
+    # When avg_volume was verified. Orders the leftover D29 call budget so a
+    # converged universe refreshes its stalest names instead of idling.
+    volume_asof: date | None = None
     last_price: float | None = None
     # None = not yet determined. ingest/schwab_chains.py sets this from whether
     # Schwab returned a chain, so the D14 options gate ABSTAINS until then
@@ -393,6 +396,8 @@ def enrich_with_liquidity(
     lookback_days: int,
     call_budget: int | None = None,
     known_volumes: Mapping[str, int] | None = None,
+    volume_asof: Mapping[str, date] | None = None,
+    today: date | None = None,
     on_error: Callable[[str, Exception], None] | None = None,
 ) -> list[Candidate]:
     """Attach average volume, last price, exchange and market cap.
@@ -413,14 +418,27 @@ def enrich_with_liquidity(
     expand coverage monotonically, and a symbol verified last week stays in the
     universe this week. Symbols still unknown after the budget runs out keep
     `avg_volume=None` and are rejected — unverified is never silently admitted.
+
+    Once every symbol IS known, the budget would otherwise go unspent while the
+    stored volumes quietly aged. Leftover calls therefore refresh the STALEST
+    known volumes first, ordered by `volume_asof` with never-dated symbols
+    ahead of dated ones. A converged universe keeps spending its budget and the
+    oldest verification date advances every run.
     """
     known_volumes = known_volumes or {}
-    by_symbol = {
-        c.symbol: (
-            c if c.avg_volume is not None else replace(c, avg_volume=known_volumes.get(c.symbol))
-        )
-        for c in candidates
-    }
+    volume_asof = volume_asof or {}
+    today = today or clock.session_date()
+
+    by_symbol: dict[str, Candidate] = {}
+    for c in candidates:
+        if c.avg_volume is not None:
+            by_symbol[c.symbol] = c
+        else:
+            by_symbol[c.symbol] = replace(
+                c,
+                avg_volume=known_volumes.get(c.symbol),
+                volume_asof=volume_asof.get(c.symbol),
+            )
 
     # Pass 1 — batched quotes for the cheap fields.
     for chunk in _chunks(sorted(by_symbol), QUOTE_BATCH_SIZE):
@@ -441,11 +459,18 @@ def enrich_with_liquidity(
     # Unknown symbols first, so a tight budget buys new coverage rather than
     # re-verifying names we already know about.
     unknown = sorted(s for s, c in by_symbol.items() if c.avg_volume is None)
-    refresh = sorted(s for s, c in by_symbol.items() if c.avg_volume is not None)
+    # Stalest first; a symbol with no recorded date sorts ahead of every dated
+    # one, because "never verified in a way we can date" is maximally stale.
+    refresh = sorted(
+        (s for s, c in by_symbol.items() if c.avg_volume is not None),
+        key=lambda s: (by_symbol[s].volume_asof or date.min, s),
+    )
     if known_volumes:
+        oldest = by_symbol[refresh[0]].volume_asof if refresh else None
         log.info(
-            "volume: %d symbol(s) already known from `tickers`, %d to look up",
+            "volume: %d known from `tickers` (stalest %s), %d to look up",
             len(refresh),
+            oldest or "undated",
             len(unknown),
         )
 
@@ -480,9 +505,13 @@ def enrich_with_liquidity(
         spent += 1
         fresh = average_volume(bars, lookback_days)
         # Keep a previously-known value if this pull came back short: a thin
-        # response is not evidence the name became illiquid.
-        if fresh is not None or by_symbol[symbol].avg_volume is None:
-            by_symbol[symbol] = replace(by_symbol[symbol], avg_volume=fresh)
+        # response is not evidence the name became illiquid. The date only
+        # advances when a real figure was obtained, so a run of empty responses
+        # cannot make a stale volume look freshly checked.
+        if fresh is not None:
+            by_symbol[symbol] = replace(by_symbol[symbol], avg_volume=fresh, volume_asof=today)
+        elif by_symbol[symbol].avg_volume is None:
+            by_symbol[symbol] = replace(by_symbol[symbol], avg_volume=None)
 
     return sorted(by_symbol.values(), key=lambda c: c.symbol)
 
@@ -490,11 +519,11 @@ def enrich_with_liquidity(
 UPSERT = """
     INSERT INTO tickers (symbol, company_name, exchange, sector, industry,
                          market_cap, in_sp500, in_nasdaq100, in_watchlist,
-                         avg_volume_20d, has_options, passes_liquidity,
+                         avg_volume_20d, avg_volume_asof, has_options, passes_liquidity,
                          is_active, deactivated_on, last_seen_on, source)
     VALUES (%(symbol)s, %(company_name)s, %(exchange)s, %(sector)s, %(industry)s,
             %(market_cap)s, %(in_sp500)s, %(in_nasdaq100)s, %(in_watchlist)s,
-            %(avg_volume)s, %(has_options)s, TRUE,
+            %(avg_volume)s, %(volume_asof)s, %(has_options)s, TRUE,
             TRUE, NULL, %(session_date)s, %(source)s)
     ON CONFLICT (symbol) DO UPDATE SET
         company_name     = COALESCE(EXCLUDED.company_name, tickers.company_name),
@@ -506,6 +535,7 @@ UPSERT = """
         in_nasdaq100     = EXCLUDED.in_nasdaq100,
         in_watchlist     = EXCLUDED.in_watchlist,
         avg_volume_20d   = COALESCE(EXCLUDED.avg_volume_20d, tickers.avg_volume_20d),
+        avg_volume_asof  = COALESCE(EXCLUDED.avg_volume_asof, tickers.avg_volume_asof),
         has_options      = COALESCE(EXCLUDED.has_options, tickers.has_options),
         passes_liquidity = TRUE,
         is_active        = TRUE,
@@ -533,6 +563,7 @@ def upsert_tickers(kept: list[Candidate], *, session_date: date, source: str) ->
             "in_nasdaq100": c.in_nasdaq100,
             "in_watchlist": c.in_watchlist,
             "avg_volume": c.avg_volume,
+            "volume_asof": c.volume_asof,
             "has_options": c.has_options,
             "session_date": session_date,
             "source": source[:64],
@@ -566,18 +597,23 @@ def deactivate_absent(kept_symbols: set[str], *, session_date: date, grace_days:
     )
 
 
-def stored_volumes() -> dict[str, int]:
-    """Average volumes already recorded in `tickers`.
+def stored_volumes() -> tuple[dict[str, int], dict[str, date]]:
+    """Average volumes already in `tickers`, and when each was verified.
 
     Seeds the budgeted enrichment pass so a tight D29 call budget expands
-    coverage instead of churning it.
+    coverage instead of churning it, and so leftover calls can target the
+    stalest names.
     """
-    return {
-        r["symbol"]: int(r["avg_volume_20d"])
-        for r in db.fetch_all(
-            "SELECT symbol, avg_volume_20d FROM tickers WHERE avg_volume_20d IS NOT NULL"
-        )
-    }
+    volumes: dict[str, int] = {}
+    asof: dict[str, date] = {}
+    for row in db.fetch_all(
+        "SELECT symbol, avg_volume_20d, avg_volume_asof FROM tickers "
+        "WHERE avg_volume_20d IS NOT NULL"
+    ):
+        volumes[row["symbol"]] = int(row["avg_volume_20d"])
+        if row["avg_volume_asof"] is not None:
+            asof[row["symbol"]] = row["avg_volume_asof"]
+    return volumes, asof
 
 
 def build_universe(
@@ -605,7 +641,8 @@ def build_universe(
         candidates,
         lookback_days=cfg.liquidity.avg_volume_lookback_days,
         call_budget=cfg.fmp.daily_call_budget,
-        known_volumes=stored_volumes(),
+        **dict(zip(("known_volumes", "volume_asof"), stored_volumes(), strict=True)),
+        today=day,
     )
     result = apply_liquidity_filter(candidates, cfg.liquidity)
     check_universe_size(result.kept, cfg.maintenance.max_universe_size)
