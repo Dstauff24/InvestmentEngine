@@ -138,3 +138,111 @@ def _build_dsn(*, user: str, password: str, database: str) -> str:
     host = get("PGHOST", "localhost")
     port = get_int("PGPORT", 5432)
     return f"postgresql://{quote(user)}:{quote(password)}@{host}:{port}/{quote(database)}"
+
+
+# ── Providers ───────────────────────────────────────────────────────────────
+# Note: having a usable key here is NOT permission to use it. Every client asks
+# core.netguard first (D27).
+
+
+def fmp_api_key() -> str:
+    return require("FMP_API_KEY", hint="https://site.financialmodelingprep.com/developer/docs")
+
+
+def fmp_base_url() -> str:
+    return (get("FMP_BASE_URL", "https://financialmodelingprep.com") or "").rstrip("/")
+
+
+def fmp_rate_limit() -> int:
+    """Requests per minute the shared limiter enforces exactly.
+
+    The separate DAILY budget (D29 free-tier operation) is
+    `config/universe.yaml`'s `fmp.daily_call_budget`, not an env var: it is a
+    tuning decision, not a secret.
+    """
+    return get_int("FMP_RATE_LIMIT_PER_MIN", 300)
+
+
+def finnhub_api_key() -> str:
+    return require("FINNHUB_API_KEY", hint="https://finnhub.io/dashboard")
+
+
+def finnhub_base_url() -> str:
+    return (get("FINNHUB_BASE_URL", "https://finnhub.io/api/v1") or "").rstrip("/")
+
+
+def finnhub_rate_limit() -> int:
+    return get_int("FINNHUB_RATE_LIMIT_PER_MIN", 60)
+
+
+def schwab_app_key() -> str:
+    return require("SCHWAB_APP_KEY", hint="Schwab Developer Portal -> your app")
+
+
+def schwab_app_secret() -> str:
+    return require("SCHWAB_APP_SECRET", hint="Schwab Developer Portal -> your app")
+
+
+def schwab_callback_url() -> str:
+    return require("SCHWAB_CALLBACK_URL", hint="must match the portal registration exactly")
+
+
+def schwab_token_path() -> Path:
+    """Token file location (D21: minted on the laptop, synced to the VM)."""
+    return get_path("SCHWAB_TOKEN_PATH", "data/schwab_token.json")
+
+
+def schwab_rate_limit() -> int:
+    # Schwab's individual-use ceiling is 120/min; CLAUDE.md says throttle to ~100.
+    return get_int("SCHWAB_RATE_LIMIT_PER_MIN", 100)
+
+
+# ── Email (D16) ─────────────────────────────────────────────────────────────
+
+
+def smtp_host() -> str:
+    return require("SMTP_HOST")
+
+
+def smtp_port() -> int:
+    return get_int("SMTP_PORT", 587)
+
+
+def smtp_user() -> str:
+    return require("SMTP_USER")
+
+
+def smtp_password() -> str:
+    return require("SMTP_PASSWORD")
+
+
+def alert_email_from() -> str:
+    return require("ALERT_EMAIL_FROM")
+
+
+def alert_email_to() -> str:
+    return require("ALERT_EMAIL_TO")
+
+
+def alert_email_onfail() -> str:
+    """Where job failures page. Falls back to the digest address."""
+    return get("ALERT_EMAIL_ONFAIL") or alert_email_to()
+
+
+# ── Backups (D20) ───────────────────────────────────────────────────────────
+# scripts/backup_db.sh parses .env itself (it is bash and must not source the
+# file); these exist for any Python that needs the same values.
+
+
+def backup_dir() -> Path:
+    path = get_path("BACKUP_DIR", "./data/backups")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def backup_retention_days() -> int:
+    return get_int("BACKUP_RETENTION_DAYS", 30)
+
+
+def backup_s3_bucket() -> str | None:
+    return get("BACKUP_S3_BUCKET")
