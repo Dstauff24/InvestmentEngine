@@ -41,6 +41,7 @@ ignore = [
 "scripts/*" = ["T20"]
 "ingest/*" = ["T20"]
 "db/init.py" = ["T20"]
+"core/config.py" = ["T20"]      # has a `python -m core.config` CLI
 
 [tool.ruff.lint.isort]
 known-first-party = [

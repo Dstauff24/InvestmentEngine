@@ -1,0 +1,110 @@
+# ============================================================================
+# config/scoring.yaml — the 4-pillar confluence model (D2) and its gates (D12)
+# ----------------------------------------------------------------------------
+# D25: config is the only home for numbers. Every value is annotated with the
+# decision it comes from.
+#
+# Values tagged  [OPEN]  are NOT fixed by a decision: the log states the rule
+# but never set the number. Each has a row in docs/open-parameters.md and a
+# provisional default approved Sep 1, 2026. A sync test keeps the tag count and
+# that document in agreement.
+#
+# Loaded and validated by core/config.py. Unknown keys are a hard error, so a
+# typo like `techncial:` fails at startup rather than silently scoring 0.
+# ============================================================================
+
+version: 1
+
+# ── Pillar weights (D2) ─────────────────────────────────────────────────────
+# Technical 35 / Fundamental 25 / Catalyst 20 / Sentiment 20. Must total 100.
+# D13: these get re-weighted from Shadow Book evidence at quarterly review —
+# which is only possible because they live here and not in scoring/composite.py.
+pillar_weights:
+  technical: 35
+  fundamental: 25
+  catalyst: 20
+  sentiment: 20
+
+# ── Composite scale (D2) ────────────────────────────────────────────────────
+composite:
+  scale_min: 0
+  scale_max: 100
+  # A pillar scoring at or below `conflict_below` actively argues against the
+  # idea; when one is present the composite cannot exceed `capped_at`.
+  conflict_below: 30          # [OPEN] #2
+  # One point under the Tier A gate, so a conflicted idea can never reach
+  # Tier A but stays eligible for Tier B. The loader rejects >= 70.
+  capped_at: 69               # [OPEN] #3
+
+# ── What "a pillar agrees" means (D2/D12) ───────────────────────────────────
+pillar_agreement:
+  # The most load-bearing number in the repo. D2 and D12 both count agreeing
+  # pillars and neither defines "agree", yet this single value moves Tier A/B
+  # membership more than any pillar weight. First sensitivity sweep after O7.
+  min_score: 60                        # [OPEN] #1
+  # A pillar with no usable data (sentiment before Phase 2 wires up news) counts
+  # as neither agreeing nor conflicting: it is excluded and the remaining
+  # weights are renormalised.
+  treat_missing_as_agreement: false
+
+# ── Tier gates (D12) ────────────────────────────────────────────────────────
+# Tier A = full confluence. Tier B = conviction/asymmetric, surfaced anyway but
+# clearly labelled and sized down (config/risk.yaml).
+tiers:
+  a:
+    min_pillars_agreeing: 3   # D12
+    min_composite: 70         # D12
+    min_risk_reward: 2.0      # D17
+  b:
+    min_pillars_agreeing: 2   # D12
+    min_composite: 55         # D12
+    # EXCLUSIVE upper bound: at 70 an idea is a Tier A candidate. D12's written
+    # band of "55-69" is this, read as integers. Exclusive rather than 69 so
+    # there is no dead zone between the tiers for a fractional composite.
+    max_composite: 70         # D12
+    min_risk_reward: 3.0      # D17 — Tier B must pay more to justify the odds
+
+# D1 / edge-source #1: the engine can say "nothing today". Below this, silence.
+min_surfaceable_composite: 55
+
+# ── Phase 1 recipes ─────────────────────────────────────────────────────────
+# Parameters for the three setups in the decision log, in implementation order.
+# Nothing here is scoring logic — these are the inputs that logic will read.
+recipes:
+  pullback_to_trend:
+    enabled: true
+    ma_fast: 20                        # recipe 1: uptrend 20 > 50 > 200
+    ma_mid: 50
+    ma_slow: 200
+    require_ma_stack: true
+    pullback_to: [20, 50]              # pullback to a rising fast or mid MA
+    require_ma_rising: true
+    rsi_period: 14                     # [OPEN] #4 — standard Wilder default
+    rsi_min: 40                        # recipe 1: RSI reset 40-50
+    rsi_max: 50
+    volume_dryup_ratio: 0.8            # [OPEN] #5 — pullback vol vs 20d average
+    require_reversal_candle: true
+    no_earnings_within_days: 5         # recipe 1
+    horizon_days: [2, 15]              # framework swing horizon
+
+  base_breakout:
+    enabled: true
+    min_base_weeks: 4                  # [OPEN] #6 — "multi-week base" undefined
+    max_base_depth_pct: 25             # [OPEN] #7
+    range_contraction_ratio: 0.6       # [OPEN] #8 — recent ATR vs base-period ATR
+    require_relative_strength_vs_sector: true
+    min_relative_volume_on_break: 1.5  # recipe 2: rel-volume >= 1.5x
+    breakout_buffer_pct: 0.5           # [OPEN] #9
+    horizon_days: [5, 30]              # [OPEN] #10
+
+  post_earnings_drift:
+    enabled: true
+    require_eps_beat: true             # recipe 3
+    require_revenue_beat: true
+    require_raised_guidance: true
+    min_gap_up_pct: 2.0                # [OPEN] #11
+    require_holds_day_one_low: true
+    # Adjusted 5 -> 10 on Sep 1: day-1-low confirmation takes sessions, and
+    # the day-5-to-8 gap retest is the cleanest entry.
+    max_days_since_earnings: 10        # [OPEN] #12
+    horizon_days: [5, 45]              # [OPEN] #13 — drift runs for weeks

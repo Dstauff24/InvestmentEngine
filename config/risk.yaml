@@ -1,0 +1,161 @@
+# ============================================================================
+# config/risk.yaml — sizing, caps, and circuit breakers (D17/D18/D19)
+# ----------------------------------------------------------------------------
+# These are hard rules the engine cannot override, but they are not hard-CODED:
+# decision/risk_manager.py reads them from here so a change is a reviewable
+# diff, not a code edit (D25).
+#
+# D17: every percentage is computed off the CURRENT account value, which makes
+# sizing self-throttling — a drawdown shrinks the next position automatically.
+#
+# Values tagged [OPEN] have a row in docs/open-parameters.md.
+# ============================================================================
+
+version: 1
+
+# All percentages are percent-of-account (2.5 means 2.5%), always against the
+# live account value, never a high-water mark.
+percent_basis: current_account_value
+
+# ── Per-trade risk (D17) ────────────────────────────────────────────────────
+# "Active book" = swings + options. ETFs and long holds are governed separately
+# (stable_buckets) and are excluded from the heat cap entirely.
+per_trade_risk_pct:
+  tier_a: 2.5        # D17 — Tier A swing, standard size
+  tier_b: 0.75       # D17 — Tier B asymmetric (D12: sizing is the safety valve)
+
+min_risk_reward:
+  tier_a: 2.0        # D17
+  tier_b: 3.0        # D17 — the asymmetry must be real to justify worse odds
+
+# ── Concurrency and open heat (D17/D18) ─────────────────────────────────────
+max_concurrent_swings: 6      # D17
+
+heat:
+  max_open_heat_pct: 10.0            # D17 — ACTIVE trades only
+  counted_buckets: [swing, option]   # D17 — explicitly not etf / hold / cash
+  # D18: the cap resets continuously rather than monthly. Risk is released when
+  # a position exits, and a position's open risk drops to ~0 once TP1 has hit
+  # and the stop has moved to breakeven.
+  release_on_exit: true
+  zero_risk_after_stop_at_breakeven: true
+
+# ── Tier B monthly budget — hybrid (D18) ────────────────────────────────────
+# 4% risk-at-entry base per month. Realised Tier B gains replenish at 50% (a
+# +2% win adds +1% of budget back). Hard ceiling of 6% deployed in any one
+# month, so a hot streak cannot become tilt.
+tier_b_budget:
+  base_monthly_pct: 4.0        # D18
+  gain_replenish_rate: 0.5     # D18 — 50% of realised Tier B gains
+  hard_ceiling_pct: 6.0        # D18 — absolute month cap on deployed risk
+  resets_on: calendar_month    # [OPEN] #14 — D18 says "monthly"; a visible
+                               # reset date is a feature, not a bug
+  measured_as: risk_at_entry   # D18
+
+# ── Options (D17/D18/D19) ───────────────────────────────────────────────────
+options:
+  defined_risk_only: true             # D17/D12 — max loss known upfront, always
+  allowed_structures:                 # D12 prefers defined-risk structures
+    - long_call
+    - long_put
+    - debit_spread
+    - credit_spread                   # defined risk: the long leg caps it
+  monthly_realized_loss_budget_pct: 5.0   # D17/D18 — consumed ONLY by losers
+  max_risk_per_position_pct: 3.0          # D17
+  # D19(4): flag early-assignment risk on any short call when extrinsic value
+  # (Schwab's `timeValue`, NOT its `extrinsicValue`) is below the dividend
+  # landing before expiration.
+  assignment_risk_check: true
+  # Adjusted 1.0 -> 1.25 on Sep 1: a false warning costs nothing, a surprise
+  # assignment costs money.
+  assignment_extrinsic_buffer: 1.25   # [OPEN] #15
+
+# ── Circuit breaker (D17) ───────────────────────────────────────────────────
+circuit_breaker:
+  consecutive_losing_weeks: 2      # D17
+  monthly_drawdown_pct: -5.0       # D17
+  on_trip:
+    pause_tier_b: true             # D17
+    tier_a_size_multiplier: 0.5    # D17 — "Tier A halved"
+  resets_after: winning_week       # D17
+
+# ── Exit structure (D11/D18) ────────────────────────────────────────────────
+# D11: breakeven-or-better is "okay"; the true win is the target. The partial
+# structure protects the first while keeping the runner alive for the second.
+# D18 depends on the move-to-breakeven rule to zero out a position's open heat.
+#
+# Scoped PER STRATEGY, because a day-count timeout is only meaningful for one of
+# them. Getting this wrong would mis-label Shadow Book outcomes: an option
+# marked `timeout` at day 45 when it actually expired, or a multi-year hold
+# marked `timeout` every six weeks, would corrupt the expectancy-per-recipe
+# numbers D13 exists to produce.
+exits:
+  # Directional equity swings.
+  swing:
+    trim_at_target_1: 0.3333            # framework — trim 1/3
+    trim_at_target_2: 0.3333            # framework — trim 1/3
+    move_stop_to_breakeven_at: target_1 # D18 — this is what zeroes the open heat
+    runner_trail: ma_20                 # framework
+    max_holding_days: 45                # [OPEN] #16 — swings ONLY
+
+  # Options. A defined-risk structure (D17) is bounded by its own expiration, so
+  # a second day-count clock would either fire before the thesis had a chance or
+  # never fire at all. `max_holding_days` must stay null; the loader enforces it.
+  option:
+    timeout: expiration
+    max_holding_days: null
+    # A DTE rule, NOT a holding-period timeout: close or roll once the position
+    # reaches this many days to expiration, where gamma and theta both turn
+    # against a long option. PHASE 3 — declared so the number has a home, but
+    # nothing reads it yet and no code path enforces it.
+    early_exit_dte: 21                  # [OPEN] #17
+
+  # Long holds. D17: no hard stops, governed by thesis-invalidation triggers and
+  # the -15% review alert in stable_buckets. There is no clock.
+  hold:
+    timeout: thesis_trigger
+    max_holding_days: null
+
+# ── Stable buckets — ETFs and long holds (D17) ──────────────────────────────
+stable_buckets:
+  excluded_from_heat: true              # D17
+  use_hard_stops: false                 # D17
+  max_single_name_pct: 10.0             # D17 — concentration limit
+  max_sector_pct: 30.0                  # D17
+  thesis_review_drawdown_pct: -15.0     # D17 — review alert, not a stop
+  dividend_cut_triggers_review: true    # D19(5)
+
+# ── Bucket allocation targets (D17) ─────────────────────────────────────────
+# Must total 100 in each regime.
+allocation_targets:
+  normal:
+    etf: 35            # D17
+    hold: 30
+    swing: 20
+    option: 10
+    cash: 5
+  risk_off:
+    etf: 35            # D17: risk-off -> swings 10, options 5, cash 20+.
+    hold: 30           #      ETF/hold held flat; the delta moves to cash.
+    swing: 10
+    option: 5
+    cash: 20
+  drift_alert_pct: 5.0   # framework — flag a bucket +/-5% off target
+  # D17 risk-off trigger: SPY below its 200-day MA AND VIX above 25.
+  risk_off_spy_below_ma: 200
+  risk_off_vix_above: 25
+
+# ── Dividends (D19) ─────────────────────────────────────────────────────────
+dividends:
+  total_return_everywhere: true          # D19(1), incl. the SPY benchmark
+  dividend_adjusted_stops: true          # D19(3) — an ex-date gap must not
+                                         # fake a stop-out
+  no_new_swing_long_within_days_of_ex: 2 # D19(3) — capture is not our edge
+  core_etf_drip: true                    # D19(2)
+  hold_dividends_to_cash_bucket: true    # D19(2)
+
+# ── Cash (D17) ──────────────────────────────────────────────────────────────
+# "Cash has no risk profile; it's dry powder." Present so the allocation engine
+# has an explicit entry rather than inferring one.
+cash:
+  has_risk_profile: false

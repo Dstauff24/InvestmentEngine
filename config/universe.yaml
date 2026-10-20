@@ -1,0 +1,105 @@
+# ============================================================================
+# config/universe.yaml — universe (D14), ingestion scope, snapshot scope (D22)
+# ----------------------------------------------------------------------------
+# Everything that answers "what do we pull data for, and how much of it".
+#
+# Values tagged [OPEN] have a row in docs/open-parameters.md.
+# ============================================================================
+
+version: 1
+
+# ── Universe composition (D14) ──────────────────────────────────────────────
+# S&P 500 + Nasdaq 100 => ~550 unique, liquidity-filtered, plus the watchlist,
+# landing around ~500 names.
+sources:
+  sp500: true                  # D14
+  nasdaq100: true              # D14
+  watchlist_file: config/watchlist.txt   # D14 — merged in, exempt from filter
+  # D29: FMP's free tier 402-gates BOTH constituents endpoints, so the builder
+  # falls back to this file and logs a warning naming its AS_OF header date.
+  # Remove the fallback only once a probe shows the endpoints passing.
+  static_fallback_file: config/constituents_static.txt
+  allow_static_fallback: true
+
+# ── Liquidity filter (D14) ──────────────────────────────────────────────────
+# "avg volume >1M and active options chain". Swings and options need to be able
+# to get out at a reasonable price; illiquid names are where plans die.
+liquidity:
+  min_avg_volume: 1000000      # D14 — strictly greater than
+  avg_volume_lookback_days: 20 # D14
+  require_options: true        # D14 — abstains while has_options is NULL
+  min_price: 5.00              # [OPEN] #18 — protects option strategies
+  # The watchlist is an explicit human override: if you put it there, you want
+  # it scored, filter or no filter.
+  exempt_watchlist: true
+
+# ── Universe maintenance ────────────────────────────────────────────────────
+maintenance:
+  # Symbols are deactivated, never deleted: ideas, fundamentals, events and
+  # news all FK to tickers.symbol and a delete would cascade history away.
+  deactivate_missing: true
+  # Adjusted 3 -> 5 on Sep 1: a holiday-adjacent API hiccup can span 3 days.
+  deactivate_after_absent_days: 5   # [OPEN] #19
+  max_universe_size: 600            # [OPEN] #20 — a malformed constituents
+                                    # response must fail the job, not ingest
+
+# ── Option-chain snapshot scope (D22) ───────────────────────────────────────
+# THE SACRED JOB (D7). ~10x less data than full chains while still supporting
+# IV rank, skew, and expected move. The clock on this history starts the day the
+# job starts running, so this filter should widen only deliberately — narrowing
+# it later leaves a permanent hole in the series.
+option_chains:
+  strike_range_pct: 15         # D22 — strikes within +/-15% of spot
+  monthly_expirations: 4       # D22 — the nearest 4 MONTHLY expirations
+  # D22 means standard monthlies: Schwab's expirationType 'S' (third Friday).
+  # NOT 'M', which is MONTH-END and a different series entirely.
+  monthly_only: true
+  include_calls: true
+  include_puts: true           # both sides: skew needs puts
+  min_open_interest: 0         # [OPEN] #21 — the one value expensive to get
+                               # wrong in only one direction: it governs what
+                               # gets STORED. Filter at read time instead.
+  aggregate_iv: true           # D22 — per-ticker aggregate IV row
+  iv_rank_lookback_days: 252   # [OPEN] #22 — one trading year
+  iv_rank_min_history_days: 60 # [OPEN] #23 — below this, rank reports NULL
+
+# ── Estimate snapshot scope (D7) ────────────────────────────────────────────
+# THE OTHER SACRED JOB. Analyst estimates written as a dated snapshot so the
+# day-over-day diff becomes estimate-revision momentum.
+# D29: plan-gated on the free tier; the job is marked expected-blocked until a
+# probe shows `analyst-estimates` passing. The revision clock starts that day.
+estimates:
+  period_types: [quarter, annual]
+  quarters_ahead: 4            # [OPEN] #24 — raw material for revision momentum
+  annuals_ahead: 2             # [OPEN] #25
+
+# ── Fundamentals scope (D4/D29) ─────────────────────────────────────────────
+# Reported financials and ratios for Pillar B. Point-in-fact records keyed by
+# fiscal period, so re-pulling changes nothing unless a company restates.
+# D29: `ratios` and `key-metrics` are plan-gated; the job degrades rather than
+# failing, and reports the gap in job_runs.unavailable_endpoints.
+fundamentals:
+  quarters_history: 12         # [OPEN] #26 — 3 years; Pillar B reads trend
+  annuals_history: 5           # [OPEN] #27
+  # Financials change four times a year. Re-pulling ~500 names daily costs
+  # ~2,500 calls to rewrite identical rows, so a symbol is refreshed only when
+  # its stored data is older than this, or when it has just reported.
+  refresh_after_days: 7        # [OPEN] #28
+
+# ── Events scope (D19 / Pillar C) ───────────────────────────────────────────
+# The event radar. Forward window feeds "days to earnings" and the D19 ex-date
+# rules; the backward window catches actuals landing on already-known dates.
+events:
+  forward_days: 90             # [OPEN] #29 — must exceed the longest recipe
+                               # horizon (45d) and the expirations we snapshot
+  backward_days: 7             # [OPEN] #30
+
+# ── News scope (D5) ─────────────────────────────────────────────────────────
+news:
+  lookback_days: 7             # rolling 7-day window
+
+# ── FMP call budgeting (D29) ────────────────────────────────────────────────
+# Free-tier operation. The staleness filter in fundamentals trickles the crawl
+# so a day's spend stays inside the plan. Raise this on upgrade.
+fmp:
+  daily_call_budget: 250       # [OPEN] #31
