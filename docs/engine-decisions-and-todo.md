@@ -1,5 +1,5 @@
 # Investment Engine — Decision Log & To-Do Tracker
-**v2.0 (rebuild baseline) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
+**v2.1 (rebuild complete) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
 
 Companion: `CLAUDE.md` (conventions + validated findings), `docs/open-parameters.md`, `docs/REBUILD_KICKOFF.md`.
 
@@ -7,6 +7,39 @@ Companion: `CLAUDE.md` (conventions + validated findings), `docs/open-parameters
 
 ## WHAT HAPPENED (session note, Oct 20)
 The original build completed all 7 kickoff steps between Aug 31 and Sep 3, 2026: 411 unit tests + 9 integration tests, live-validated against FMP `/stable/` and the Schwab Trader API. The work lived only in a GitHub Codespace and was never committed or pushed. The Codespace auto-deleted after ~30 days of inactivity; the repo on GitHub held only a README. The prior Claude Code session was recovered and can be resumed, but its filesystem is empty. Nothing irreplaceable was lost: the D7 snapshot clock had not started (no VM, no cron), the Schwab token had already expired (7-day life, created Sep 3), and FMP was never upgraded. Rebuild proceeds from this log + CLAUDE.md + the resumed session's own transcript.
+
+---
+
+## ✅ REBUILD COMPLETE (Oct 20, 2026)
+
+All seven kickoff steps rebuilt and pushed. **Final commit: `426cde7`** (`step 7: daily_close
+orchestrator, mailer, backup + token expiry ops`). Every step ended in a pushed commit per D30:
+
+| Step | Commits | What landed |
+|------|---------|-------------|
+| 0 | `c1be523` | Rebuild spec: CLAUDE.md + this log + open-parameters + REBUILD_KICKOFF, pushed before any code existed |
+| 1 | `34418dc` | Scaffold, `.gitignore`, `.env.example` (38 vars), requirements split, ruff/pytest config, README |
+| 2 | `19037e0`, `66a10be` | 519-symbol static constituents; `db/schema.sql` (16 tables, 4 hypertables, 2 views) + idempotent `db/init.py`, verified against real Postgres 16 + TimescaleDB 2.31 |
+| 3 | `873adbc`, `e703758` | Destructive-database guard for the integration suite; three-layer config loader, cross-field invariants, 31 `[OPEN]` values with a sync test against `open-parameters.md` |
+| 4 | `8453f3f`, `90a43a4` | D12 band encoding noted; settings accessors, `netguard`, sliding-window limiter, `core/jobs.py`, `clock`, `/stable/` FMP client, 15-endpoint probe, universe builder |
+| 5 | `6e85ab2`, `05ff7f8` | Stale-volume refresh + `avg_volume_asof`; estimates/fundamentals/events/news ingestion, `for_each_symbol` guards, snapshot immutability tests, read-time price adjustment |
+| 6 | `9cdb7d7`, `9c03aed` | Shared day-level FMP budget (`api_budget`); Schwab client/prices/chains, `features/iv.py`, auth + token-sync scripts |
+| 7 | `426cde7` | `jobs/daily_close.py`, `alerts/mailer.py`, `scripts/backup_db.sh`, `scripts/token_expiry_check.py`, ET cron block in the README |
+
+**State:** 658 unit tests + 74 integration tests pass; ruff clean on 72 files. 67 Python
+modules, 23 test modules. Backup verified by an actual restore into a fresh database with
+`timescaledb_pre_restore()`/`post_restore()`: 150/40/40/10 rows across the four hypertables,
+6 chunks, 4 compression policies, **0 retention policies**, 16 tables, and the D7
+estimate-revision signal intact across the restore (eps 2.00 -> 2.39).
+
+**What is NOT done:** this is Phase 1 plumbing only — collection, storage and orchestration.
+No scoring, no recipes, no decision layer, no Shadow Book, no digest. The engine can fill
+the database; it cannot yet form an opinion. Gates 1b through 4 below are the path to a
+first `day_complete = true`.
+
+**Deliberate carry-overs into the running system (not bugs, but silent-wrongness classes):**
+O7 (`--backfill-actions` before any backtest) and O10 (spinoff adjustment ignored). Both are
+pinned by tests so they cannot drift into a plausible-looking guess.
 
 ---
 
@@ -66,7 +99,7 @@ The original build completed all 7 kickoff steps between Aug 31 and Sep 3, 2026:
 
 ## 📋 GO-LIVE CHECKLIST (rebuilt)
 
-**Gate 0 — Rebuild the repo (NEW).** Follow `docs/REBUILD_KICKOFF.md`. First commit = docs + scaffold, pushed before anything else. Every step ends with a pushed commit (D30).
+**Gate 0 — Rebuild the repo. ✅ DONE Oct 20, 2026 (`426cde7`).** All 7 steps rebuilt from this log + CLAUDE.md + the resumed session transcript, each ending in a pushed commit (D30). 658 unit + 74 integration tests green.
 **Gate 1a — Free-tier live.** FMP/Finnhub keys in `.env` (keys still exist in their dashboards); probe confirms `/stable/`; universe from static constituents; events + news + degraded fundamentals running.
 **Gate 1b — Premium unlock (deferred).** Upgrade → re-probe 15/15 → estimates flips to is_critical → record the estimate-clock start date → universe from API.
 **Gate 2 — Schwab live.** App credentials still exist in the Dev Portal (approvals persist; nothing to re-apply for). Keys into `.env` → `python scripts/schwab_auth.py` (manual flow) → fixture diff against a fresh live chain → `has_options` backfill → universe re-run.
@@ -78,3 +111,4 @@ The original build completed all 7 kickoff steps between Aug 31 and Sep 3, 2026:
 ## 🗒 SESSION NOTES
 - Aug 30 – Sep 3: original build, steps 1–7 complete and live-validated (see CLAUDE.md "Validated API findings" for everything learned). Full detail preserved in the design chat and the prior Claude Code session transcript.
 - Oct 20: loss discovered (unpushed Codespace auto-deleted). D30, D31 adopted. Rebuild package authored: CLAUDE.md, this log v2.0, open-parameters.md, REBUILD_KICKOFF.md.
+- Oct 20: **rebuild complete through step 7 (`426cde7`).** Reconstructed in one session; everything pushed as it was built. Three things the rebuild got *better* than the original: the FMP call budget is now a shared DB-backed day-level counter rather than per-job caps (two jobs could previously stay within budget and jointly exceed the day); universe enrichment seeds from stored volumes so coverage converges instead of oscillating, and spends leftover budget on the stalest symbols first; and `jobs/daily_close.py` reads `day_complete` from `v_day_status` rather than from its own step results, so a drifting job list cannot produce a false "complete". Next session: gate 1a — keys into `.env`, re-probe FMP, then Schwab auth and the chain fixture diff (gate 2).
