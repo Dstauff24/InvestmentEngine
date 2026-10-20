@@ -105,10 +105,17 @@ SQL
 
 ### 4. Application
 
+**The VM's distro Python is the reference interpreter.** Create the venv with it
+explicitly (`/usr/bin/python3` — 3.12 on Ubuntu 24.04), not with whatever newer
+build a dev machine or Codespace happens to have on `PATH`. Ruff targets `py311`
+so lint catches syntax the VM could not run, but only an explicit interpreter
+keeps the installed wheels identical to what production resolves.
+
 ```bash
 git clone https://github.com/Dstauff24/InvestmentEngine ~/engine && cd ~/engine
-python3 -m venv .venv
+/usr/bin/python3 -m venv .venv            # distro Python, not a newer one on PATH
 source .venv/bin/activate
+python --version                          # confirm it is the distro version
 pip install -r requirements.txt          # add -r requirements-dev.txt on a dev box
 
 cp .env.example .env && chmod 600 .env
