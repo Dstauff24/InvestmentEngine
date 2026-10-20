@@ -1,5 +1,5 @@
 # Investment Engine — Decision Log & To-Do Tracker
-**v2.2 (gate 1a live, gate 2 live) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
+**v2.3 (gate 1a live, gate 2 live, hardening) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
 
 Companion: `CLAUDE.md` (conventions + validated findings), `docs/open-parameters.md`, `docs/REBUILD_KICKOFF.md`.
 
@@ -134,6 +134,46 @@ real protection.
 
 ---
 
+## 🛡 HARDENING AFTER THE FIRST LIVE RUN (Oct 20, 2026)
+
+Two follow-ups, both closing holes the live run exposed rather than adding
+features.
+
+**1. Provider-exhausted marker (`db/migrations/003`).** `api_budget.calls_spent`
+counts what THIS engine spent and cannot know what the provider already served
+to a probe, a second deployment or a manual call. The first live universe run
+began believing it had 247 calls while FMP's allowance was nearly gone, and
+spent 225 of them discovering that one symbol at a time — each answered with
+**HTTP 200**, so each looked like a fresh request worth making. The client now
+recognises the allowance-spent signal in both of its forms (a 200 with an
+`Error Message` body, or a 429 whose text is about the plan rather than pacing)
+and records `provider_exhausted_at` / `_note` against the ET session date. Every
+later job that day is refused at the budget gate **without opening a socket**,
+pinned by a test asserting the second job makes exactly zero transport calls.
+Deliberately not a reset of `calls_spent` to the cap: "what did we spend" and
+"what did the provider say" answer different questions, and collapsing them
+would erase the divergence that is the whole point. A 429 about pacing stays
+retryable; a plan statement that is not about today's allowance does not mark.
+
+**2. Databases separated by protection class.**
+
+| Database | Holds | Integration suite |
+|---|---|---|
+| `investment_engine` | live collected data (D7 history) | **refused outright** — PROTECTED name; `INTEGRATION_DB_OK=1` does not unlock it |
+| `ie_test` | nothing of value | truncates freely, no override needed |
+
+`PGDATABASE` points at `investment_engine` in development as well as on the VM,
+so ordinary work touches the real database and the destructive suite must be
+pointed elsewhere on purpose (`PGDATABASE=ie_test pytest -m integration`).
+Previously one database served both roles, and a reflexive
+`INTEGRATION_DB_OK=1 pytest -m integration` wiped a day of live collection
+mid-session. **An override that gets typed from muscle memory is not a
+protection**, so the live name is now refused rather than merely unmatched by the
+scratch pattern. There is no legitimate reason for the suite to truncate the
+collection database.
+
+---
+
 ## 📋 GO-LIVE CHECKLIST (rebuilt)
 
 **Gate 0 — Rebuild the repo. ✅ DONE Oct 20, 2026 (`426cde7`).** All 7 steps rebuilt from this log + CLAUDE.md + the resumed session transcript, each ending in a pushed commit (D30). 658 unit + 74 integration tests green.
@@ -148,5 +188,6 @@ real protection.
 ## 🗒 SESSION NOTES
 - Aug 30 – Sep 3: original build, steps 1–7 complete and live-validated (see CLAUDE.md "Validated API findings" for everything learned). Full detail preserved in the design chat and the prior Claude Code session transcript.
 - Oct 20: loss discovered (unpushed Codespace auto-deleted). D30, D31 adopted. Rebuild package authored: CLAUDE.md, this log v2.0, open-parameters.md, REBUILD_KICKOFF.md.
+- Oct 20 (later still): **hardening.** Provider-exhausted marker so a spent allowance is discovered once per day rather than once per symbol; live and scratch databases separated by protection class after the integration suite wiped a day of collection. `extrinsicValue` diagnosed as distance-from-the-money and recorded in CLAUDE.md as unusable by construction, not merely imprecise.
 - Oct 20 (later): **gate 1a mostly live, gate 2 live (`64be4fd`).** Schwab token written Oct 20, **expires Oct 27**. Chain fixture diff: zero drift in 47 days. Six defects found and fixed by running against real providers — see "WHAT THE FIRST LIVE RUN FOUND". **The estimate-revision clock remains STOPPED**: `/stable/analyst-estimates` is still 402 on this plan, so no snapshot has ever been taken and D7's revision history has not begun. It starts on FMP upgrade day, and that date must be recorded here. Next: fresh FMP allowance -> re-run the universe to convergence, then gate 3 (VM).
 - Oct 20: **rebuild complete through step 7 (`426cde7`).** Reconstructed in one session; everything pushed as it was built. Three things the rebuild got *better* than the original: the FMP call budget is now a shared DB-backed day-level counter rather than per-job caps (two jobs could previously stay within budget and jointly exceed the day); universe enrichment seeds from stored volumes so coverage converges instead of oscillating, and spends leftover budget on the stalest symbols first; and `jobs/daily_close.py` reads `day_complete` from `v_day_status` rather than from its own step results, so a drifting job list cannot produce a false "complete". Next session: gate 1a — keys into `.env`, re-probe FMP, then Schwab auth and the chain fixture diff (gate 2).

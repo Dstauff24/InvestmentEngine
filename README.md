@@ -96,6 +96,9 @@ Create the role and database:
 sudo -u postgres psql <<'SQL'
 CREATE ROLE engine LOGIN PASSWORD 'REPLACE_WITH_PGPASSWORD';
 CREATE DATABASE investment_engine OWNER engine;
+-- Scratch database for the destructive integration suite. Create it even on the
+-- VM: it is what keeps `pytest -m integration` away from collected history.
+CREATE DATABASE ie_test OWNER engine;
 SQL
 ```
 
@@ -296,8 +299,30 @@ pip install -r requirements.txt -r requirements-dev.txt
 ruff check .          # lint
 ruff format .         # format
 pytest                # unit tests — fixture-driven, no network, no DB
-pytest -m integration # round-trips SQL against a live database (needs .env + schema)
+
+# Integration tests TRUNCATE the tables they touch, so they get their own
+# database. Note the per-invocation PGDATABASE: no override flag is needed,
+# because `ie_test` is a scratch-looking name.
+PGDATABASE=ie_test pytest -m integration
 ```
+
+### Two databases, separated by protection class
+
+| Database | Holds | The suite |
+|---|---|---|
+| `investment_engine` | live collected data (D7 history) | **refuses to run** — the name is PROTECTED in `tests/dbguard.py`, and `INTEGRATION_DB_OK=1` does **not** unlock it |
+| `ie_test` | nothing of value | truncates freely, no override needed |
+
+`PGDATABASE` in `.env` points at `investment_engine` in development as well as
+on the VM, so ordinary work touches the real database and the destructive suite
+has to be pointed elsewhere deliberately.
+
+This is not theoretical tidiness. On 2026-10-20 both roles were served by one
+database, and a reflexive `INTEGRATION_DB_OK=1 pytest -m integration` wiped a
+day of live collection mid-session. An override that gets typed from muscle
+memory is not a protection, so the live name is now refused outright rather than
+merely unmatched by the scratch pattern. If you genuinely need to reset the
+collection database, do it by hand, where the decision is visible.
 
 Rules the test suite enforces, and reviewers should hold the line on:
 

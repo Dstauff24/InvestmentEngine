@@ -45,6 +45,19 @@ log = logging.getLogger(__name__)
 TIMEOUT_S = 30
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+# How FMP says "your allowance for today is gone". It arrives TWO ways, neither
+# of which looks like a refusal to a naive client: HTTP 200 with an error body,
+# or a 429 whose text is about the plan rather than about pacing. A 429 that
+# says neither is an ordinary per-minute throttle and stays retryable.
+ALLOWANCE_SPENT_PHRASES = ("limit reach", "limit reached", "upgrade your plan")
+
+
+def is_allowance_spent(text: str) -> bool:
+    """Does this response body say the provider's daily allowance is spent?"""
+    low = text.lower()
+    return any(phrase in low for phrase in ALLOWANCE_SPENT_PHRASES)
+
+
 # One symbol's fundamentals costs this many calls (income, balance, cash flow,
 # ratios, key metrics). The D29 daily budget is measured in these units.
 CALLS_PER_SYMBOL_FUNDAMENTALS = 5
@@ -136,6 +149,18 @@ class FMPClient:
                 f"FMP rejected the API key on {path} (HTTP {response.status_code}). "
                 f"Check FMP_API_KEY."
             )
+        if response.status_code == 429 and is_allowance_spent(response.text):
+            # NOT retryable, and not a pacing problem: backing off and trying
+            # again cannot conjure more allowance. Record the provider's verdict
+            # so no later job today spends a round-trip rediscovering it.
+            self.budget.mark_provider_exhausted(
+                f"HTTP 429 on {path}: {response.text.strip()[:200]}"
+            )
+            raise FMPAuthError(
+                f"FMP reports its daily allowance spent (HTTP 429 on {path}). "
+                f"Marked for the rest of the session date; later jobs will stop "
+                f"at the budget gate without calling out."
+            )
         if response.status_code in RETRYABLE_STATUS:
             raise FMPTransientError(f"HTTP {response.status_code} from {path}")
         if not response.ok:
@@ -149,6 +174,16 @@ class FMPClient:
         # FMP signals plan/quota problems with a 200 and an error message body.
         if isinstance(payload, dict) and "Error Message" in payload:
             message = payload["Error Message"]
+            if is_allowance_spent(message):
+                # THE expensive one: HTTP 200, so it reads as a successful
+                # request returning an unhelpful body. On 2026-10-20 this was
+                # mistaken for a per-symbol data gap 225 times in one run.
+                self.budget.mark_provider_exhausted(f"HTTP 200 on {path}: {message}")
+                raise FMPAuthError(
+                    f"FMP reports its daily allowance spent on {path}: {message}. "
+                    f"Marked for the rest of the session date; later jobs will stop "
+                    f"at the budget gate without calling out."
+                )
             if "limit" in message.lower() or "upgrade" in message.lower():
                 raise FMPAuthError(f"FMP plan/quota error on {path}: {message}")
             raise FMPError(f"FMP error on {path}: {message}")

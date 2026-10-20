@@ -718,6 +718,15 @@ CREATE TABLE IF NOT EXISTS api_budget (
     -- budget can REPORT the shortfall instead of looking like a clean run that
     -- happened to do less work.
     calls_declined INTEGER NOT NULL DEFAULT 0,
+    -- The PROVIDER's own verdict, which `calls_spent` cannot infer: it counts
+    -- only what this engine spent, never what the provider already served to a
+    -- probe, a second deployment or a manual call. Set the first time FMP
+    -- reports its allowance gone (HTTP 200 + "Error Message", or a 429 saying
+    -- "Limit Reach"), and never overwritten, so it keeps the EARLIEST
+    -- observation. Every later job that day then stops at the budget gate
+    -- without opening a socket. See db/migrations/003.
+    provider_exhausted_at   TIMESTAMPTZ,
+    provider_exhausted_note TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 

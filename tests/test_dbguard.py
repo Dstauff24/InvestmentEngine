@@ -20,26 +20,31 @@ from tests.dbguard import (
     override_granted,
 )
 
-PROD = "postgresql://engine:pw@localhost:5432/investment_engine"
+# A name that is neither scratch-looking nor protected: the case the override
+# exists for. `investment_engine` used to stand here, but it is now a PROTECTED
+# name that no override unlocks, so it cannot also serve as the unlockable
+# example — see the protected-class tests at the end of this file.
+UNRECOGNISED = "postgresql://engine:pw@localhost:5432/engine_main"
+PROTECTED = "postgresql://engine:pw@localhost:5432/investment_engine"
 SCRATCH = "postgresql://engine:pw@localhost:5432/ie_test"
 
 
 # ── the refusal fires ───────────────────────────────────────────────────────
 
 
-def test_a_production_looking_database_is_refused():
-    """The case this exists for: PGDATABASE still pointing at the real database."""
+def test_an_unrecognised_database_is_refused():
+    """The case this exists for: PGDATABASE pointing somewhere unvetted."""
     with pytest.raises(UnsafeDatabase) as excinfo:
-        assert_safe_database(PROD, env={})
+        assert_safe_database(UNRECOGNISED, env={})
     message = str(excinfo.value)
-    assert "investment_engine" in message
+    assert "engine_main" in message  # the refusal names the database it refused
     assert "TRUNCATE" in message
     assert OVERRIDE_FLAG in message  # the message names the way out
 
 
 def test_the_refusal_explains_both_escape_routes():
     with pytest.raises(UnsafeDatabase) as excinfo:
-        assert_safe_database(PROD, env={})
+        assert_safe_database(UNRECOGNISED, env={})
     message = str(excinfo.value)
     assert "scratch database" in message
     assert "never in .env" in message
@@ -99,14 +104,14 @@ def test_non_scratch_names_are_rejected(name):
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " 1 "])
 def test_truthy_override_grants_access(value):
     assert override_granted({OVERRIDE_FLAG: value}) is True
-    assert assert_safe_database(PROD, env={OVERRIDE_FLAG: value}) == "investment_engine"
+    assert assert_safe_database(UNRECOGNISED, env={OVERRIDE_FLAG: value}) == "engine_main"
 
 
 @pytest.mark.parametrize("value", ["0", "", "false", "no", "off", "maybe"])
 def test_everything_else_withholds_it(value):
     assert override_granted({OVERRIDE_FLAG: value}) is False
     with pytest.raises(UnsafeDatabase):
-        assert_safe_database(PROD, env={OVERRIDE_FLAG: value})
+        assert_safe_database(UNRECOGNISED, env={OVERRIDE_FLAG: value})
 
 
 def test_an_absent_override_withholds_access():
@@ -115,9 +120,9 @@ def test_an_absent_override_withholds_access():
 
 def test_a_working_dsn_is_not_consent():
     """The D27 lesson, applied to the database: capability is not permission."""
-    env = {"DATABASE_URL": PROD, "PGPASSWORD": "a-real-password"}
+    env = {"DATABASE_URL": UNRECOGNISED, "PGPASSWORD": "a-real-password"}
     with pytest.raises(UnsafeDatabase):
-        assert_safe_database(PROD, env=env)
+        assert_safe_database(UNRECOGNISED, env=env)
 
 
 def test_the_override_is_not_readable_from_dotenv():
@@ -170,3 +175,42 @@ def test_the_destructive_suite_calls_the_guard():
     assert "autouse=True" in source
     # The guard must run before anything connects.
     assert source.index("assert_safe_database") < source.index("psycopg.connect")
+
+
+# ── the protected class cannot be unlocked ───────────────────────────────────
+#
+# The lesson of 2026-10-20: the live-data database was wiped mid-session by a
+# suite run with INTEGRATION_DB_OK=1 typed from muscle memory. An override that
+# gets set reflexively is not a protection.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["investment_engine", "engine_prod", "prod_engine", "ie_live", "engine-production"],
+)
+def test_protected_names_are_refused_even_with_the_override(name):
+    dsn = f"postgresql://u@localhost:5432/{name}"
+    with pytest.raises(UnsafeDatabase, match="PROTECTED"):
+        assert_safe_database(dsn, env={"INTEGRATION_DB_OK": "1"})
+
+
+def test_the_refusal_names_the_scratch_database_to_use_instead():
+    with pytest.raises(UnsafeDatabase, match="PGDATABASE=ie_test"):
+        assert_safe_database(
+            "postgresql://u@localhost:5432/investment_engine",
+            env={"INTEGRATION_DB_OK": "1"},
+        )
+
+
+def test_the_scratch_database_still_passes_without_any_override():
+    assert assert_safe_database("postgresql://u@localhost:5432/ie_test", env={}) == "ie_test"
+
+
+def test_a_protected_name_beats_a_scratch_looking_suffix():
+    """`investment_engine_test` is a scratch database; `investment_engine` is not."""
+    assert (
+        assert_safe_database("postgresql://u@localhost:5432/investment_engine_test", env={})
+        == "investment_engine_test"
+    )
+    with pytest.raises(UnsafeDatabase, match="PROTECTED"):
+        assert_safe_database("postgresql://u@localhost:5432/investment_engine", env={})

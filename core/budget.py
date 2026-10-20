@@ -43,6 +43,10 @@ class Grant:
     granted: int
     spent_after: int
     budget: int
+    # True when the refusal came from the PROVIDER's own verdict rather than
+    # from our configured cap. Different cause, different remedy: raising
+    # `fmp.daily_call_budget` fixes the latter and does nothing for the former.
+    provider_exhausted: bool = False
 
     @property
     def declined(self) -> int:
@@ -123,12 +127,18 @@ class DayBudget:
                 (self.provider, day),
             )
             cur.execute(
-                "SELECT calls_spent FROM api_budget "
+                "SELECT calls_spent, provider_exhausted_at FROM api_budget "
                 "WHERE provider = %s AND session_date = %s FOR UPDATE",
                 (self.provider, day),
             )
-            prior = cur.fetchone()["calls_spent"]
-            granted = max(0, min(n, cap - prior))
+            row = cur.fetchone()
+            prior = row["calls_spent"]
+            # The provider has already told us it will serve nothing more today.
+            # Refuse locally: granting here would buy another round-trip whose
+            # only possible outcome is the same refusal, and FMP reports it as a
+            # 200, so it does not even look like one.
+            provider_done = row["provider_exhausted_at"] is not None
+            granted = 0 if provider_done else max(0, min(n, cap - prior))
             declined = n - granted
             if granted or declined:
                 cur.execute(
@@ -145,11 +155,60 @@ class DayBudget:
             granted=granted,
             spent_after=prior + granted,
             budget=self.budget,
+            provider_exhausted=provider_done,
         )
+
+    def mark_provider_exhausted(self, note: str, *, day: date | None = None) -> None:
+        """Record that the PROVIDER says its allowance for today is spent.
+
+        Called from the client the first time a provider answers with its
+        allowance-spent signal. From then on `spend()` refuses locally, so no
+        later job that day opens a socket to rediscover the same fact — which
+        is what cost 225 wasted calls on 2026-10-20.
+
+        Set once and never overwritten: the first observation is the useful one.
+        `scripts/fmp_probe.py` talks to `requests` directly and does not draw on
+        this budget, so a marked day does not block the diagnostic you would
+        reach for to find out whether the plan changed.
+        """
+        day = day or clock.session_date()
+        with db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO api_budget (provider, session_date) VALUES (%s, %s) "
+                "ON CONFLICT (provider, session_date) DO NOTHING",
+                (self.provider, day),
+            )
+            cur.execute(
+                "UPDATE api_budget SET provider_exhausted_at = now(), "
+                "provider_exhausted_note = %s, updated_at = now() "
+                "WHERE provider = %s AND session_date = %s "
+                "AND provider_exhausted_at IS NULL",
+                (note[:500], self.provider, day),
+            )
+
+    def provider_exhausted(self, day: date | None = None) -> str | None:
+        """The provider's own allowance-spent note for today, if any."""
+        row = db.fetch_one(
+            "SELECT provider_exhausted_note FROM api_budget "
+            "WHERE provider = %s AND session_date = %s "
+            "AND provider_exhausted_at IS NOT NULL",
+            (self.provider, day or clock.session_date()),
+        )
+        return row["provider_exhausted_note"] if row else None
 
     def spend_or_raise(self, n: int = 1, *, day: date | None = None) -> Grant:
         """Spend, raising `BudgetExhausted` if nothing at all was granted."""
         grant = self.spend(n, day=day)
+        if grant.exhausted and grant.provider_exhausted:
+            raise BudgetExhausted(
+                f"{self.provider} reports its own daily allowance spent for "
+                f"{grant.session_date}; refusing further calls without opening a "
+                f"socket. This engine spent {grant.spent_after} of its configured "
+                f"{self.budget} — the gap is what the provider served to something "
+                f"else (a probe, another deployment). Raising "
+                f"fmp.daily_call_budget will NOT help; the allowance resets on the "
+                f"provider's own schedule. Declined spend, not a failure (D29)."
+            )
         if grant.exhausted:
             raise BudgetExhausted(
                 f"{self.provider} daily call budget is exhausted "
@@ -196,14 +255,16 @@ class NullBudget(DayBudget):
 
     def spend(self, n: int = 1, *, day: date | None = None) -> Grant:
         _check_amount(n)
+        done = getattr(self, "provider_note", None) is not None
         self.total_requested += n
         return Grant(
             provider=self.provider,
             session_date=day or date.min,
             requested=n,
-            granted=n,
+            granted=0 if done else n,
             spent_after=self.total_requested,
             budget=0,
+            provider_exhausted=done,
         )
 
     # `day` is unused here but must keep its name: these override DayBudget and
@@ -216,3 +277,19 @@ class NullBudget(DayBudget):
 
     def remaining(self, day: date | None = None) -> int:  # noqa: ARG002
         return 1_000_000
+
+    def mark_provider_exhausted(
+        self,
+        note: str,
+        *,
+        day: date | None = None,  # noqa: ARG002
+    ) -> None:
+        """Remembered in memory only — a NullBudget has no database row.
+
+        Kept truthful rather than a bare `pass`, so a test can assert the client
+        reported the provider's verdict without standing up Postgres.
+        """
+        self.provider_note = note
+
+    def provider_exhausted(self, day: date | None = None) -> str | None:  # noqa: ARG002
+        return getattr(self, "provider_note", None)

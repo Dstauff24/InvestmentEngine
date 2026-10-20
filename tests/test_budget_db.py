@@ -270,3 +270,108 @@ def test_the_fmp_client_draws_one_call_per_request():
     assert session.calls == 3  # the fourth never reached the transport
     assert DayBudget("fmp", 3).spent() == 3
     assert isinstance(requests.Session(), requests.Session)
+
+
+# ── the provider-exhausted marker ─────────────────────────────────────────────
+#
+# `calls_spent` counts what THIS engine spent and cannot know what the provider
+# already served elsewhere. On 2026-10-20 the first live universe run began
+# believing it had 247 calls while FMP's allowance was nearly gone, and spent
+# 225 of them discovering that one symbol at a time — each answered with HTTP
+# 200, so each looked like a fresh request worth making.
+
+
+class CountingSession:
+    """A transport that refuses to be used, and counts attempts."""
+
+    def __init__(self, response=None):
+        self.calls = 0
+        self.response = response
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        if self.response is None:
+            raise AssertionError("transport was called when it should not have been")
+        return self.response
+
+
+class FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
+        self.ok = 200 <= status_code < 400
+
+    def json(self):
+        return self._payload
+
+
+def test_a_second_job_after_the_marker_makes_zero_transport_calls(stubbed_transport):
+    """THE point of the marker: the day's second job must not re-discover it.
+
+    `stubbed_transport` stands down the D27 consent gate, which otherwise fires
+    first and hides the behaviour under test. Nothing here reaches a socket —
+    the whole assertion is that the second job does not try to.
+    """
+    from ingest.fmp_client import FMPClient
+
+    spent_body = {"Error Message": "Limit Reach . Please upgrade your plan"}
+
+    # Job one: a generous budget, and the provider says no anyway.
+    session_one = CountingSession(FakeResponse(spent_body))
+    job_one = FMPClient(budget=budget(total=250), session=session_one)
+    with pytest.raises(Exception, match="daily allowance spent"):
+        job_one.quotes(["AAPL"])
+    assert session_one.calls == 1, "job one must actually reach the provider once"
+
+    # Job two: a brand-new client and budget object, as a separate `python -m`
+    # invocation from cron would have. It reads the marker from the database.
+    session_two = CountingSession(response=None)  # asserts if touched
+    job_two = FMPClient(budget=budget(total=250), session=session_two)
+    with pytest.raises(BudgetExhausted, match="reports its own daily allowance spent"):
+        job_two.quotes(["MSFT"])
+
+    assert session_two.calls == 0, (
+        "the second job opened a socket to rediscover what the first job "
+        "already recorded — which is the 225-wasted-call bug"
+    )
+
+
+def test_the_marker_is_scoped_to_its_session_date():
+    b = budget(total=10)
+    b.mark_provider_exhausted("allowance gone", day=DAY)
+    assert b.provider_exhausted(DAY) == "allowance gone"
+    assert b.provider_exhausted(NEXT_DAY) is None
+    # Tomorrow still spends normally.
+    assert b.spend(3, day=NEXT_DAY).granted == 3
+    assert b.spend(3, day=DAY).granted == 0
+
+
+def test_the_marker_keeps_the_first_observation():
+    b = budget(total=10)
+    b.mark_provider_exhausted("first", day=DAY)
+    b.mark_provider_exhausted("second", day=DAY)
+    assert b.provider_exhausted(DAY) == "first"
+
+
+def test_the_marker_still_records_declined_spend():
+    """A job stopping on the marker must report a shortfall, not a clean run."""
+    b = budget(total=10)
+    b.mark_provider_exhausted("allowance gone", day=DAY)
+    grant = b.spend(4, day=DAY)
+    assert grant.granted == 0
+    assert grant.declined == 4
+    assert grant.provider_exhausted is True
+    assert b.declined(DAY) == 4
+
+
+def test_the_marker_does_not_invent_spend():
+    """`calls_spent` must keep answering "what did WE spend", not "the cap"."""
+    b = budget(total=250)
+    b.spend(7, day=DAY)
+    b.mark_provider_exhausted("allowance gone", day=DAY)
+    b.spend(50, day=DAY)
+    assert b.spent(DAY) == 7, (
+        "collapsing the two numbers would erase the divergence between our "
+        "accounting and the provider's, which is the thing worth seeing"
+    )

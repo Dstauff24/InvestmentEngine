@@ -275,10 +275,47 @@ def test_transient_statuses_are_retried(status):
 
 
 def test_a_quota_message_in_a_200_body_is_still_an_auth_error():
-    """FMP signals quota problems with a 200 and an error string."""
+    """FMP signals an exhausted allowance with a 200 and an error string.
+
+    The 200 is what makes it dangerous: it reads as a successful request that
+    happened to return an unhelpful body. Live on 2026-10-20 this was mistaken
+    for a per-symbol data gap 225 times in a single run.
+    """
     api, _ = client(FakeResponse({"Error Message": "Limit Reach. Please upgrade your plan."}))
-    with pytest.raises(FMPAuthError, match="plan/quota"):
+    with pytest.raises(FMPAuthError, match="daily allowance spent"):
         api.quotes(["AAPL"])
+    # and the verdict is recorded, so nothing re-discovers it today
+    assert api.budget.provider_exhausted() is not None
+
+
+def test_an_ordinary_plan_message_is_not_an_allowance_marker():
+    """A plan complaint that is not about the daily allowance must not mark."""
+    api, _ = client(FakeResponse({"Error Message": "Exclusive endpoint. Upgrade required."}))
+    with pytest.raises(FMPAuthError):
+        api.quotes(["AAPL"])
+    # "upgrade required" is a PLAN statement, not "today's allowance is gone".
+    # Marking on it would silence every FMP call for the rest of the day over an
+    # endpoint this engine may not even use again.
+    assert api.budget.provider_exhausted() is None
+
+
+def test_a_pacing_429_stays_retryable_and_does_not_mark():
+    """A 429 about pacing is transient; only one about the plan is terminal."""
+    from ingest.fmp_client import FMPTransientError
+
+    api, _ = client(FakeResponse(_INVALID, status_code=429, text="Too Many Requests: slow down"))
+    with pytest.raises(FMPTransientError):
+        api.quotes(["AAPL"])
+    assert api.budget.provider_exhausted() is None
+
+
+def test_an_allowance_429_marks_and_is_not_retryable():
+    api, _ = client(
+        FakeResponse(_INVALID, status_code=429, text="Limit Reach . Please upgrade your plan")
+    )
+    with pytest.raises(FMPAuthError, match="daily allowance spent"):
+        api.quotes(["AAPL"])
+    assert api.budget.provider_exhausted() is not None
 
 
 def test_non_json_is_reported_as_such():
