@@ -1,0 +1,68 @@
+# ── Secrets — NEVER commit these ────────────────────────────────────────────
+# `.env*` covers .env, .env.local, .env.production, …; the negation re-admits
+# only the documented template.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# ── Broker / API token files (D21: Schwab token is minted on the laptop) ────
+# `*token*.json` is deliberately broad: the Schwab token is the one file whose
+# leak would hand over read access to a real brokerage account.
+*token*.json
+.tokens/
+
+# ── Local data, snapshots, backups ──────────────────────────────────────────
+# NOTE: `data/*`, NOT `data/`. Git cannot re-include a file inside an EXCLUDED
+# DIRECTORY, so `data/` would silently defeat the `!data/.gitkeep` below and the
+# directory would vanish from the repo.
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.dump.gz
+*.sql.gz
+*.parquet
+*.csv
+!tests/fixtures/*.csv
+backups/
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# ── Tooling caches ──────────────────────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# ── Editors / OS ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

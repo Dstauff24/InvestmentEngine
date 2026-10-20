@@ -1,0 +1,32 @@
+# Investment Decision Engine — runtime dependencies
+# Python 3.11+ (see README.md for VM setup; Ubuntu 24.04 ships 3.12).
+#
+#   pip install -r requirements.txt
+#
+# Compatible-release pins (~=) so unattended cron runs stay stable while still
+# taking patch fixes. CLAUDE.md: no provider SDKs for FMP/Finnhub — plain
+# `requests` against a handful of documented endpoints is easier to fix when a
+# field name changes than a dependency bump.
+
+# ── Core / config ───────────────────────────────────────────────────────────
+python-dotenv~=1.0          # .env loading; secrets never live in the repo
+PyYAML~=6.0                 # config/*.yaml
+pydantic~=2.13              # config schema validation — a typo fails loudly
+
+# ── Database (D20: Postgres >=15 + TimescaleDB) ─────────────────────────────
+psycopg[binary]~=3.3        # Postgres driver (v3)
+
+# ── HTTP / data providers ───────────────────────────────────────────────────
+requests~=2.32              # FMP + Finnhub REST (explicit over SDK magic)
+tenacity~=9.0               # retry/backoff on transient API failures
+
+# ── Broker (D3) ─────────────────────────────────────────────────────────────
+schwab-py~=1.5              # Schwab Trader API: quotes, price history, chains
+
+# ── Analytics ───────────────────────────────────────────────────────────────
+pandas~=2.2                 # feature frames; fixture-driven unit tests
+numpy~=2.1
+
+# ── Phase 2 placeholders (uncomment when that phase starts) ────────────────
+# anthropic~=0.40           # D6: transcript tone scoring
+# fredapi~=0.5              # D6: macro series

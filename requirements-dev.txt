@@ -1,0 +1,9 @@
+# Development / CI dependencies.
+#   pip install -r requirements.txt -r requirements-dev.txt
+# The VM installs requirements.txt only — it has no reason to carry a test runner.
+-r requirements.txt
+
+ruff~=0.7                   # lint + format (see [tool.ruff] in pyproject.toml)
+pytest~=8.3
+pytest-cov~=6.0
+responses~=0.25             # stub HTTP in tests — NO network in the suite (D27)

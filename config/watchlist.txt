@@ -1,0 +1,11 @@
+# config/watchlist.txt — your manual additions to the Phase 1 universe (D14).
+#
+# One ticker per line. Blank lines and '#' comments ignored. Case-insensitive.
+# Merged in AFTER the index pull and EXEMPT from the average-volume liquidity
+# filter — if you put it here, you want it scored.
+#
+# Keep it small. Every name here is a name the engine scores every single day.
+
+# Example (delete and add your own):
+# SOFI
+# PLTR

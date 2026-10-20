@@ -1,0 +1,64 @@
+# Tooling config for the Investment Decision Engine.
+# Not a packaged distribution — the engine runs from a checkout on the VM, and
+# every entry point is `python -m <package>.<module>`.
+
+[tool.ruff]
+target-version = "py311"     # the stated floor; Ubuntu 24.04 ships 3.12
+line-length = 100
+src = ["."]
+exclude = [".venv", "venv", "data", "backups", "db/migrations"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort — import ordering
+    "UP",       # pyupgrade
+    "B",        # bugbear — likely bugs
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "RET",      # return consistency
+    "PTH",      # prefer pathlib over os.path
+    "DTZ",      # naive datetimes — see the note below
+    "T20",      # no stray print() in library code
+    "ARG",      # unused arguments
+    "RUF",      # ruff-specific
+]
+# DTZ is the deliberate one. CLAUDE.md requires every DB timestamp to be UTC
+# while every trading-day boundary is Eastern; a bare `datetime.now()` or
+# `date.today()` is the exact bug that silently files a bar under the wrong
+# session. DTZ makes that a lint failure instead of a data-integrity incident.
+
+ignore = [
+    "E501",     # line length is enforced by the formatter, not the linter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Entry points and operator-facing scripts are supposed to write to the console.
+# Library code is not: a print() in ingest/ or features/ is output nobody will
+# see on a cron run and nobody can route to a log.
+"jobs/*" = ["T20"]
+"scripts/*" = ["T20"]
+"ingest/*" = ["T20"]
+"db/init.py" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "alerts", "backtest", "core", "db", "decision",
+    "features", "ingest", "jobs", "scoring", "shadow_book",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Integration tests need a live Postgres and are excluded from the default run,
+# so `pytest` stays DB-free and network-free (CLAUDE.md). Run them explicitly:
+#     pytest -m integration
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: touches a real database; excluded from the default run",
+]

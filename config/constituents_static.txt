@@ -1,0 +1,28 @@
+# config/constituents_static.txt — offline fallback for the D14 universe (D29).
+#
+# WHY THIS FILE EXISTS
+# FMP's free tier 402-gates both constituents endpoints (`sp500-constituent`
+# and `nasdaq-constituent`). Until the plan is upgraded, ingest/universe.py
+# reads this file instead and logs a warning naming the header date below, so a
+# stale list can never be mistaken for a live pull.
+#
+# FORMAT
+#   SYMBOL,INDEX        where INDEX is SP500 or NDX100
+# A symbol in both indices gets two lines; the builder unions them and sets
+# both membership flags (that is how 500 + 100 becomes ~550 unique).
+# Blank lines and '#' comments ignored. Case-insensitive.
+#
+# AS_OF: not yet populated
+# ^^^ ingest/universe.py parses this date and warns about its age. Update it in
+# the same edit as the symbols, never separately.
+#
+# HOW TO POPULATE (must be human-sourced — this is deliberately not scraped)
+#   S&P 500:    https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
+#   Nasdaq 100: https://en.wikipedia.org/wiki/Nasdaq-100
+# Use the dot form for share classes (BRK.B, not BRK/B); the DB stores the dot
+# form as canonical and the Schwab client translates at its own boundary.
+#
+# REQUIRED BEFORE GATE 1a. With this file empty the universe builder has
+# nothing to build from and will refuse rather than write an empty universe.
+
+# SYMBOL,INDEX
