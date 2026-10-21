@@ -12,6 +12,7 @@ process was killed before it could run any code.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import date
 
 import psycopg
@@ -382,3 +383,91 @@ def test_an_unnamed_exception_is_still_failed_without_clean_stop():
         raise BudgetExhausted("spent")
 
     assert row("canary")["status"] == "failed"
+
+
+# ── a successful retry must RECOVER the day ──────────────────────────────────
+#
+# Found live 2026-10-21: a `daily_close` killed by a timeout left estimates
+# abandoned and chains partial. The re-run succeeded at EVERY step and
+# `day_complete` stayed false, because the view counted the superseded rows.
+# Gate 4 starts the D7 clock on the first `day_complete = true`, so one bad
+# first night would have stopped the clock starting while every step showed
+# green and the operator was told the day had failed.
+
+
+def _run(job_name: str, *, status: str, critical: bool) -> None:
+    """Write one closed job_runs row with the given outcome."""
+    if status == "success":
+        with job_run(job_name, session_date=DAY, is_critical=critical):
+            pass
+        return
+    if status == "skipped":
+        with job_run(job_name, session_date=DAY, is_critical=critical) as run:
+            run.skip("deliberate")
+        return
+    with (
+        contextlib.suppress(RuntimeError),
+        job_run(job_name, session_date=DAY, is_critical=critical),
+    ):
+        raise RuntimeError("deliberate failure")
+
+
+def test_a_successful_retry_recovers_the_day():
+    _run("snapshot", status="failed", critical=True)
+    assert not day_is_complete(DAY)
+
+    _run("snapshot", status="success", critical=True)
+    assert day_is_complete(DAY), "the latest run succeeded; the day has its data"
+    assert failed_critical_jobs(DAY) == []
+
+
+def test_the_retry_history_is_not_hidden():
+    """The day recovered, but it must not look like it went smoothly."""
+    _run("snapshot", status="failed", critical=True)
+    _run("snapshot", status="success", critical=True)
+
+    row = db.fetch_one("SELECT * FROM v_day_status WHERE session_date = %s", (DAY,))
+    assert row["day_complete"] is True
+    assert row["jobs_run"] == 1, "one job, judged by its latest run"
+    assert row["attempts"] == 2, "both attempts stay visible"
+    assert row["jobs_failed"] == 0, "the failure is superseded, not current"
+    # and the full audit trail is still in job_runs
+    assert (
+        db.fetch_one("SELECT count(*) AS n FROM job_runs WHERE session_date = %s", (DAY,))["n"] == 2
+    )
+
+
+def test_a_failure_AFTER_a_success_still_blocks():
+    """Latest-run-wins cuts both ways; it is not 'any success anywhere'."""
+    _run("snapshot", status="success", critical=True)
+    assert day_is_complete(DAY)
+    _run("snapshot", status="failed", critical=True)
+    assert not day_is_complete(DAY)
+    assert [r["job_name"] for r in failed_critical_jobs(DAY)] == ["snapshot"]
+
+
+def test_a_partial_critical_job_still_fails_the_day():
+    """D7/D22: an incomplete snapshot is a snapshot we do not have."""
+    with job_run("snapshot", session_date=DAY, is_critical=True) as run:
+        run.symbol_ok()
+        run.symbol_failed()
+    assert (
+        db.fetch_one(
+            "SELECT status FROM job_runs WHERE job_name='snapshot' ORDER BY id DESC LIMIT 1"
+        )["status"]
+        == "partial"
+    )
+    assert not day_is_complete(DAY)
+
+
+def test_a_retried_job_appears_once_in_the_veto_list():
+    """Two failed attempts are one blocked job, not two."""
+    _run("snapshot", status="failed", critical=True)
+    _run("snapshot", status="failed", critical=True)
+    assert [r["job_name"] for r in failed_critical_jobs(DAY)] == ["snapshot"]
+
+
+def test_a_non_critical_failure_never_blocks_the_day():
+    _run("snapshot", status="success", critical=True)
+    _run("extras", status="failed", critical=False)
+    assert day_is_complete(DAY)

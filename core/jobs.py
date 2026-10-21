@@ -210,12 +210,23 @@ def day_is_complete(day: date) -> bool:
 
 
 def failed_critical_jobs(day: date) -> list[dict]:
-    """Critical jobs for `day` that did not succeed. The orchestrator's veto list."""
+    """Critical jobs for `day` whose LATEST run did not succeed.
+
+    Latest-run-wins, matching `v_day_status`. Querying every row listed each
+    superseded attempt separately, so a job retried twice appeared in the veto
+    list twice and a job that had since succeeded appeared at all — the
+    orchestrator reported a day as blocked by a failure it had already fixed.
+    """
     return db.fetch_all(
         """
         SELECT job_name, status, error, rows_written
-        FROM   job_runs
-        WHERE  session_date = %s AND is_critical AND status <> 'success'
+        FROM (
+            SELECT DISTINCT ON (job_name) job_name, status, error, rows_written, is_critical
+            FROM   job_runs
+            WHERE  session_date = %s
+            ORDER  BY job_name, started_at DESC, id DESC
+        ) latest
+        WHERE  is_critical AND status <> 'success'
         ORDER  BY job_name
         """,
         (day,),

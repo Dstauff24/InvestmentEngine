@@ -34,7 +34,7 @@ COMPRESSION_POLICY = re.compile(
 
 
 def test_expected_tables_match_schema():
-    declared = set(CREATE_TABLE.findall(SCHEMA))
+    declared = set(CREATE_TABLE.findall(SCHEMA_CODE))
     assert declared == set(EXPECTED_TABLES), (
         "db/init.EXPECTED_TABLES is out of sync with schema.sql: "
         f"only in schema={sorted(declared - set(EXPECTED_TABLES))}, "
@@ -58,7 +58,7 @@ def test_the_api_budget_table_is_keyed_per_provider_and_day():
 
 
 def test_expected_views_match_schema():
-    assert set(CREATE_VIEW.findall(SCHEMA)) == set(EXPECTED_VIEWS)
+    assert set(CREATE_VIEW.findall(SCHEMA_CODE)) == set(EXPECTED_VIEWS)
 
 
 def test_d20_hypertables_are_exactly_the_four_named():
@@ -242,3 +242,26 @@ def test_news_articles_primary_key_is_per_symbol():
         "article_id",
         "symbol",
     }
+
+
+# ── the DDL scanners must read SQL, not prose ────────────────────────────────
+
+
+def test_a_comment_cannot_inject_a_table_or_view_name():
+    """These scanners read SCHEMA_CODE, never the raw text.
+
+    A comment on 2026-10-21 reading "CREATE OR REPLACE VIEW may only append
+    columns" made `test_expected_views_match_schema` report a view named `may`.
+    Same class as the retention-policy check, which reads SCHEMA_CODE for
+    exactly this reason: a sentence about SQL is not SQL.
+    """
+    prose = (
+        "-- CREATE TABLE IF NOT EXISTS ghost_table (id int);\n"
+        "-- CREATE OR REPLACE VIEW ghost_view AS SELECT 1;\n"
+    )
+    code = re.sub(r"--[^\n]*", "", prose)
+    assert CREATE_TABLE.findall(code) == []
+    assert CREATE_VIEW.findall(code) == []
+    # and the real scanners agree about the shipped schema
+    assert "may" not in set(CREATE_VIEW.findall(SCHEMA_CODE))
+    assert "ghost_table" not in set(CREATE_TABLE.findall(SCHEMA_CODE))

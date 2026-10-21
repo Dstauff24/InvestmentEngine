@@ -791,18 +791,47 @@ ORDER  BY symbol;
 -- is FALSE while any critical (snapshot) job for that date is not 'success'.
 -- The orchestrator reads THIS, never a hard-coded job list, so adding a
 -- critical job cannot leave the rule out of date.
+-- Judged by each job's LATEST run, so a successful retry RECOVERS the day.
+--
+-- The earlier version counted every row for the date, which meant one failed
+-- attempt poisoned that day permanently: a killed run on 2026-10-21 left
+-- estimates abandoned and chains partial, the re-run succeeded at every step,
+-- and `day_complete` stayed false. Gate 4 starts the D7 clock on the first
+-- `day_complete = true`, so a bad first night would have stopped the clock
+-- starting at all while every step showed green.
+--
+-- Retry history is kept: all attempts stay in `job_runs`, and `attempts`
+-- surfaces the count so a day that needed three goes does not look serene.
+-- `attempts` is LAST because CREATE OR REPLACE VIEW may only append columns.
+--
+-- `partial` still fails the day for a critical job: an incomplete snapshot is a
+-- snapshot we do not have (D7/D22), and 431 of 433 chains is a permanent hole.
 CREATE OR REPLACE VIEW v_day_status AS
-SELECT session_date,
-       count(*)                                                   AS jobs_run,
-       count(*) FILTER (WHERE status = 'failed')                   AS jobs_failed,
-       count(*) FILTER (WHERE status = 'running')                  AS jobs_running,
-       count(*) FILTER (WHERE is_critical)                         AS critical_jobs,
-       count(*) FILTER (WHERE is_critical AND status = 'success')  AS critical_ok,
-       (count(*) FILTER (WHERE is_critical) > 0
-        AND count(*) FILTER (WHERE is_critical AND status <> 'success') = 0)
-                                                                   AS day_complete
-FROM   job_runs
-GROUP  BY session_date;
+WITH latest AS (
+    -- `id` breaks ties when two runs share a started_at.
+    SELECT DISTINCT ON (session_date, job_name)
+           session_date, job_name, status, is_critical
+    FROM   job_runs
+    ORDER  BY session_date, job_name, started_at DESC, id DESC
+),
+counts AS (
+    SELECT session_date, count(*) AS attempts
+    FROM   job_runs
+    GROUP  BY session_date
+)
+SELECT l.session_date,
+       count(*)                                                      AS jobs_run,
+       count(*) FILTER (WHERE l.status = 'failed')                    AS jobs_failed,
+       count(*) FILTER (WHERE l.status = 'running')                   AS jobs_running,
+       count(*) FILTER (WHERE l.is_critical)                          AS critical_jobs,
+       count(*) FILTER (WHERE l.is_critical AND l.status = 'success')  AS critical_ok,
+       (count(*) FILTER (WHERE l.is_critical) > 0
+        AND count(*) FILTER (WHERE l.is_critical AND l.status <> 'success') = 0)
+                                                                      AS day_complete,
+       c.attempts
+FROM   latest l
+JOIN   counts c USING (session_date)
+GROUP  BY l.session_date, c.attempts;
 
 
 -- ============================================================================
