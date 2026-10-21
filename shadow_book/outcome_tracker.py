@@ -174,10 +174,20 @@ def evaluate_call(
             result.current_stop = stop
 
         if entry_price is None:
-            # Not filled yet. A limit inside the zone fills when price trades
-            # into it; the fill is taken at the zone edge rather than the bar's
-            # extreme, which would assume a better price than a resting order
-            # would get.
+            # THE ENTRY DEADLINE, enforced here rather than left to the caller.
+            # A plan that has not filled within its horizon is dead (the
+            # `never_triggered` rule below), and that was previously true only
+            # because this runs DAILY: the next run would close it before it
+            # could fill. Two callers can no longer agree by accident —
+            # `backtest/resolve.py` hands over a whole forward window at once,
+            # and without this it would fill a plan on day 25 that the live
+            # tracker had abandoned on day 16. It also covers a pipeline that
+            # missed a week: a resumed tracker must not fill an expired plan.
+            if (day - _d(call["called_on"])).days > horizon:
+                break
+            # A limit inside the zone fills when price trades into it; the fill
+            # is taken at the zone edge rather than the bar's extreme, which
+            # would assume a better price than a resting order would get.
             if low <= entry_high:
                 entry_price = min(entry_high, max(low, entry_low))
                 entered_on = day

@@ -988,8 +988,8 @@ def documented_parameters() -> dict[int, str]:
     }
 
 
-def test_the_doc_lists_exactly_76_parameters():
-    assert len(documented_parameters()) == 76
+def test_the_doc_lists_exactly_80_parameters():
+    assert len(documented_parameters()) == 80
 
 
 def test_every_tagged_value_is_documented():
@@ -1016,7 +1016,7 @@ def test_the_tag_numbering_is_contiguous():
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 76
+    assert len(tagged_parameters()) == 80
 
 
 # ══════════════════════════════════════════════════════════════════════════

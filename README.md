@@ -27,15 +27,17 @@ core/          settings.py (sole reader of os.environ), config.py, db.py, clock.
                ratelimit.py, jobs.py, netguard.py
 db/            schema.sql, init.py, migrations/
 ingest/        fmp_client.py, universe.py, fmp_fundamentals.py, fmp_estimates.py, fmp_events.py,
+               fmp_history.py, edgar_client.py, edgar_insiders.py,
                finnhub_client.py, finnhub_news.py, schwab_client.py, schwab_prices.py,
                schwab_chains.py, runner.py
-features/      adjustment.py, iv.py
-scoring/       pillars.py, composite.py, recipes/
-decision/      idea_builder.py, tiering.py, risk_manager.py
-shadow_book/   logger.py, outcome_tracker.py, analytics.py
-alerts/        mailer.py, email_digest.py
-jobs/          daily_close.py
-backtest/      (Phase 2)
+features/      adjustment.py, iv.py, evidence.py, technical.py, fundamental.py,
+               catalyst.py, sentiment.py
+scoring/       pillars.py, composite.py, runner.py, recipes/
+decision/      book.py, idea_builder.py
+shadow_book/   logger.py, outcome_tracker.py
+alerts/        notify.py, mailer.py, telegram.py, store.py, digest.py
+jobs/          daily_close.py, scoring_pass.py, price_basis_check.py
+backtest/      costs.py, resolve.py, regime.py, engine.py, metrics.py, sweep.py
 scripts/       fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py,
                telegram_test.py
 tests/         fixture-driven; no network, no DB by default
@@ -313,10 +315,47 @@ with the real consent gate and the real redaction, so a success means the alert
 path works rather than that a harness does. `--long` exercises the
 over-4096-character split; `--no-record` leaves the `alerts` table untouched.
 
-Run `ingest.fmp_events --backfill-actions` once before the first backtest:
-`corporate_actions` must reach back at least as far as the price history the
-backtest reads, or `features/adjustment.py` produces a wrong total-return series
-for every earlier bar — silently, with no error (D24, O7).
+### Deep history, once (O7)
+
+Three commands, in this order, before the first backtest on a fresh database:
+
+```bash
+ALLOW_LIVE_CALLS=1 python -m ingest.fmp_events --backfill-actions   # ~866 calls
+ALLOW_LIVE_CALLS=1 python -m ingest.fmp_history --years 5           # ~434 + 433
+python -m jobs.price_basis_check                                    # verify D24
+```
+
+**The order is not a preference.** `corporate_actions` must reach back at least
+as far as the price history, or `features/adjustment.py` produces a wrong
+total-return series for every earlier bar — silently, with no error (D24, O7).
+
+`fmp_history` pulls five years of RAW daily bars (one call per symbol, from
+`/stable/historical-price-eod/non-split-adjusted` — the `full` endpoint is
+split-adjusted and storing it would make every read-time factor an adjustment of
+an adjustment) and ten years of earnings dates per symbol. It never overwrites a
+session another provider already wrote, and reports how far the two disagree
+where they overlap.
+
+`price_basis_check` is the standing guard and also runs in the daily pipeline: a
+raw series steps by the split ratio at an ex-date, an adjusted one does not. If
+it fails, `python -m ingest.fmp_history --repair-split-basis` re-sources the
+restated sessions.
+
+### Backtest (D39(4)/O7)
+
+```bash
+python -m backtest.engine --years 4 --workers 2 --out data/backtest.csv
+python -m backtest.sweep --measure-only          # the live distributions (D43)
+python -m backtest.sweep --sample 60 --years 3   # sweep the existence gates
+```
+
+No network and no consent flag: both read stored data only. The engine walks
+every session forward, enters on the NEXT bar, charges friction, and resolves
+each plan through the Shadow Book's own `evaluate_call` so the backtest and the
+live book cannot disagree about what happened to a trade. It measures the
+RECIPES, not the composite — the estimate-revision, IV, insider and news series
+all start 2026-10-21 — and the universe is today's constituents, so every number
+is an upper bound.
 
 Every job writes a row to `job_runs` (start, end, status, rows_written, error).
 The orchestrator refuses to mark a day complete if a critical snapshot job failed.

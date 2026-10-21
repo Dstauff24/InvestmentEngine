@@ -162,9 +162,15 @@ def rsi_wilder(closes: pd.Series, period: int = 14) -> float | None:
     # Seed with the simple mean of the first `period`, then smooth.
     avg_gain = float(gains.iloc[:period].mean())
     avg_loss = float(losses.iloc[:period].mean())
+    # Read the tail out of pandas ONCE. `.iloc[i]` inside the loop costs ~5us a
+    # call, which on a 400-bar window is most of this function's runtime and
+    # most of a 400-symbol scoring pass. The arithmetic, its order and its
+    # results are untouched — tests/test_technical.py pins the values.
+    gain_values = gains.to_numpy(dtype=float)
+    loss_values = losses.to_numpy(dtype=float)
     for i in range(period, len(delta)):
-        avg_gain = (avg_gain * (period - 1) + float(gains.iloc[i])) / period
-        avg_loss = (avg_loss * (period - 1) + float(losses.iloc[i])) / period
+        avg_gain = (avg_gain * (period - 1) + gain_values[i]) / period
+        avg_loss = (avg_loss * (period - 1) + loss_values[i]) / period
 
     if avg_loss == 0.0:
         # No down-closes in the window. RSI is 100 by definition; returning it
@@ -201,8 +207,11 @@ def atr(bars: pd.DataFrame, period: int = 14) -> float | None:
         return None
 
     value = float(spans.iloc[:period].mean())
+    # Out of pandas once; see the note in `rsi_wilder`. Same arithmetic, same
+    # order, same result.
+    span_values = spans.to_numpy(dtype=float)
     for i in range(period, len(spans)):
-        value = (value * (period - 1) + float(spans.iloc[i])) / period
+        value = (value * (period - 1) + span_values[i]) / period
     return value
 
 
@@ -569,15 +578,21 @@ def compute(
     *,
     sector_closes: pd.Series | None = None,
     cfg: config.PullbackRecipe | None = None,
+    structure_cfg: config.BreakoutRecipe | None = None,
 ) -> TechnicalFeatures:
     """Measure one symbol from one frame of bars. Pure: no DB, no network.
 
     Window lengths come from `config/scoring.yaml`'s pullback recipe, which is
     where D25 says numbers live — the MA triple and the RSI period are shared
     across every technical reading, not private to that recipe.
+
+    `structure_cfg` exists for D43's sweep. `min_base_weeks` and
+    `max_base_depth_pct` are read by the MEASUREMENT as well as by the gate, so
+    sweeping them means recomputing the features — passing them in is what lets
+    a sweep do that without mutating global config under a running process.
     """
     recipe = cfg or config.scoring().recipes.pullback_to_trend
-    breakout = config.scoring().recipes.base_breakout
+    breakout = structure_cfg or config.scoring().recipes.base_breakout
     _require_ascending(bars)
 
     column = "adj_close" if "adj_close" in bars else "close"

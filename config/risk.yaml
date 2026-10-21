@@ -165,6 +165,29 @@ exits:
     timeout: thesis_trigger
     max_holding_days: null
 
+# ── Execution friction (D39(4)) ─────────────────────────────────────────────
+# What it costs to turn a plan into a position. A backtest that fills at the
+# signal price is a backtest of a different strategy, so these are the numbers
+# the walk-forward charges every simulated trade.
+#
+# Shares first, because that is the vehicle every historical plan used: Schwab
+# charges no commission on US equities, so the whole cost is the spread and the
+# slip between the resting limit and the print.
+execution:
+  slippage_bps: 5.0                     # [OPEN] #77 — each side, in basis points
+  commission_per_share: 0.0             # Schwab: no commission on US equities
+  min_commission: 0.0                   # Schwab
+  # OPTIONS. Modelled and UNEXERCISED: D36 picks the vehicle from IV rank, and
+  # the IV history starts 2026-10-21, so no historical idea could ever have
+  # selected optionality. The numbers are declared so the model is complete and
+  # the assumptions are visible, not because a backtest has used them — they are
+  # the first thing to re-measure against real chains before any option trade.
+  options:
+    premium_pct_of_spot: 5.0            # [OPEN] #78 — an ATM-ish 45-DTE call
+    delta: 0.55                         # [OPEN] #79 — what a dollar of stock move is worth
+    spread_pct_of_premium: 4.0          # [OPEN] #80 — crossed on entry and exit
+    commission_per_contract: 0.65       # Schwab's published options rate
+
 # ── Stable buckets — ETFs and long holds (D17) ──────────────────────────────
 stable_buckets:
   excluded_from_heat: true              # D17

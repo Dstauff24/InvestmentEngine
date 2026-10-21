@@ -700,6 +700,32 @@ class Exits(Base):
     hold: HoldExits
 
 
+class OptionFriction(Base):
+    """What an option vehicle costs on top of the share plan (D39(4)).
+
+    MODELLED AND UNEXERCISED. D36 selects the vehicle from IV rank, whose
+    history starts 2026-10-21, so no historical idea could have chosen
+    optionality — these numbers have never priced a trade. They are declared so
+    the cost model is whole and its assumptions are visible rather than
+    implicit, and they are the first thing to re-measure against stored chains.
+    """
+
+    premium_pct_of_spot: Annotated[float, Field(gt=0, le=100)]  # [OPEN] #78
+    delta: Annotated[float, Field(gt=0, le=1)]  # [OPEN] #79
+    spread_pct_of_premium: Annotated[float, Field(ge=0, le=100)]  # [OPEN] #80
+    commission_per_contract: Annotated[float, Field(ge=0)]
+
+
+class Execution(Base):
+    """Plan -> fill. D39(4): a backtest filling at the signal price is a
+    backtest of a different strategy."""
+
+    slippage_bps: Annotated[float, Field(ge=0)]  # [OPEN] #77
+    commission_per_share: Annotated[float, Field(ge=0)]
+    min_commission: Annotated[float, Field(ge=0)]
+    options: OptionFriction
+
+
 class StableBuckets(Base):
     excluded_from_heat: bool
     use_hard_stops: bool
@@ -897,6 +923,7 @@ class RiskConfig(Base):
     options: OptionsRisk
     circuit_breaker: CircuitBreaker
     exits: Exits
+    execution: Execution
     stable_buckets: StableBuckets
     allocation_targets: AllocationTargets
     vehicle_by_iv_rank: VehicleByIVRank

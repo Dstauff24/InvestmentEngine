@@ -44,6 +44,9 @@ ignore = [
 "core/config.py" = ["T20"]      # has a `python -m core.config` CLI
 "core/jobs.py" = ["T20"]        # has a `python -m core.jobs` maintenance CLI
 "scoring/runner.py" = ["T20"]   # has a `python -m scoring.runner` CLI
+"backtest/engine.py" = ["T20"]  # has a `python -m backtest.engine` CLI
+"backtest/sweep.py" = ["T20"]   # has a `python -m backtest.sweep` CLI
+"backtest/metrics.py" = ["T20"] # has a `python -m backtest.metrics` re-render CLI
 # ARG is unavoidable in tests: a pytest fixture requested for its side effect
 # but unused in the body trips ARG001 and CANNOT be renamed to `_name` without
 # breaking fixture resolution, and a stub's (*a, **k) signature has to match the

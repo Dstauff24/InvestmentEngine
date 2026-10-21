@@ -219,3 +219,38 @@ def test_prior_excursions_are_carried_forward_not_reset():
     )
     assert r.mfe == pytest.approx(9.0)
     assert r.mae == pytest.approx(-3.0)
+
+
+# ── the entry deadline ──────────────────────────────────────────────────────
+
+
+def test_a_plan_cannot_fill_after_its_horizon_has_passed():
+    """THE RULE WAS ONLY TRUE BY ACCIDENT.
+
+    `never_triggered` means a plan that waited too long is no longer the plan
+    that was called — but nothing enforced it inside this function, so it held
+    only because the tracker runs DAILY and the next run would close the call
+    before a late fill could happen. Two things break that: a backtest handing
+    over a whole forward window at once, and a pipeline that missed a week.
+    Both would fill a plan the live engine had already abandoned.
+    """
+    bars = [bar(i, 140, 130) for i in range(1, 17)]
+    bars += [bar(17, 101, 99.0), bar(18, 125, 100.0)]
+
+    r = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=18))
+
+    assert r.actual_entry is None, "a dead plan must not fill"
+    assert r.outcome == "never_triggered"
+    assert r.r_multiple is None
+
+
+def test_a_fill_on_the_last_day_of_the_horizon_still_counts():
+    """The deadline is a boundary, not a safety margin — closing a day early
+    would silently shorten every recipe's entry window."""
+    bars = [bar(i, 140, 130) for i in range(1, 15)]
+    bars.append(bar(15, 101, 99.0))
+
+    r = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=15))
+
+    assert r.actual_entry is not None
+    assert r.actual_entry_at == CALLED + timedelta(days=15)

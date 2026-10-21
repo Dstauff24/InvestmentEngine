@@ -1,6 +1,6 @@
 # Open Parameters (rebuild baseline, Oct 20 2026)
 
-Config values no decision (D1–D42) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
+Config values no decision (D1–D42) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. Rows 77–80 are D39(4)'s execution friction, added Oct 21, 2026 with the backtest engine; #78–80 price an option vehicle no historical idea could select, because IV rank's history starts the same day. D13's quarterly Shadow Book review is where they stop being guesses.
 
 Everything NOT tagged `[OPEN]` traces to a decision and is asserted by a named test in `tests/test_config.py`.
 
@@ -187,6 +187,10 @@ the gate does real work.
 | 74 | `geometry.base_breakout.tp2_depth_multiple` | `1.8` | Same | TP2's extension. Loader requires it to exceed TP1's. | High |
 | 75 | `geometry.post_earnings_drift.tp1_gap_multiple` | `1.0` | Recipe 3; no target rule | TP1 as a multiple of the gap — the market's own statement about what the news was worth. | High |
 | 76 | `geometry.post_earnings_drift.tp2_gap_multiple` | `2.0` | Same | TP2's extension. Loader requires it to exceed TP1's. | High |
+| 77 | `execution.slippage_bps` | `5.0` | D39(4) says model fills; no decision fixes the number | Charged on BOTH sides of every simulated trade. 5bp on a liquid S&P name is a conservative read of the spread plus the slip between a resting limit and the print; the backtest reports gross and net R side by side so the haircut's size is never hidden. Re-measure against real fills once there are any. | High |
+| 78 | `execution.options.premium_pct_of_spot` | `5.0` | D36 picks the vehicle; nothing fixes its cost | An ATM-ish 45-DTE call as a share of spot. MODELLED AND UNEXERCISED — IV rank (D7/D22) starts 2026-10-21, so no historical idea could select optionality. | High |
+| 79 | `execution.options.delta` | `0.55` | Same | What a dollar of stock movement is worth to the option. Also unexercised. | High |
+| 80 | `execution.options.spread_pct_of_premium` | `4.0` | Same | Crossed on entry and exit. The dominant cost of an option trade and the reason D17 confines options to defined risk. Unexercised. | High |
 
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.
