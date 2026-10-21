@@ -173,6 +173,14 @@ def iv_rank(current: float | None, history: Sequence[float]) -> float | None:
 
     The classic IV rank. Returns None on a flat history (high == low): every
     value would read "100%", which is a division artefact, not a signal.
+
+    GATED HARD on history length by `summarize`, and `iv_daily.history_days`
+    records how much there was. That gate is right HERE and wrong for
+    estimate-revision momentum, which is computed from two snapshots and
+    reported with its depth — a rank needs a high and a low to sit between, so
+    on a short history the formula has no answer, whereas a revision between
+    two snapshots is a correct measurement of a real change that is merely a
+    noisy estimate of a trend. `features/evidence.py` sets out the distinction.
     """
     if current is None or not history:
         return None
