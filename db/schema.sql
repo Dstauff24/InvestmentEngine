@@ -565,6 +565,17 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     called_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     called_on               DATE NOT NULL,
 
+    -- D40: the recipe's promotion-ladder status WHEN THIS IDEA WAS CALLED.
+    -- Expectancy must be computed per (recipe, status_at_call): mixing regimes
+    -- averages the SHADOW ideas a recipe produced while it was being judged
+    -- with the PAPER/LIVE ideas it produced after, and the promotion decision
+    -- is made FROM that expectancy — so contaminating it makes the ladder
+    -- circular, undetectably, because nothing else in the row says which
+    -- regime it belonged to. Nullable: rows predating 2026-10-21 genuinely do
+    -- not know, and back-filling a guess would be worse than admitting it.
+    status_at_call          TEXT CHECK (status_at_call IS NULL
+                                        OR status_at_call IN ('shadow', 'paper', 'live')),
+
     -- Projections AT TIME OF CALL. Frozen — never updated after insert. The
     -- whole point is measuring reality against what we said we expected.
     proj_entry_low          NUMERIC(18, 6),
@@ -610,6 +621,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_shadow_book_idea
     ON shadow_book (idea_id) WHERE idea_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_shadow_book_open
     ON shadow_book (outcome) WHERE outcome = 'open';
+-- Expectancy is always read per recipe AND per status (D40).
+CREATE INDEX IF NOT EXISTS ix_shadow_book_status_recipe
+    ON shadow_book (recipe, status_at_call, called_on DESC);
 CREATE INDEX IF NOT EXISTS ix_shadow_book_recipe_tier
     ON shadow_book (recipe, tier, called_on DESC);
 

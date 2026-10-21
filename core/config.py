@@ -236,6 +236,85 @@ class Recipes(Base):
     post_earnings_drift: DriftRecipe
 
 
+StrategyStatus = Literal["shadow", "paper", "live"]
+
+
+class PromotionStatus(Base):
+    """D40: one status per recipe. A promotion is a one-line diff."""
+
+    pullback_to_trend: StrategyStatus
+    base_breakout: StrategyStatus
+    post_earnings_drift: StrategyStatus
+
+    def of(self, recipe: str) -> StrategyStatus:
+        """Status for a recipe name, raising rather than defaulting.
+
+        Deliberately not `.get(recipe, "shadow")`: a typo'd or newly added
+        recipe silently defaulting to `shadow` would look like the safe choice
+        and is not — it would hide the fact that the ladder does not know about
+        a strategy that is already producing ideas.
+        """
+        try:
+            return getattr(self, recipe)
+        except AttributeError as exc:
+            raise ConfigError(
+                f"no D40 promotion status configured for recipe {recipe!r}. Add it "
+                f"to scoring.promotion.status; a new strategy enters 'shadow'."
+            ) from exc
+
+
+class ShadowToPaper(Base):
+    min_closed_ideas: PositiveInt
+    min_expectancy_r: float  # [OPEN] #38
+
+
+class PaperToLive(Base):
+    min_closed_ideas: PositiveInt
+    sustained_window_days: PositiveInt  # [OPEN] #39
+    min_expectancy_r: float  # [OPEN] #40
+    max_calibration_error_pct: Percent  # [OPEN] #41
+
+
+class Demotion(Base):
+    window_days: PositiveInt  # [OPEN] #42
+    min_closed_ideas: PositiveInt  # [OPEN] #43
+    expectancy_r_below: float  # [OPEN] #44
+
+
+class Promotion(Base):
+    """D40: the ladder. Rules in config so review is a diff, not a debate."""
+
+    status: PromotionStatus
+    shadow_to_paper: ShadowToPaper
+    paper_to_live: PaperToLive
+    demotion: Demotion
+
+    @model_validator(mode="after")
+    def _the_ladder_cannot_contradict_itself(self):
+        if self.paper_to_live.min_expectancy_r < self.shadow_to_paper.min_expectancy_r:
+            raise ValueError(
+                f"paper_to_live.min_expectancy_r ({self.paper_to_live.min_expectancy_r}) "
+                f"is below shadow_to_paper's ({self.shadow_to_paper.min_expectancy_r}); "
+                f"the second rung must demand at least as much as the first, or a "
+                f"strategy could qualify for LIVE on evidence too weak for PAPER"
+            )
+        if self.demotion.expectancy_r_below >= self.shadow_to_paper.min_expectancy_r:
+            raise ValueError(
+                f"demotion.expectancy_r_below ({self.demotion.expectancy_r_below}) is at "
+                f"or above shadow_to_paper.min_expectancy_r "
+                f"({self.shadow_to_paper.min_expectancy_r}); a strategy would be demoted "
+                f"the moment it was promoted, oscillating for ever"
+            )
+        if self.demotion.min_closed_ideas > self.shadow_to_paper.min_closed_ideas:
+            raise ValueError(
+                f"demotion.min_closed_ideas ({self.demotion.min_closed_ideas}) exceeds "
+                f"the promotion floor ({self.shadow_to_paper.min_closed_ideas}); a "
+                f"strategy could be promoted on evidence that is not yet enough to "
+                f"demote it, so a bad run could never remove it"
+            )
+        return self
+
+
 class Ranking(Base):
     """D33: ideas are ranked by composite percentile within the universe."""
 
@@ -262,6 +341,7 @@ class ScoringConfig(Base):
     pillar_agreement: PillarAgreement
     tiers: Tiers
     min_surfaceable_composite: Score
+    promotion: Promotion
     ranking: Ranking
     sentiment_reinstatement: SentimentReinstatement
     recipes: Recipes

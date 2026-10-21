@@ -1,6 +1,6 @@
 # Open Parameters (rebuild baseline, Oct 20 2026)
 
-Config values no decision (D1–D39) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. D13's quarterly Shadow Book review is where they stop being guesses.
+Config values no decision (D1–D40) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
 
 Everything NOT tagged `[OPEN]` traces to a decision and is asserted by a named test in `tests/test_config.py`.
 
@@ -67,6 +67,31 @@ until those layers are built. Their defaults are therefore weaker than rows
 | 35 | `sleeves.ratchet.trigger_excess_points` | `3.0` | D35 fixes the ratchet, calls 3 points a judgement | How far Growth may run above its 35% target before gains are swept. Smaller = the floor rises often in small steps; larger = fewer, bigger sweeps and more time spent over-allocated to risk. | High |
 | 36 | `sleeves.ratchet.sweep_fraction` | `0.5` | Same | How much of the excess moves to Core permanently. 1.0 would pin Growth to its target and forfeit compounding inside the sleeve; 0 disables the ratchet, which the loader rejects. | High |
 | 37 | `sentiment_reinstatement.min_sample` | `30` | D32 says "30 or more closed ideas"; the floor is itself a sample-size judgement | How much evidence Sentiment must produce before its weight may be restored toward 20. Too low and noise gets promoted on a lucky streak — which is exactly how the pillar earned its demotion. | Medium |
+
+## Added by D40's promotion ladder (Oct 21 2026)
+
+D40 fixes the **structure** — three statuses, a 30-closed-idea floor, automatic
+demotion — and deliberately leaves the thresholds open, because no decision
+sets them and burying a guess in prose would make it unreviewable. **These are
+the numbers that decide whether real money follows a strategy**, so they are
+the highest-stakes rows in this document and the least informed: nothing has 30
+closed ideas yet. Expect all seven to move at the first quarterly review that
+has data (D13).
+
+The loader rejects combinations that contradict each other — a LIVE bar below
+the PAPER bar, a demotion threshold at or above the promotion one (which would
+oscillate for ever), or a demotion sample floor above the promotion floor
+(which would make a bad run unable to remove a strategy it was able to add).
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 38 | `promotion.shadow_to_paper.min_expectancy_r` | `0.10` | D40 fixes the 30-idea floor, not the bar | How good a strategy must look before it is sized against a virtual account. Too low and PAPER fills with noise; too high and nothing ever leaves SHADOW. In R-multiples, so it is comparable across recipes. | High |
+| 39 | `promotion.paper_to_live.sustained_window_days` | `90` | D40 says "sustained"; no window | What "sustained" means. One quarter is the shortest window that spans an earnings cycle, which matters because two of three recipes are earnings-adjacent. | High |
+| 40 | `promotion.paper_to_live.min_expectancy_r` | `0.20` | D40 says "sustained positive expectancy" | The bar for real money. Loader requires it ≥ row 38. | High |
+| 41 | `promotion.paper_to_live.max_calibration_error_pct` | `15.0` | D39(1) requires a calibration curve; no tolerance | How far predicted hit rate may sit from realised before LIVE is refused. A composite is a claim about probability; this is how wrong that claim may be. | High |
+| 42 | `promotion.demotion.window_days` | `60` | D40 says "sustained underperformance" | How long a strategy may underperform before it is automatically demoted. Shorter than row 39 on purpose: removing a broken strategy should be quicker than promoting a good one. | High |
+| 43 | `promotion.demotion.min_closed_ideas` | `20` | Same | How much evidence is needed to demote. Below the promotion floor deliberately — a bad run should be able to remove what a good run added. | High |
+| 44 | `promotion.demotion.expectancy_r_below` | `0.0` | Same | The line below which a strategy is demoted. Zero means "stops making money", not "stops being impressive". Loader requires it < row 38 so a strategy cannot be demoted the moment it is promoted. | High |
 
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.

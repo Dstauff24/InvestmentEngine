@@ -81,6 +81,86 @@ def test_d32_pillar_weights():
     assert w.sentiment < w.technical
 
 
+def test_d40_every_strategy_starts_in_shadow():
+    """D40: new strategies always enter SHADOW. Nothing has 30 closed ideas yet.
+
+    A backtest is uncontaminated evidence only if nobody looked at it first,
+    and somebody always did — so a good backtest is not grounds for skipping a
+    rung.
+    """
+    status = cfg.scoring().promotion.status
+    assert status.pullback_to_trend == "shadow"
+    assert status.base_breakout == "shadow"
+    assert status.post_earnings_drift == "shadow"
+
+
+def test_d40_every_configured_recipe_has_a_status():
+    """A recipe producing ideas the ladder does not know about is the gap."""
+    recipes = cfg.scoring().recipes
+    status = cfg.scoring().promotion.status
+    for name in type(recipes).model_fields:
+        assert status.of(name) in ("shadow", "paper", "live")
+
+
+def test_d40_an_unknown_recipe_raises_rather_than_defaulting_to_shadow():
+    """Defaulting would LOOK safe and would hide the real problem."""
+    with pytest.raises(cfg.ConfigError, match="no D40 promotion status"):
+        cfg.scoring().promotion.status.of("some_new_recipe")
+
+
+def test_d40_the_sample_floor_is_the_d39_floor():
+    """D40 and D39(2) both say 30; they must not drift apart."""
+    p = cfg.scoring().promotion
+    assert p.shadow_to_paper.min_closed_ideas == 30
+    assert p.paper_to_live.min_closed_ideas == 30
+    assert cfg.scoring().sentiment_reinstatement.min_sample == 30
+
+
+def test_d40_demotion_is_quicker_than_promotion():
+    """Removing a broken strategy should not be slower than adding a good one."""
+    p = cfg.scoring().promotion
+    assert p.demotion.window_days <= p.paper_to_live.sustained_window_days
+    assert p.demotion.min_closed_ideas <= p.shadow_to_paper.min_closed_ideas
+
+
+def test_d40_a_live_bar_below_the_paper_bar_is_rejected(tmp_path):
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["promotion", "paper_to_live", "min_expectancy_r"], 0.05),
+        "must demand at least as much",
+    )
+
+
+def test_d40_a_demotion_threshold_that_would_oscillate_is_rejected(tmp_path):
+    """Demote-above-promote means a strategy is demoted as it is promoted."""
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["promotion", "demotion", "expectancy_r_below"], 0.50),
+        "oscillating for ever",
+    )
+
+
+def test_d40_a_demotion_sample_floor_above_the_promotion_floor_is_rejected(tmp_path):
+    """Otherwise a bad run could never remove what a good run added."""
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["promotion", "demotion", "min_closed_ideas"], 99),
+        "could be promoted on evidence",
+    )
+
+
+def test_d40_an_invalid_status_is_rejected(tmp_path):
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["promotion", "status", "base_breakout"], "actionable"),
+        "base_breakout",
+    )
+
+
 def test_d33_cross_sectional_ranking():
     """D33: rank by percentile within the universe; cap the digest by rank."""
     r = cfg.scoring().ranking
@@ -896,8 +976,8 @@ def documented_parameters() -> dict[int, str]:
     }
 
 
-def test_the_doc_lists_exactly_37_parameters():
-    assert len(documented_parameters()) == 37
+def test_the_doc_lists_exactly_44_parameters():
+    assert len(documented_parameters()) == 44
 
 
 def test_every_tagged_value_is_documented():
@@ -923,8 +1003,8 @@ def test_the_tag_numbering_is_contiguous():
 
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
-    assert "D39" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 37
+    assert "D40" in doc  # the doc states the decision range it was built against
+    assert len(tagged_parameters()) == 44
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -104,6 +104,50 @@ sentiment_reinstatement:
   min_sample: 30                # [OPEN] #37
   restore_toward: 20            # D32 — back to the pre-demotion weight
 
+# ── Strategy promotion ladder (D40) ─────────────────────────────────────────
+# What the engine is ALLOWED to do with a recipe's ideas:
+#
+#   shadow  surfaced and tracked, FLAGGED NOT ACTIONABLE
+#   paper   additionally sized against a virtual account with the full
+#           D17/D18 risk stack, tracked as simulated positions
+#   live    the human trades them
+#
+# New strategies always enter `shadow` — including one that backtests well,
+# because a backtest is only uncontaminated evidence if nobody looked at it
+# first, and somebody always did.
+#
+# Promotion and demotion are RULES, not conversations: that is why the
+# thresholds live here. The quarterly review (D13) is where they are acted on.
+# `shadow_book.status_at_call` stamps every idea, because expectancy measured
+# across a boundary averages two different strategies.
+promotion:
+  # Per-recipe status. One line each, so a promotion is a reviewable diff.
+  status:
+    pullback_to_trend: shadow     # D40 — nothing has 30 closed ideas yet
+    base_breakout: shadow         # D40
+    post_earnings_drift: shadow   # D40
+
+  shadow_to_paper:
+    # D39(2)/D40 fix 30; the expectancy floor is a judgement.
+    min_closed_ideas: 30                 # D40
+    min_expectancy_r: 0.10               # [OPEN] #38
+
+  paper_to_live:
+    min_closed_ideas: 30                 # D40 — the same floor applies again
+    # "Sustained" and "within tolerance" are the words D40 leaves open.
+    sustained_window_days: 90            # [OPEN] #39
+    min_expectancy_r: 0.20               # [OPEN] #40
+    # D39(1): of ideas scored 70-80, what fraction reached TP1? The gap between
+    # predicted and realised hit rate, in percentage points.
+    max_calibration_error_pct: 15.0      # [OPEN] #41
+
+  demotion:
+    # Automatic, so a strategy that stops working stops being actionable
+    # without anyone having to admit anything.
+    window_days: 60                      # [OPEN] #42
+    min_closed_ideas: 20                 # [OPEN] #43
+    expectancy_r_below: 0.0              # [OPEN] #44
+
 # ── Phase 1 recipes ─────────────────────────────────────────────────────────
 # Parameters for the three setups in the decision log, in implementation order.
 # Nothing here is scoring logic — these are the inputs that logic will read.
