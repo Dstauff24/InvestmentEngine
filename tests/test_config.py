@@ -302,12 +302,32 @@ def test_d7_iv_rank_needs_history_first():
     assert c.iv_rank_lookback_days == 252
 
 
-def test_d29_free_tier_mitigations_are_configured():
-    """D29: static constituents fallback and a daily FMP call budget."""
+def test_d29_static_fallback_survives_the_premium_upgrade():
+    """D29 free-tier MODE retired 2026-10-21; the fallback it built remains.
+
+    The constituents endpoints work again, so the static file is no longer the
+    normal path — but it stays configured and tested. A plan can lapse, a
+    billing failure can 402 an endpoint overnight, and the fallback is the
+    difference between a stale universe and no universe. The call budget's
+    assertion moved to `test_premium_call_budget`, because 250 was a free-tier
+    number and is no longer a D29 mitigation.
+    """
     u = cfg.universe()
     assert u.sources.allow_static_fallback is True
     assert u.sources.static_fallback_file == "config/constituents_static.txt"
-    assert u.fmp.daily_call_budget == 250
+
+
+def test_premium_call_budget():
+    """Premium from 2026-10-21. Sized from measurement, not taste.
+
+    A cold start costs 6,759 calls: universe 527 + estimates 1,039 +
+    fundamentals 5,190 + events 3. The budget must clear that in ONE day or a
+    first run can never complete, and it keeps a reserve for the event radar.
+    """
+    f = cfg.universe().fmp
+    assert f.daily_call_budget == 9000  # [OPEN] #31
+    assert f.daily_call_budget > 6759, "a cold start could not complete in one day"
+    assert f.reserve_for_events == 3
 
 
 def test_recipe_parameters_from_the_decision_log():
@@ -808,7 +828,8 @@ def test_a_reserve_that_consumes_the_whole_budget_is_rejected(tmp_path):
     expect_error(
         tmp_path,
         "universe.yaml",
-        mutate("universe.yaml", ["fmp", "reserve_for_events"], 250),
+        # Equal to the budget: the reserve would leave nothing in the pool.
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 9000),
         "must be below",
     )
 
@@ -817,7 +838,7 @@ def test_a_reserve_above_the_budget_is_rejected(tmp_path):
     expect_error(
         tmp_path,
         "universe.yaml",
-        mutate("universe.yaml", ["fmp", "reserve_for_events"], 500),
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 9500),
         "must be below",
     )
 

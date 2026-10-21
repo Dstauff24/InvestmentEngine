@@ -26,7 +26,7 @@ SP500 = [
         "subSector": "Drug Manufacturers",
     },
     {
-        "symbol": "BRK.B",
+        "symbol": "BRK-B",
         "name": "Berkshire Hathaway Inc.",
         "sector": "Financial Services",
         "subSector": "Insurance",
@@ -85,7 +85,7 @@ QUOTES = [
         "marketCap": 380_000_000_000,
     },
     {
-        "symbol": "BRK.B",
+        "symbol": "BRK-B",
         "name": "Berkshire Hathaway Inc.",
         "price": 465.0,
         "exchange": "NYSE",
@@ -121,7 +121,7 @@ VOLUMES = {
     "AAPL": 52_000_000,  # comfortably in
     "MSFT": 21_000_000,  # in
     "JNJ": 7_400_000,  # in
-    "BRK.B": 3_900_000,  # in — also exercises the dotted share class
+    "BRK-B": 3_900_000,  # in — the share class, in FMP's real DASH spelling
     "NWSA": 900_000,  # OUT: below 1M
     "ZS": 1_400_000,  # in
 }

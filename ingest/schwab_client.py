@@ -176,14 +176,32 @@ class SchwabClient:
 
 
 def to_schwab_symbol(symbol: str) -> str:
-    """Canonical (FMP/dot) form -> Schwab's slash form. BRK.B -> BRK/B.
+    """Canonical form -> Schwab's slash form. BRK-B -> BRK/B.
 
-    The DB stores the dot form because that is what every FMP endpoint keys on;
-    the translation belongs here, at the boundary, and nowhere else.
+    THE CANONICAL FORM IS THE DASH FORM. Verified live 2026-10-21: FMP
+    `/stable/` constituents return `BRK-B` and `BF-B`, every `/stable/`
+    endpoint keys on that spelling, and the DOT form is actively rejected —
+    `/stable/ratios?symbol=BRK.B` answers 402 while `?symbol=AAPL` answers 200.
+
+    This function previously translated only `.` -> `/`, on the stated belief
+    that the database held the dot form. It does not, and never did under
+    `/stable/`: `normalize_symbol` only uppercases and strips spaces, so the
+    dash form passes through untouched. The result was that `BRK-B` reached
+    Schwab verbatim, Schwab returned no chain, and the only two share-class
+    names in the S&P 500 silently lost their option chains — which with the
+    D14 options gate now armed would have dropped them from the universe for a
+    punctuation mismatch.
+
+    Both separators are translated, so a hand-maintained
+    `constituents_static.txt` carrying dots still works.
     """
-    return symbol.replace(".", "/")
+    return symbol.replace("-", "/").replace(".", "/")
 
 
 def from_schwab_symbol(symbol: str) -> str:
-    """Schwab's slash form -> canonical dot form. BRK/B -> BRK.B."""
-    return symbol.replace("/", ".")
+    """Schwab's slash form -> canonical DASH form. BRK/B -> BRK-B.
+
+    Must agree with `to_schwab_symbol` or a chain comes back keyed to a symbol
+    that is not in `tickers`, and the foreign key rejects the write.
+    """
+    return symbol.replace("/", "-")

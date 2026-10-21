@@ -20,8 +20,11 @@ version: 1
 #
 # D32 demoted Sentiment from 20: free-tier news is the thinnest input the engine
 # has, and a pillar fed noise adds noise to every composite it touches.
-# Fundamental took the weight in anticipation of the estimate-revision signal,
-# which is still dark while FMP's analyst-estimates endpoint 402s (D29).
+# Fundamental took the weight in anticipation of the estimate-revision signal.
+# That signal went LIVE on 2026-10-21 with the Premium upgrade — but the series
+# starts at zero depth, so for the next several weeks this pillar carries its
+# heaviest weight on its shallowest input. First thing to re-examine at the
+# quarterly review (D13) if Fundamental underperforms.
 #
 # Demoting is not disabling. `composite.conflict_below` vetoes Tier A when ANY
 # pillar scores below it, so strongly negative sentiment still caps an idea at

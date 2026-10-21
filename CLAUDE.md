@@ -3,7 +3,7 @@
 ## What this is
 A personal investment decision-support engine for a Schwab brokerage account (swings, long holds, options). It ingests quant + qual data, scores tickers through a 4-pillar confluence model, surfaces complete trade plans (entry/stop/TP1/TP2/R:R/size) in two tiers, tracks every idea in a Shadow Book, and sends a daily email digest. **The human makes every final decision.** Phase 1 = the brain, no UI.
 
-**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D31).
+**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D39).
 
 ## Non-negotiable process rule (D30)
 **Commit and push to GitHub at the end of every working session, and after every completed step. No exceptions.** The repo on GitHub is the system of record; a Codespace is disposable. Never report a step complete without naming the commit that was pushed.
@@ -31,12 +31,14 @@ A personal investment decision-support engine for a Schwab brokerage account (sw
 - **Exits:** per-strategy shape enforced by the loader. `swing` has `max_holding_days` (45, [OPEN]); `option` times out at expiration (`max_holding_days` must be null); `hold` exits on thesis triggers only (null). A day-count on options or holds is a hard config error.
 - **[OPEN] parameters (D25):** every number no decision fixes lives in config tagged `# [OPEN]`, with a row in `docs/open-parameters.md` and a sync test. Changing a decision-fixed value without a decision fails a named test.
 
-## Free-tier FMP mode (current, D29 amended)
-FMP upgrade is deferred. The account is on `/stable/` (symbol in query string, NOT in path; several endpoint names differ from v3). Plan-gated (402) on free: `sp500-constituent`, `nasdaq-constituent`, `analyst-estimates`, `ratios`, `key-metrics`. Therefore:
-- Universe builds from `config/constituents_static.txt` fallback when constituents 402.
-- `fmp_fundamentals` degrades on 402: core statements populate what they can; valuation columns NULL, gaps reported in `job_runs.unavailable_endpoints`. One 402 must not fail the whole symbol.
-- `fmp_estimates` is marked expected-blocked in the orchestrator (known gap, not failure; `day_complete` can be true without it). It flips back to is_critical the day the endpoint passes a probe. **The estimate-revision history clock starts on upgrade day; record that date.**
-- A daily FMP call-budget guard (250/day, [OPEN]) keeps the fundamentals crawl trickling via the staleness filter.
+## FMP PREMIUM (current, from 2026-10-21). Free-tier mode is the fallback.
+The account is on `/stable/` **Premium**: probe 15/15, all five formerly-402 endpoints pass. `/api/v3/` now answers 403 (key rejected) — not merely ungated but unavailable, which is fine since the client is `/stable/`-only.
+- **The estimate-revision clock started 2026-10-21.** First `analyst-estimates` snapshot stored that day. No history exists before it and none can be bought. D32's Fundamental weight of 30 rides on a series that is still shallow.
+- Budget `fmp.daily_call_budget` = **9000**, limiter `FMP_RATE_LIMIT_PER_MIN` = **600** (Premium allows 750). The budget's job changed: not "stay inside the allowance" but "stop a runaway loop before it makes 200,000 calls". Keep it.
+- A cold start costs ~6,759 calls: universe 527 + estimates 1,039 + fundamentals 5,190 + events 3.
+- **Quote endpoints are SPLIT and the split is silent.** One symbol: `/stable/quote?symbol=X`. Many: `/stable/batch-quote?symbols=A,B` — note the PLURAL parameter; `symbol` there is a 400. Passing a comma list to `/stable/quote` returns HTTP 200 and `[]`. The free tier 402'd that same request, which hid the bug for the whole free-tier period. `quotes()` raises on a wholly empty batch.
+- **A 402 does NOT prove a plan gate.** `/stable/ratios?symbol=BRK.B` 402s while `?symbol=AAPL` 200s, and an unknown symbol returns 200 + `[]`. `_optional` therefore confirms with a known-good canary symbol before marking an endpoint unavailable — inferring a gate from one symbol's 402 would NULL the valuation columns for every remaining symbol under a log line naming the wrong cause.
+- Retained fallbacks (a plan can lapse; billing can 402 an endpoint overnight): `config/constituents_static.txt` stays maintained and tested; `fmp_fundamentals` keeps degrade-on-402 with gaps in `job_runs.unavailable_endpoints`; `fmp_estimates` keeps the probe that sets its own `is_critical`.
 - `scripts/fmp_probe.py` probes BOTH API generations across every endpoint the client calls and distinguishes 402 (plan) from 404 (path). Re-run after any plan change.
 
 ## Validated API findings (do not rediscover these)

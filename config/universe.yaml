@@ -15,9 +15,11 @@ sources:
   sp500: true                  # D14
   nasdaq100: true              # D14
   watchlist_file: config/watchlist.txt   # D14 — merged in, exempt from filter
-  # D29: FMP's free tier 402-gates BOTH constituents endpoints, so the builder
-  # falls back to this file and logs a warning naming its AS_OF header date.
-  # Remove the fallback only once a probe shows the endpoints passing.
+  # PREMIUM from 2026-10-21: both constituents endpoints pass, so this file is
+  # no longer the normal path. KEPT ON PURPOSE as the fallback — a plan can
+  # lapse and billing can 402 an endpoint overnight, and a stale universe beats
+  # no universe. The builder logs a warning naming its AS_OF date whenever it
+  # falls back, so using it is never silent. Keep the file maintained (D29).
   static_fallback_file: config/constituents_static.txt
   allow_static_fallback: true
 
@@ -66,8 +68,11 @@ option_chains:
 # ── Estimate snapshot scope (D7) ────────────────────────────────────────────
 # THE OTHER SACRED JOB. Analyst estimates written as a dated snapshot so the
 # day-over-day diff becomes estimate-revision momentum.
-# D29: plan-gated on the free tier; the job is marked expected-blocked until a
-# probe shows `analyst-estimates` passing. The revision clock starts that day.
+# LIVE from 2026-10-21: `analyst-estimates` passes the probe, so the job is
+# recorded is_critical and its first snapshot was taken that day. THE REVISION
+# CLOCK STARTED 2026-10-21 — there is no history before it and none for sale.
+# The probe that sets `is_critical` stays, so a lapsed plan degrades rather
+# than failing the day (D29).
 estimates:
   period_types: [quarter, annual]
   quarters_ahead: 4            # [OPEN] #24 — raw material for revision momentum
@@ -76,8 +81,11 @@ estimates:
 # ── Fundamentals scope (D4/D29) ─────────────────────────────────────────────
 # Reported financials and ratios for Pillar B. Point-in-fact records keyed by
 # fiscal period, so re-pulling changes nothing unless a company restates.
-# D29: `ratios` and `key-metrics` are plan-gated; the job degrades rather than
-# failing, and reports the gap in job_runs.unavailable_endpoints.
+# `ratios` and `key-metrics` are UNLOCKED from 2026-10-21, so the valuation
+# columns populate. The degrade-on-402 path stays for a lapsed plan, and it now
+# confirms a suspected gate against a known-good canary symbol first: a 402 can
+# mean "this endpoint dislikes that symbol" (verified: BRK.B 402s, AAPL 200s),
+# and acting on that would NULL these columns for every remaining symbol.
 fundamentals:
   quarters_history: 12         # [OPEN] #26 — 3 years; Pillar B reads trend
   annuals_history: 5           # [OPEN] #27
@@ -102,7 +110,26 @@ news:
 # Free-tier operation. The staleness filter in fundamentals trickles the crawl
 # so a day's spend stays inside the plan. Raise this on upgrade.
 fmp:
-  daily_call_budget: 250       # [OPEN] #31
+  # PREMIUM, from 2026-10-21. Was 250 under the free tier (D29).
+  #
+  # Sized so a COLD START completes in one day, measured rather than guessed:
+  #
+  #   universe        527   2 constituents + 6 batch quotes + 519 daily bars
+  #   estimates     1,039   1 probe + 519 x 2 period types
+  #   fundamentals  5,190   519 x 5 statements x 2 period types
+  #   events            3
+  #                 -----
+  #   full day      6,759   ~11 minutes of wall clock at 600 calls/min
+  #
+  # 9,000 leaves ~30% headroom for retries and a growing universe. Steady state
+  # is far cheaper: the fundamentals crawl is staleness-driven, so most days it
+  # touches a handful of symbols rather than all 519.
+  #
+  # The budget machinery stays even though Premium's limit is per-minute rather
+  # than per-day: its job is no longer "stay inside the free allowance" but
+  # "stop a runaway loop before it makes 200,000 calls". A bug that retries
+  # forever is cheaper to catch here than on the invoice.
+  daily_call_budget: 9000      # [OPEN] #31
   # Calls held back from the general pool for the market-wide calendars. NOT an
   # [OPEN] guess: it is exactly the number of calendar endpoints the events job
   # calls (earnings, dividends, splits), and a named test asserts it stays in

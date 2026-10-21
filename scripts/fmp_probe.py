@@ -54,6 +54,16 @@ PROBES: list[tuple[str, tuple[str, dict], tuple[str, dict]]] = [
         ("/stable/quote", {"symbol": SYMBOL}),
     ),
     (
+        # A SEPARATE endpoint, not the same one with more symbols. Passing a
+        # comma-separated list to /stable/quote returns HTTP 200 and `[]`, and
+        # the parameter is `symbols` (plural) here — `symbol` is a 400. Probed
+        # on its own because the universe builder's enrichment pass depends on
+        # it and a silent empty result is indistinguishable from a quiet market.
+        "batch quote",
+        (f"/api/v3/quote/{SYMBOL},MSFT", {}),
+        ("/stable/batch-quote", {"symbols": f"{SYMBOL},MSFT"}),
+    ),
+    (
         "income statement",
         (f"/api/v3/income-statement/{SYMBOL}", {"period": "quarter", "limit": 1}),
         ("/stable/income-statement", {"symbol": SYMBOL, "period": "quarter", "limit": 1}),

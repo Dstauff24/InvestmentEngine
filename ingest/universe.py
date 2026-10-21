@@ -132,13 +132,21 @@ class UniverseError(RuntimeError):
 
 
 def normalize_symbol(raw: str) -> str:
-    """FMP uses dots for share classes (BRK.B); Schwab uses slashes (BRK/B).
+    """Canonicalise a ticker. The canonical form is FMP `/stable/`'s DASH form.
 
-    The DB stores the FMP/dot form as canonical because that is what every FMP
-    endpoint keys on. Translation to the broker's form happens in the Schwab
-    client, at that boundary, and nowhere else.
+    FMP `/stable/` returns `BRK-B` and `BF-B` (verified live 2026-10-21) and
+    keys every endpoint on that spelling; the dot form is rejected outright
+    with a 402. Schwab wants slashes (`BRK/B`), and that translation happens in
+    `ingest/schwab_client.py`, at that boundary, and nowhere else.
+
+    Dots are rewritten to dashes, so a hand-maintained source may use either.
+    `config/constituents_static.txt` carries `BRK.B` and `BF.B`, and without
+    this the D29 fallback path would store the dot form, FMP would answer 402
+    for those symbols, and `enrich_with_liquidity`'s systemic-error abort would
+    kill the WHOLE universe build on the first one — a fallback that only works
+    while the budget is too exhausted to make the call that breaks it.
     """
-    return raw.strip().upper().replace(" ", "")
+    return raw.strip().upper().replace(" ", "").replace(".", "-")
 
 
 def parse_static_constituents(

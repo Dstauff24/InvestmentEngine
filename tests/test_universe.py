@@ -84,7 +84,7 @@ def make(symbol="TEST", **kwargs) -> Candidate:
 def test_the_static_file_parses_symbols_and_the_as_of_header():
     static = parse_static_constituents(fx.STATIC_FILE)
     assert static.as_of == date(2026, 10, 20)
-    assert [r["symbol"] for r in static.sp500] == ["AAPL", "MSFT", "JNJ", "BRK.B", "NWSA"]
+    assert [r["symbol"] for r in static.sp500] == ["AAPL", "MSFT", "JNJ", "BRK-B", "NWSA"]
     assert [r["symbol"] for r in static.nasdaq100] == ["AAPL", "MSFT", "ZS"]
     assert static.total_rows == 8
 
@@ -167,8 +167,8 @@ def test_the_shipped_static_file_parses_to_the_expected_universe():
     [
         ("aapl", "AAPL"),
         ("  MSFT  ", "MSFT"),
-        ("BRK.B", "BRK.B"),
-        ("brk.b", "BRK.B"),
+        ("BRK-B", "BRK-B"),
+        ("brk.b", "BRK-B"),
         ("BF B", "BFB"),
     ],
 )
@@ -178,7 +178,7 @@ def test_normalize_symbol(raw, expected):
 
 def test_merge_unions_the_two_indices():
     merged = merge_constituents(fx.SP500, fx.NASDAQ100, [])
-    assert [c.symbol for c in merged] == ["AAPL", "BRK.B", "JNJ", "MSFT", "NWSA", "ZS"]
+    assert [c.symbol for c in merged] == ["AAPL", "BRK-B", "JNJ", "MSFT", "NWSA", "ZS"]
 
 
 def test_overlapping_symbols_produce_one_row_with_both_flags():
@@ -411,7 +411,7 @@ def test_enrichment_attaches_price_exchange_market_cap_and_volume():
     assert enriched["AAPL"].last_price == 232.5  # pass 1
     assert enriched["AAPL"].exchange == "NASDAQ"  # pass 1
     assert enriched["AAPL"].market_cap == 3_500_000_000_000
-    assert enriched["BRK.B"].avg_volume == 3_900_000
+    assert enriched["BRK-B"].avg_volume == 3_900_000
 
 
 def test_pass_one_batches_its_quote_calls():
@@ -477,7 +477,7 @@ def test_the_full_pipeline_keeps_the_liquid_names_and_drops_the_rest(liquidity):
         client, merge_constituents(fx.SP500, fx.NASDAQ100, []), lookback_days=20
     )
     result = apply_liquidity_filter(enriched, liquidity)
-    assert [c.symbol for c in result.kept] == ["AAPL", "BRK.B", "JNJ", "MSFT", "ZS"]
+    assert [c.symbol for c in result.kept] == ["AAPL", "BRK-B", "JNJ", "MSFT", "ZS"]
     assert result.reasons == {"avg volume below minimum": 1}  # NWSA at 900k
 
 

@@ -691,7 +691,7 @@ def test_ingestion_scope_comes_from_config():
     assert u.fundamentals.refresh_after_days == 7
     assert u.events.forward_days == 90
     assert u.estimates.quarters_ahead == 4
-    assert u.fmp.daily_call_budget == 250
+    assert u.fmp.daily_call_budget == 9000  # Premium from 2026-10-21
 
 
 # ── every FMP-budget job must stop cleanly on a spent budget ──────────────────
@@ -784,3 +784,55 @@ def test_plan_probe_reports_true_only_on_402():
             raise FMPPlanError("402")
 
     assert plan_blocks_estimates(Gated()) is True
+
+
+# ── a 402 is not proof of a plan gate ─────────────────────────────────────────
+
+
+def test_a_symbol_specific_402_does_not_disable_the_endpoint():
+    """Verified live 2026-10-21: /stable/ratios 402s for BRK.B, 200s for AAPL.
+
+    Inferring a plan gate from one symbol's 402 would NULL the valuation
+    columns for every remaining symbol in the run, announced by a log line
+    naming the wrong cause.
+    """
+    from ingest.fmp_client import FMPPlanError
+    from ingest.fmp_fundamentals import _optional, reset_availability, unavailable_endpoints
+
+    reset_availability()
+
+    def fetch():
+        raise FMPPlanError("402 for /stable/ratios?symbol=BRK.B")
+
+    assert _optional("ratios", fetch, canary=lambda: [{"symbol": "AAPL"}]) == []
+    assert unavailable_endpoints() == [], "a symbol-specific 402 must not gate the endpoint"
+    reset_availability()
+
+
+def test_a_real_plan_gate_still_disables_the_endpoint():
+    """When the canary 402s too, the plan genuinely lacks it."""
+    from ingest.fmp_client import FMPPlanError
+    from ingest.fmp_fundamentals import _optional, reset_availability, unavailable_endpoints
+
+    reset_availability()
+
+    def gated():
+        raise FMPPlanError("402")
+
+    assert _optional("ratios", gated, canary=gated) == []
+    assert unavailable_endpoints() == ["ratios"]
+    reset_availability()
+
+
+def test_without_a_canary_the_old_conservative_behaviour_holds():
+    from ingest.fmp_client import FMPPlanError
+    from ingest.fmp_fundamentals import _optional, reset_availability, unavailable_endpoints
+
+    reset_availability()
+
+    def gated():
+        raise FMPPlanError("402")
+
+    assert _optional("key-metrics", gated) == []
+    assert unavailable_endpoints() == ["key-metrics"]
+    reset_availability()

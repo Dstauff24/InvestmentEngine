@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -410,14 +411,46 @@ def test_detection_reads_the_raw_payload_not_the_filtered_rows(scope):
 
 
 @pytest.mark.parametrize(
-    ("canonical", "schwab"), [("BRK.B", "BRK/B"), ("BF.B", "BF/B"), ("AAPL", "AAPL")]
+    ("canonical", "schwab"), [("BRK-B", "BRK/B"), ("BF-B", "BF/B"), ("AAPL", "AAPL")]
 )
 def test_share_class_symbols_translate_both_ways(canonical, schwab):
+    """The canonical form is the DASH form — what FMP /stable/ returns.
+
+    Live 2026-10-21: FMP constituents gave `BRK-B` and `BF-B`, and the dot form
+    is rejected with a 402. The translator used to convert only `.` -> `/`, so
+    `BRK-B` reached Schwab verbatim, no chain came back, and the only two
+    share-class names in the index silently lost their options — which with the
+    D14 gate armed would have dropped them from the universe over punctuation.
+    """
     assert to_schwab_symbol(canonical) == schwab
     assert from_schwab_symbol(schwab) == canonical
 
 
 def test_the_translation_round_trips_for_the_shipped_universe():
-    """Both dotted names in config/constituents_static.txt must survive."""
-    for symbol in ("BRK.B", "BF.B"):
+    for symbol in ("BRK-B", "BF-B"):
         assert from_schwab_symbol(to_schwab_symbol(symbol)) == symbol
+
+
+def test_a_dotted_symbol_still_reaches_schwab_correctly():
+    """Tolerated input: a hand-maintained file may use either separator."""
+    assert to_schwab_symbol("BRK.B") == "BRK/B"
+
+
+def test_the_static_fallback_canonicalises_to_the_form_fmp_accepts():
+    """The fallback must not produce symbols FMP answers 402 for.
+
+    `config/constituents_static.txt` carries the dot form. FMP `/stable/` keys
+    on the dash form and 402s on dots, and `enrich_with_liquidity` aborts the
+    whole build on a systemic 402 — so an uncanonicalised fallback would be a
+    path that works only while the budget is too exhausted to make the call
+    that breaks it.
+    """
+    from ingest.universe import normalize_symbol, parse_static_constituents
+
+    static = parse_static_constituents(
+        Path("config/constituents_static.txt").read_text(), path="static"
+    )
+    symbols = {r["symbol"] for r in static.sp500} | {r["symbol"] for r in static.nasdaq100}
+    assert "BRK-B" in symbols and "BF-B" in symbols
+    assert not any("." in s for s in symbols), "a dotted symbol would 402 on FMP /stable/"
+    assert normalize_symbol("brk.b") == "BRK-B"

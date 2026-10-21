@@ -50,7 +50,7 @@ Sensitivity: High = changes which ideas surface or how they are sized. Medium = 
 | 28 | `fundamentals.refresh_after_days` | `7` | Cost control | Staleness-driven refresh (also re-pulls when a symbol has reported since). | Low |
 | 29 | `events.forward_days` | `90` | Must exceed the longest recipe horizon (45d) | Event radar depth. | Low |
 | 30 | `events.backward_days` | `7` | Catches actuals landing on known dates | | Low |
-| 31 | `fmp.daily_call_budget` | `250` | D29 free-tier operation | Keeps the fundamentals crawl inside the free plan; raise on upgrade. | Medium |
+| 31 | `fmp.daily_call_budget` | `9000` | Premium from 2026-10-21 (was `250` under D29's free tier) | Sized from measurement, not taste: a cold start costs 6,759 calls (universe 527 + estimates 1,039 + fundamentals 5,190 + events 3), so 9,000 leaves ~30% headroom. Its job changed with the upgrade — no longer "stay inside the allowance" but "stop a runaway loop before it makes 200,000 calls". | Medium |
 
 ## Added by the D32–D39 strategy refinements (Oct 20 2026)
 

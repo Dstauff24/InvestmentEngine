@@ -61,7 +61,7 @@ def test_spending_a_negative_number_is_rejected():
 
 def test_for_fmp_honours_the_events_reserve_by_default():
     budget = DayBudget.for_fmp()
-    assert budget.budget == 250
+    assert budget.budget == 9000  # Premium from 2026-10-21; was 250 on free
     assert budget.reserve == 3
 
 

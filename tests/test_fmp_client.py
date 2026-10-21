@@ -114,10 +114,39 @@ def test_symbols_travel_in_the_query_not_the_path():
     """The core /api/v3/ -> /stable/ difference. `/api/v3/quote/AAPL` is now
     `/stable/quote?symbol=AAPL`, and getting it wrong yields a silent 404."""
     api, session = client(FakeResponse([{"symbol": "AAPL"}]))
-    api.quotes(["AAPL", "MSFT"])
+    api.quotes(["AAPL"])
     url, params = session.last
     assert url == "https://fmp.example/stable/quote"
-    assert params["symbol"] == "AAPL,MSFT"
+    assert params["symbol"] == "AAPL"
+
+
+def test_many_symbols_use_the_batch_endpoint_with_its_own_parameter_name():
+    """`/stable/` splits single and batch quotes, and the split is SILENT.
+
+    `/stable/quote?symbol=A,B,C` returns HTTP 200 and `[]` — not an error. The
+    free tier answered that same request with a 402, hiding the mistake behind
+    a plan gate for the whole free-tier period; the Premium upgrade turned the
+    loud refusal into a silent empty result. Found live 2026-10-21.
+    """
+    api, session = client(FakeResponse([{"symbol": "AAPL"}, {"symbol": "MSFT"}]))
+    api.quotes(["AAPL", "MSFT"])
+    url, params = session.last
+    assert url == "https://fmp.example/stable/batch-quote"
+    assert params["symbols"] == "AAPL,MSFT"  # `symbols`, plural — `symbol` is a 400
+    assert "symbol" not in params
+
+
+def test_a_totally_empty_quote_response_is_an_error_not_an_empty_pass():
+    """Index constituents: at least one resolves. Total silence is the bug."""
+    api, _ = client(FakeResponse([]))
+    with pytest.raises(FMPError, match="returned no rows at all"):
+        api.quotes(["AAPL", "MSFT", "NVDA"])
+
+
+def test_a_partial_quote_response_is_still_accepted():
+    """A delisted name legitimately returns nothing; that must not fail a run."""
+    api, _ = client(FakeResponse([{"symbol": "AAPL"}]))
+    assert len(api.quotes(["AAPL", "DELISTED"])) == 1
 
 
 @pytest.mark.parametrize(

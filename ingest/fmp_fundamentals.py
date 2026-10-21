@@ -230,20 +230,63 @@ def merge_statements(
     return out
 
 
-def _optional(label: str, fetch) -> list[dict]:
-    """Call a plan-gated enrichment endpoint; degrade to empty on 402 (D29)."""
+# A symbol FMP certainly knows, used to tell a plan gate apart from a bad
+# symbol. Deliberately not taken from the universe: it must be a constant, or
+# the canary could itself be the odd symbol that triggered the 402.
+CANARY_SYMBOL = "AAPL"
+
+
+def _optional(label: str, fetch, *, canary=None) -> list[dict]:
+    """Call an optional enrichment endpoint; degrade to empty if the plan lacks it.
+
+    A 402 is NOT sufficient evidence of a plan gate. Verified live on
+    2026-10-21: `/stable/ratios?symbol=BRK.B` answers 402 while
+    `?symbol=AAPL` answers 200, and an unknown symbol like `BOGUSXYZ` answers
+    200 with an empty list. So on this API a 402 can mean "the plan excludes
+    this endpoint" OR "this endpoint dislikes that symbol" — and the two want
+    opposite handling.
+
+    Inferring a plan gate from one symbol's 402 would disable the endpoint for
+    EVERY remaining symbol in the run and leave the valuation columns NULL
+    wholesale, announced by a log line confidently naming the wrong cause.
+    Today the universe stores dash-form symbols (BRK-B) so nothing triggers it;
+    that is a property of `normalize_symbol`, not a guarantee, and this is too
+    quiet a failure to leave resting on it.
+
+    So the gate is confirmed with one call for a symbol FMP certainly knows. If
+    the canary succeeds, the 402 was about the symbol: a per-symbol miss, no
+    endpoint marked.
+    """
     try:
         return fetch()
     except FMPPlanError as exc:
-        if label not in _UNAVAILABLE:
-            _UNAVAILABLE.add(label)
-            log.warning(
-                "FMP plan does not cover /stable/%s — continuing without it. The "
-                "valuation and quality columns it feeds stay NULL for every symbol "
-                "until the plan is upgraded (D29). (%s)",
-                label,
-                exc,
-            )
+        if label in _UNAVAILABLE:
+            return []
+
+        if canary is not None:
+            try:
+                canary()
+            except FMPPlanError:
+                pass  # the canary 402s too: a real plan gate, fall through
+            else:
+                log.warning(
+                    "/stable/%s returned 402 for this symbol but 200 for %s — so the "
+                    "plan DOES cover it and the refusal was symbol-specific. Treating "
+                    "it as a per-symbol miss; the endpoint stays enabled. (%s)",
+                    label,
+                    CANARY_SYMBOL,
+                    exc,
+                )
+                return []
+
+        _UNAVAILABLE.add(label)
+        log.warning(
+            "FMP plan does not cover /stable/%s — continuing without it. The "
+            "valuation and quality columns it feeds stay NULL for every symbol "
+            "until the plan is upgraded (D29). (%s)",
+            label,
+            exc,
+        )
         return []
 
 
@@ -304,9 +347,15 @@ def load_symbol(client: FMPClient, symbol: str, *, scope: config.FundamentalsSco
             client.income_statement(symbol, period=period_type, limit=limit),
             client.balance_sheet(symbol, period=period_type, limit=limit),
             client.cash_flow(symbol, period=period_type, limit=limit),
-            _optional("ratios", partial(client.ratios, symbol, period=period_type, limit=limit)),
             _optional(
-                "key-metrics", partial(client.key_metrics, symbol, period=period_type, limit=limit)
+                "ratios",
+                partial(client.ratios, symbol, period=period_type, limit=limit),
+                canary=partial(client.ratios, CANARY_SYMBOL, period="quarter", limit=1),
+            ),
+            _optional(
+                "key-metrics",
+                partial(client.key_metrics, symbol, period=period_type, limit=limit),
+                canary=partial(client.key_metrics, CANARY_SYMBOL, period="quarter", limit=1),
             ),
         )
         if rows:

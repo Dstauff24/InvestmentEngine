@@ -201,10 +201,48 @@ class FMPClient:
     # ── quotes ──────────────────────────────────────────────────────────────
 
     def quotes(self, symbols: list[str]) -> list[dict]:
-        """Batch quote. Carries price, volume, avgVolume, marketCap, exchange."""
+        """Quotes for one or many symbols. Price, volume, marketCap, exchange.
+
+        TWO ENDPOINTS, because `/stable/` splits them and the split is silent:
+
+            one symbol   -> /stable/quote?symbol=AAPL
+            many symbols -> /stable/batch-quote?symbols=AAPL,MSFT
+
+        Passing a comma-separated list to `/stable/quote` does NOT error. It
+        returns HTTP 200 and `[]`. The free tier answered that same request
+        with a 402, which hid the mistake behind a plan gate for the whole of
+        the free-tier period; the upgrade to Premium turned a loud refusal into
+        a silent empty result, which is the more dangerous of the two. Found on
+        2026-10-21, the first day the paid plan could have used batching.
+
+        The payloads are identical — 17 fields, same names, verified live on
+        the same day — so the parser needs no branch.
+        """
         if not symbols:
             return []
-        return _expect_list(self.get("/stable/quote", symbol=",".join(symbols)), "quote")
+        if len(symbols) == 1:
+            rows = _expect_list(self.get("/stable/quote", symbol=symbols[0]), "quote")
+        else:
+            rows = _expect_list(
+                self.get("/stable/batch-quote", symbols=",".join(symbols)), "batch-quote"
+            )
+
+        # A BATCH that comes back completely empty is a wrong request, not a
+        # market fact: these are index constituents, and at least one of them
+        # resolves. Partial misses stay tolerated — a delisted name legitimately
+        # returns nothing — but total silence is the signature of the bug above
+        # and must not look like a successful empty pass.
+        #
+        # Single-symbol requests are exempt: for one unknown or delisted ticker
+        # an empty list is the correct answer, and callers already treat a
+        # missing quote as missing data rather than as success.
+        if len(symbols) > 1 and not rows:
+            raise FMPError(
+                f"quote request for {len(symbols)} symbol(s) returned no rows at all "
+                f"(first few: {symbols[:3]}). An empty batch is a malformed request, "
+                f"not an empty market — check the endpoint and parameter name."
+            )
+        return rows
 
     # ── fundamentals (D4) — one call per statement per symbol ───────────────
 
