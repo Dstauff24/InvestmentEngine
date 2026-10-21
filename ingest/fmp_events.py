@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from core import clock, config, db
@@ -249,31 +250,85 @@ def parse_splits(rows: list[dict], universe: set[str]) -> tuple[list[dict], list
     return events, actions
 
 
-def flag_dividend_cuts() -> int:
+@dataclass(frozen=True)
+class CutScan:
+    """What one pass of `flag_dividend_cuts` actually did."""
+
+    cuts: int
+    """Rows this pass flagged as a cut. THE number the report means."""
+
+    rows_touched: int
+    """Rows whose prior/flag changed. On a fresh database, every dividend."""
+
+    without_prior: int
+    """Rows with no earlier dividend to compare against — not cuts."""
+
+    def __str__(self) -> str:
+        return (
+            f"{self.cuts} cut(s) from {self.rows_touched} row(s) examined "
+            f"({self.without_prior} had no prior dividend on record)"
+        )
+
+
+def flag_dividend_cuts() -> CutScan:
     """Mark a distribution smaller than the prior one (D19(5)).
 
     A dividend cut is an automatic thesis-review trigger, so the comparison is
     stored on the row rather than recomputed every time alerting asks.
+
+    RETURNS THE CUT COUNT, not the rowcount. The first production run on
+    2026-10-21 reported `cuts=84` against `actions=84` on a fresh database,
+    which read as "every dividend in the S&P 500 was cut". Nothing was wrong
+    with the comparison — `prior IS NOT NULL` already excludes a first
+    observation, and the true count was zero — but this function returned
+    `db.execute`'s ROWCOUNT, and on an empty database every row is written for
+    the first time. The giveaway was the second run reporting `cuts=0`: a
+    change-count, not a measurement.
+
+    A metric that reads alarming and means nothing is worse than no metric. It
+    trains the operator to ignore the number, which is the one thing a
+    thesis-review trigger cannot afford.
     """
-    return db.execute(
+    row = db.fetch_one(
         """
         WITH ranked AS (
             SELECT symbol, ex_date, cash_amount,
                    lag(cash_amount) OVER (PARTITION BY symbol ORDER BY ex_date) AS prior
             FROM   corporate_actions
             WHERE  action_type = 'cash_dividend'
+        ),
+        updated AS (
+            UPDATE corporate_actions ca
+            SET    prior_cash_amount = r.prior,
+                   is_dividend_cut   = (r.prior IS NOT NULL AND r.cash_amount < r.prior),
+                   updated_at        = now()
+            FROM   ranked r
+            WHERE  ca.symbol = r.symbol
+              AND  ca.ex_date = r.ex_date
+              AND  ca.action_type = 'cash_dividend'
+              -- Re-evaluate when EITHER the prior changed OR the stored flag
+              -- disagrees with what the data now implies. Testing only the
+              -- prior (plus `is_dividend_cut IS NULL`) left a stale flag
+              -- whenever the provider RESTATED an amount: the prior is
+              -- unchanged, the flag is already set, so the row was skipped and
+              -- a corrected-upward dividend kept its "cut" flag for ever — a
+              -- false D19(5) thesis-review trigger with no way to clear.
+              -- `IS DISTINCT FROM` also covers the NULL case this replaces.
+              AND  (ca.prior_cash_amount IS DISTINCT FROM r.prior
+                    OR ca.is_dividend_cut IS DISTINCT FROM
+                       (r.prior IS NOT NULL AND r.cash_amount < r.prior))
+            RETURNING ca.is_dividend_cut, ca.prior_cash_amount
         )
-        UPDATE corporate_actions ca
-        SET    prior_cash_amount = r.prior,
-               is_dividend_cut   = (r.prior IS NOT NULL AND r.cash_amount < r.prior),
-               updated_at        = now()
-        FROM   ranked r
-        WHERE  ca.symbol = r.symbol
-          AND  ca.ex_date = r.ex_date
-          AND  ca.action_type = 'cash_dividend'
-          AND  (ca.prior_cash_amount IS DISTINCT FROM r.prior
-                OR ca.is_dividend_cut IS NULL)
+        SELECT count(*) FILTER (WHERE is_dividend_cut)        AS cuts,
+               count(*)                                      AS rows_touched,
+               count(*) FILTER (WHERE prior_cash_amount IS NULL) AS without_prior
+        FROM   updated
         """
+    )
+    return CutScan(
+        cuts=int(row["cuts"]),
+        rows_touched=int(row["rows_touched"]),
+        without_prior=int(row["without_prior"]),
     )
 
 
@@ -305,7 +360,9 @@ def run(client: FMPClient | None = None) -> dict[str, int]:
         counts["splits"] = db.executemany(UPSERT_EVENT, split_events)
 
         counts["actions"] = db.executemany(UPSERT_ACTION, div_actions + split_actions)
-        counts["cuts"] = flag_dividend_cuts()
+        scan = flag_dividend_cuts()
+        counts["cuts"] = scan.cuts
+        log.info("dividend cut scan: %s", scan)
 
         job.add_rows(counts["earnings"] + counts["dividends"] + counts["splits"])
         job.note(window=f"{start}..{end}", **counts)
@@ -337,8 +394,13 @@ def backfill_actions(client: FMPClient | None = None, *, symbols: list[str] | No
         outcome = for_each_symbol(
             universe, one, run=job, label="corporate actions", stop_on=BudgetExhausted
         )
-        cuts = flag_dividend_cuts()
-        job.note(failed_symbols=sorted(outcome.failed)[:50], dividend_cuts_flagged=cuts)
+        scan = flag_dividend_cuts()
+        job.note(
+            failed_symbols=sorted(outcome.failed)[:50],
+            dividend_cuts_flagged=scan.cuts,
+            dividend_rows_examined=scan.rows_touched,
+            dividends_without_prior=scan.without_prior,
+        )
     return outcome.rows
 
 

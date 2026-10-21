@@ -38,7 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
-from alerts import mailer
+from alerts import notify as notifier
 from core import clock, config, db
 from core.budget import BudgetExhausted, DayBudget
 from core.jobs import clear_stale_runs, day_is_complete, failed_critical_jobs, job_run
@@ -149,7 +149,7 @@ def build_plan() -> list[Step]:
             "fmp_estimates",
             lambda: fmp_estimates.run(),
             critical=True,
-            description="D7 dated estimate snapshot — SACRED (402 on the free tier)",
+            description="D7 dated estimate snapshot — SACRED (revision clock since 2026-10-21)",
             known_gaps=(EstimatesPlanBlocked,),
         ),
         Step(
@@ -331,9 +331,14 @@ def format_report(report: RunReport) -> str:
 
 
 def notify_failure(report: RunReport) -> None:
-    """Email the failure summary (D16). A snapshot job must never fail silently."""
+    """Alert on the failure summary (D16). A snapshot job must never fail silently.
+
+    Fans out to every configured channel. Telegram is the one that reaches a
+    phone before the next session, which for an unbuyable snapshot series is
+    the difference that matters.
+    """
     failed = ", ".join(r.name for r in report.failed) or "day incomplete"
-    mailer.send(
+    delivery = notifier.notify(
         f"daily_close {report.session_date}: {failed}",
         format_report(report)
         + "\n\n"
@@ -342,6 +347,10 @@ def notify_failure(report: RunReport) -> None:
         severity="critical",
         dedupe_key=f"daily_close:{report.session_date}:{failed}",
     )
+    if not delivery.any_sent:
+        # Printed as well as logged: cron mails stdout, which may be the only
+        # route left if every alert channel is down.
+        print(f"WARNING: failure alert reached nobody ({delivery})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -391,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         print(body)
         # Real failures only: an expected skip never reaches here.
         if not args.no_email:
-            mailer.send(
+            notifier.notify(
                 f"daily_close {day}: preflight failed",
                 body,
                 dedupe_key=f"daily_close_preflight:{day}",

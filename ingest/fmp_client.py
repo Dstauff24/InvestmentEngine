@@ -12,10 +12,17 @@ travels in the QUERY STRING (`/stable/quote?symbol=AAPL`) rather than the path
 
 **402 is distinguished from 404**, because they mean different things and have
 different fixes: 404 is the wrong path (a code bug), 402 is the right path on a
-plan that does not include it (a billing decision). D29 records five endpoints
-that 402 on the free tier: `sp500-constituent`, `nasdaq-constituent`,
-`analyst-estimates`, `ratios`, `key-metrics`. They are implemented and left in
-place; `scripts/fmp_probe.py` re-checks after any plan change.
+plan that does not include it (a billing decision). D29's five once-gated
+endpoints — `sp500-constituent`, `nasdaq-constituent`, `analyst-estimates`,
+`ratios`, `key-metrics` — have all been live since the Premium upgrade on
+2026-10-21; the degrade paths stay for a lapsed plan, and
+`scripts/fmp_probe.py` re-checks after any plan change.
+
+A 402 is NOT conclusive evidence of a plan gate, though: verified live, this
+API answers 402 for a symbol it dislikes (`ratios?symbol=BRK.B`) while serving
+the same endpoint for another (`?symbol=AAPL`). Anything that infers "the plan
+excludes this endpoint" from a single 402 must confirm with a known-good
+symbol first — see `ingest/fmp_fundamentals._optional`.
 
 Response shapes differ between generations too — `/stable/` returns bare arrays
 where `/api/v3/` wrapped some payloads in `{"historical": [...]}`. `_rows`
@@ -189,7 +196,7 @@ class FMPClient:
             raise FMPError(f"FMP error on {path}: {message}")
         return payload
 
-    # ── index constituents (D14) — both 402 on the free tier (D29) ──────────
+    # ── index constituents (D14) — live since the Premium upgrade ───────────
 
     def sp500_constituents(self) -> list[dict]:
         """S&P 500 members. Rows carry symbol, name, sector, subSector."""
@@ -262,14 +269,18 @@ class FMPClient:
         )
 
     def ratios(self, symbol: str, *, period: str, limit: int) -> list[dict]:
-        """402 on the free tier (D29). Callers treat it as optional enrichment."""
+        """Live since 2026-10-21. Callers still treat it as optional enrichment,
+        because a lapsed plan must degrade rather than fail the symbol (D29).
+        """
         return _rows(self.get("/stable/ratios", symbol=symbol, period=period, limit=limit))
 
     def key_metrics(self, symbol: str, *, period: str, limit: int) -> list[dict]:
-        """402 on the free tier (D29). Callers treat it as optional enrichment."""
+        """Live since 2026-10-21. Callers still treat it as optional enrichment,
+        because a lapsed plan must degrade rather than fail the symbol (D29).
+        """
         return _rows(self.get("/stable/key-metrics", symbol=symbol, period=period, limit=limit))
 
-    # ── estimates (D7) — 402 on the free tier (D29) ─────────────────────────
+    # ── estimates (D7) — live since 2026-10-21; revision clock started ──────
 
     def analyst_estimates(self, symbol: str, *, period: str, limit: int) -> list[dict]:
         return _rows(
