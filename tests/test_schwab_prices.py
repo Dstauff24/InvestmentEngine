@@ -12,6 +12,7 @@ import pytest
 
 from core import netguard
 from core.ratelimit import NullRateLimiter
+from ingest import schwab_prices
 from ingest.schwab_client import (
     REFRESH_TOKEN_LIFETIME,
     SchwabClient,
@@ -256,3 +257,61 @@ def test_retries_eventually_give_up_rather_than_loop(monkeypatch):
     with pytest.raises(SchwabTransientError):
         client.quotes(["SPY"])
     assert raw.calls == 4, "stop_after_attempt(4)"
+
+
+# ── the split clamp (D24) ───────────────────────────────────────────────────
+
+
+def _patch_queries(monkeypatch, *, newest, latest_split):
+    """Stand in for the two reads `start_date_for` makes."""
+
+    def fetch_one(sql, params=None):
+        if "max(session_date)" in sql:
+            return {"newest": newest}
+        return {"ex_date": latest_split}
+
+    monkeypatch.setattr(schwab_prices.db, "fetch_one", fetch_one)
+
+
+def test_an_incremental_pull_starts_just_before_the_newest_stored_bar(monkeypatch):
+    _patch_queries(monkeypatch, newest=date(2026, 10, 20), latest_split=None)
+    assert schwab_prices.start_date_for(
+        "AAPL", today=date(2026, 10, 21), backfill_days=400
+    ) == date(2026, 10, 20) - timedelta(days=schwab_prices.OVERLAP_DAYS)
+
+
+def test_a_symbol_with_no_bars_gets_the_full_backfill_window(monkeypatch):
+    _patch_queries(monkeypatch, newest=None, latest_split=None)
+    assert schwab_prices.start_date_for(
+        "AAPL", today=date(2026, 10, 21), backfill_days=400
+    ) == date(2026, 10, 21) - timedelta(days=400)
+
+
+def test_the_pull_never_reaches_back_past_a_split_ex_date(monkeypatch):
+    """SCHWAB RESTATES ITS OWN HISTORY. Verified live 2026-10-21: all 14 splits
+    inside the stored window, BKNG's 25-for-1 included, showed no price jump in
+    Schwab's candles. D24 keeps `prices_daily` raw and adjusts at read time, so
+    one restated bar gets adjusted twice — and the five-session overlap re-pull
+    would have quietly restated five good bars every time a split landed in it.
+    """
+    _patch_queries(monkeypatch, newest=date(2026, 10, 21), latest_split=date(2026, 10, 19))
+    assert schwab_prices.start_date_for(
+        "AAPL", today=date(2026, 10, 21), backfill_days=400
+    ) == date(2026, 10, 19)
+
+
+def test_an_old_split_does_not_move_a_recent_window(monkeypatch):
+    """The clamp is a floor, not a jump: a 2022 split must not drag a routine
+    incremental pull back four years."""
+    _patch_queries(monkeypatch, newest=date(2026, 10, 20), latest_split=date(2022, 6, 6))
+    assert schwab_prices.start_date_for(
+        "AAPL", today=date(2026, 10, 21), backfill_days=400
+    ) == date(2026, 10, 20) - timedelta(days=schwab_prices.OVERLAP_DAYS)
+
+
+def test_a_fresh_symbol_whose_backfill_window_spans_a_split_starts_at_the_split(monkeypatch):
+    """Its pre-split history has to come from the raw endpoint instead."""
+    _patch_queries(monkeypatch, newest=None, latest_split=date(2026, 9, 3))
+    assert schwab_prices.start_date_for(
+        "NEWCO", today=date(2026, 10, 21), backfill_days=400
+    ) == date(2026, 9, 3)

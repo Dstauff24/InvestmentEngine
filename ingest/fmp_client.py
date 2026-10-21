@@ -32,7 +32,7 @@ accepts either, so a migration in either direction does not break the parsers.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import requests
@@ -57,6 +57,12 @@ RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 # or a 429 whose text is about the plan rather than about pacing. A 429 that
 # says neither is an ordinary per-minute throttle and stays retryable.
 ALLOWANCE_SPENT_PHRASES = ("limit reach", "limit reached", "upgrade your plan")
+
+
+# The provider's row cap on every calendar endpoint, measured live 2026-10-21:
+# a 7-day window returned 1,823 rows and both a 14-day and a 30-day window
+# returned exactly 4,000, covering an arbitrary slice of the days requested.
+CALENDAR_ROW_CAP = 4000
 
 
 def is_allowance_spent(text: str) -> bool:
@@ -86,6 +92,21 @@ class FMPAuthError(FMPError):
 # core.budget directly. It is deliberately NOT an FMPError subclass: it is not a
 # provider problem, and the retry decorator must not treat it as transient.
 FMPBudgetExhausted = BudgetExhausted
+
+
+class FMPTruncatedResponse(FMPError):
+    """A calendar response hit the provider's row cap and is INCOMPLETE.
+
+    Measured live on 2026-10-21: `/stable/earnings-calendar` returns at most
+    4,000 rows, and over the 190-day window the events job asks for it returned
+    exactly 4,000 covering 48 days — the TAIL of the window, silently dropping
+    every past earnings date and the next three weeks of future ones. Nothing in
+    the payload says so.
+
+    That is the `isChainTruncated` lesson in a provider that offers no such
+    flag: a truncated response stored whole is a permanent, undetectable lie,
+    so it is refused instead. The caller narrows the window or asks per symbol.
+    """
 
 
 class FMPPlanError(FMPAuthError):
@@ -288,15 +309,45 @@ class FMPClient:
         )
 
     # ── calendars — market-wide, so 3 calls cover the whole universe ────────
+    #
+    # EVERY ONE OF THEM IS CAPPED. See `FMPTruncatedResponse`: the cap is on
+    # ROWS, not on the window, so whether a 190-day request comes back whole
+    # depends on how busy the market was. Checked on each call rather than
+    # assumed, because the payload carries no flag.
 
     def earnings_calendar(self, start, end) -> list[dict]:
-        return _rows(self.get("/stable/earnings-calendar", **{"from": str(start), "to": str(end)}))
+        return self._calendar("/stable/earnings-calendar", start, end)
 
     def dividend_calendar(self, start, end) -> list[dict]:
-        return _rows(self.get("/stable/dividends-calendar", **{"from": str(start), "to": str(end)}))
+        return self._calendar("/stable/dividends-calendar", start, end)
 
     def split_calendar(self, start, end) -> list[dict]:
-        return _rows(self.get("/stable/splits-calendar", **{"from": str(start), "to": str(end)}))
+        return self._calendar("/stable/splits-calendar", start, end)
+
+    def _calendar(self, path: str, start, end) -> list[dict]:
+        rows = _rows(self.get(path, **{"from": str(start), "to": str(end)}))
+        if len(rows) >= CALENDAR_ROW_CAP:
+            covered = sorted({str(r.get("date")) for r in rows if r.get("date")})
+            raise FMPTruncatedResponse(
+                f"{path} returned {len(rows)} rows for {start}..{end}, at or above the "
+                f"{CALENDAR_ROW_CAP}-row cap. The response covers only "
+                f"{len(covered)} date(s) "
+                f"({covered[0] if covered else '?'}..{covered[-1] if covered else '?'}) "
+                f"and is INCOMPLETE. Narrow the window or read per symbol."
+            )
+        return rows
+
+    def symbol_earnings(self, symbol: str, *, limit: int = 40) -> list[dict]:
+        """Past AND future earnings dates for ONE symbol. No row cap.
+
+        The market-wide calendar cannot be trusted for a 433-symbol universe
+        (see `FMPTruncatedResponse`), and this endpoint is the honest
+        substitute: one call per symbol, `limit` quarters deep, carrying
+        `epsActual`/`epsEstimated` — note the names differ from the calendar's
+        `eps`/`epsEstimated`, which is why the two have separate parsers.
+        """
+        rows = _rows(self.get("/stable/earnings", symbol=symbol, limit=limit))
+        return [{**row, "symbol": row.get("symbol") or symbol} for row in rows]
 
     # ── full history, for the D24 corporate-actions backfill ───────────────
 
@@ -319,9 +370,45 @@ class FMPClient:
         """
         end = clock.session_date()
         start = end - timedelta(days=int(days * 1.6) + 10)
+        return self.historical_bars(symbol, start=start, end=end)
+
+    def historical_bars(self, symbol: str, *, start: date, end: date) -> list[dict]:
+        """Daily bars over an EXPLICIT window, newest first. One call.
+
+        **SPLIT-ADJUSTED.** `/stable/historical-price-eod/full` returns a
+        series where `close` is already adjusted for every split since the bar,
+        verified live on 2026-10-21: LRCX's 10-for-1 on 2024-10-03 shows NO
+        price jump at all. Fine for a 20-day volume average; WRONG for
+        `prices_daily`, which D24 defines as raw and adjusts at read time —
+        storing an already-adjusted bar makes `features/adjustment.py`
+        double-adjust it. Use `historical_bars_raw` for anything stored.
+
+        The window form is what a history backfill needs: `days`-before-today
+        cannot express "five years ending last Tuesday", and a backfill that
+        silently re-anchored on today would write a different series each run.
+        """
         return _rows(
             self.get(
                 "/stable/historical-price-eod/full",
+                symbol=symbol,
+                **{"from": str(start), "to": str(end)},
+            )
+        )
+
+    def historical_bars_raw(self, symbol: str, *, start: date, end: date) -> list[dict]:
+        """Daily bars AS REPORTED — no split adjustment. What D24 stores.
+
+        **THE FIELD NAMES ARE A TRAP, in the `extrinsicValue` class.** This
+        endpoint returns `adjOpen`/`adjHigh`/`adjLow`/`adjClose` and NO `close`
+        key at all, and those `adj*` fields carry the UNADJUSTED prices. Live
+        on 2026-10-21, LRCX across its 10-for-1 split: `adjClose` 814.10 on
+        2024-10-02 and 81.11 on the 2024-10-03 ex-date. A reader that trusted
+        the names would store adjusted bars from the raw endpoint and raw bars
+        from the adjusted one, which is exactly backwards.
+        """
+        return _rows(
+            self.get(
+                "/stable/historical-price-eod/non-split-adjusted",
                 symbol=symbol,
                 **{"from": str(start), "to": str(end)},
             )

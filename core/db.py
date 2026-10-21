@@ -78,6 +78,21 @@ def active_symbols() -> list[str]:
     return [r["symbol"] for r in fetch_all("SELECT symbol FROM v_active_universe")]
 
 
+def benchmark_symbols() -> list[str]:
+    """Market series carried for D17 risk-off, D35 sleeves and D39 regimes.
+
+    Deliberately NOT part of `active_symbols()`: a benchmark is priced and
+    nothing else — never scored, never chained, never surfaced as an idea. Only
+    the price job unions the two.
+    """
+    return [
+        r["symbol"]
+        for r in fetch_all(
+            "SELECT symbol FROM tickers WHERE is_benchmark AND is_active ORDER BY symbol"
+        )
+    ]
+
+
 def ping() -> bool:
     """Cheap connectivity check for health checks and orchestrator preflight."""
     try:

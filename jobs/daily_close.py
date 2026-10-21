@@ -54,7 +54,7 @@ from ingest import (
 )
 from ingest.fmp_estimates import EstimatesPlanBlocked
 from ingest.schwab_client import SchwabTokenError, check_token
-from jobs import scoring_pass
+from jobs import price_basis_check, scoring_pass
 from shadow_book import outcome_tracker
 
 log = logging.getLogger(__name__)
@@ -166,6 +166,15 @@ def build_plan() -> list[Step]:
             lambda: fmp_fundamentals.run(),
             depends_on=("fmp_events",),
             description="quarterly financials + ratios, stale symbols only",
+        ),
+        Step(
+            "price_basis_check",
+            lambda: price_basis_check.run(),
+            # AFTER the events job, because that is what writes today's splits
+            # to `corporate_actions`, and the check needs the split to know
+            # what the series should have done.
+            depends_on=("schwab_prices", "fmp_events"),
+            description="D24 guard: stored bars must step at a split ex-date",
         ),
         Step(
             "edgar_insiders",

@@ -693,6 +693,10 @@ def deactivate_absent(kept_symbols: set[str], *, session_date: date, grace_days:
     `news_articles` and `corporate_actions` all FK to `tickers.symbol` with
     ON DELETE CASCADE, so a delete would silently take real history with it.
     (tests/test_schema_db.py proves that cascade.)
+
+    BENCHMARKS ARE SPARED. SPY is never in the constituents pull, so every run
+    would find it "absent" and deactivate it after the grace period — taking
+    the market series that D17's risk-off rule and D39's regime tagging read.
     """
     if not kept_symbols:
         return 0
@@ -703,6 +707,7 @@ def deactivate_absent(kept_symbols: set[str], *, session_date: date, grace_days:
                deactivated_on   = %(session_date)s,
                passes_liquidity = FALSE
         WHERE  is_active
+          AND  NOT is_benchmark
           AND  NOT (symbol = ANY(%(kept)s))
           AND  last_seen_on < %(session_date)s - make_interval(days => %(grace)s)
         """,

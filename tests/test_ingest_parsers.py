@@ -691,7 +691,7 @@ def test_ingestion_scope_comes_from_config():
     assert u.fundamentals.refresh_after_days == 7
     assert u.events.forward_days == 90
     assert u.estimates.quarters_ahead == 4
-    assert u.fmp.daily_call_budget == 9000  # Premium from 2026-10-21
+    assert u.fmp.daily_call_budget == 12000  # Premium, raised for O7's backfill
 
 
 # ── every FMP-budget job must stop cleanly on a spent budget ──────────────────

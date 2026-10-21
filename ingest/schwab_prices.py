@@ -90,15 +90,50 @@ def parse_candles(payload: dict, symbol: str) -> list[dict]:
     return rows
 
 
+LATEST_SPLIT_SQL = """
+    SELECT max(ex_date) AS ex_date
+    FROM   corporate_actions
+    WHERE  symbol = %s AND action_type = 'split' AND ex_date <= %s
+"""
+
+
 def start_date_for(symbol: str, *, today: date, backfill_days: int) -> date:
-    """Where to start pulling: just before the newest stored bar, or a full backfill."""
+    """Where to start pulling: just before the newest stored bar, or a backfill.
+
+    **CLAMPED AT THE MOST RECENT SPLIT EX-DATE, because Schwab restates its own
+    history.** Verified live on 2026-10-21: all 14 splits inside the stored
+    window — BKNG's 25-for-1 among them — showed no price jump in Schwab's
+    candles at all. D24 defines `prices_daily` as raw and applies split factors
+    at READ time, so one adjusted bar gets adjusted twice.
+
+    Clamping means Schwab only ever writes sessions on the CURRENT basis, which
+    are raw by construction. Anything older comes from
+    `ingest/fmp_history.py`'s non-split-adjusted endpoint. Without the clamp the
+    5-session overlap re-pull would quietly restate five good bars every time a
+    split landed inside it.
+    """
     row = db.fetch_one(
         "SELECT max(session_date) AS newest FROM prices_daily WHERE symbol = %s", (symbol,)
     )
     newest = row["newest"] if row else None
-    if newest is None:
-        return today - timedelta(days=backfill_days)
-    return newest - timedelta(days=OVERLAP_DAYS)
+    start = (
+        today - timedelta(days=backfill_days)
+        if newest is None
+        else newest - timedelta(days=OVERLAP_DAYS)
+    )
+
+    split = db.fetch_one(LATEST_SPLIT_SQL, (symbol, today))
+    ex_date = split["ex_date"] if split else None
+    if ex_date is not None and ex_date > start:
+        log.info(
+            "%s: start clamped from %s to the %s split ex-date (Schwab restates "
+            "pre-split history; D24 wants raw)",
+            symbol,
+            start,
+            ex_date,
+        )
+        return ex_date
+    return start
 
 
 def load_symbol(client: SchwabClient, symbol: str, *, today: date, backfill_days: int) -> int:
@@ -122,7 +157,11 @@ def run(
 ) -> int:
     client = client or SchwabClient()
     today = clock.session_date()
-    universe = symbols if symbols is not None else db.active_symbols()
+    # THE ONE JOB THAT UNIONS BENCHMARKS IN. SPY is not a candidate (it is out
+    # of `v_active_universe`, so nothing scores it), but its bars have to stay
+    # current or D17's risk-off rule and D39's regime tagging read a series
+    # that stopped the day the backfill ran.
+    universe = symbols if symbols is not None else db.active_symbols() + db.benchmark_symbols()
     if not universe:
         raise RuntimeError("no active tickers; run `python -m ingest.universe` first")
 

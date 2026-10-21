@@ -198,3 +198,81 @@ def _close_before(closes: pd.Series, ex_date: date) -> float | None:
         return None
     value = float(earlier.iloc[-1])
     return None if pd.isna(value) else value
+
+
+# ── the basis guard ─────────────────────────────────────────────────────────
+#
+# Everything above assumes `prices_daily` holds RAW bars. Nothing in a row says
+# whether that is true, and a provider that restates its own history leaves no
+# trace: Schwab's daily candles are split-ADJUSTED (verified 2026-10-21 across
+# all 14 splits in the stored window, BKNG's 25-for-1 among them), so storing
+# them whole made every read-time factor an adjustment of an adjustment.
+#
+# The bug was invisible for two reasons worth remembering. `corporate_actions`
+# held no splits at all until the O7 backfill, so the factor was 1.0 and
+# nothing looked wrong; and double-adjusting produces a plausible-looking
+# series rather than an error. The only evidence either way is arithmetic the
+# data can be asked for directly: a raw series JUMPS by the split ratio at the
+# ex-date, and an adjusted one does not.
+
+
+BASIS_CHECK_SQL = """
+    WITH held AS (
+        SELECT symbol, min(session_date) AS lo, max(session_date) AS hi
+        FROM   prices_daily
+        GROUP  BY symbol
+    )
+    SELECT c.symbol, c.ex_date, c.split_ratio,
+           (SELECT close FROM prices_daily p
+            WHERE p.symbol = c.symbol AND p.session_date < c.ex_date
+            ORDER BY p.session_date DESC LIMIT 1) AS close_before,
+           (SELECT close FROM prices_daily p
+            WHERE p.symbol = c.symbol AND p.session_date >= c.ex_date
+            ORDER BY p.session_date LIMIT 1) AS close_after
+    FROM   corporate_actions c
+    JOIN   held h ON h.symbol = c.symbol
+    WHERE  c.action_type = 'split'
+      AND  c.ex_date > h.lo AND c.ex_date <= h.hi
+      AND  c.split_ratio IS NOT NULL
+      AND  c.split_ratio >= %(min_ratio)s
+      AND  c.ex_date <= %(as_of)s
+    ORDER  BY c.symbol, c.ex_date
+"""
+
+# Only ratios far enough from 1 to be unambiguous. A 0.954 "split" is how FMP
+# reports a spinoff (O10), where the price step is not the ratio and this check
+# would report a violation that is really an unimplemented decision.
+MIN_UNAMBIGUOUS_RATIO = 1.5
+# A split ex-date also has a trading day attached to it, so the observed step
+# is the ratio times that day's move. 25% of tolerance separates "the series
+# jumped" from "it did not" without flagging a volatile session.
+BASIS_TOLERANCE = 0.25
+
+
+def split_basis_violations(*, as_of: date) -> list[dict]:
+    """Splits whose stored series does NOT step by the ratio: adjusted bars.
+
+    One row per split that looks pre-adjusted, with the ratio the log claims
+    and the step the bars actually show. An empty list is the assertion D24
+    rests on, checked rather than assumed.
+    """
+    from core import db
+
+    rows = db.fetch_all(BASIS_CHECK_SQL, {"as_of": as_of, "min_ratio": MIN_UNAMBIGUOUS_RATIO})
+    out = []
+    for row in rows:
+        before, after = row["close_before"], row["close_after"]
+        if before is None or not after:
+            continue
+        ratio = float(row["split_ratio"])
+        observed = float(before) / float(after)
+        if abs(observed - ratio) > ratio * BASIS_TOLERANCE:
+            out.append(
+                {
+                    "symbol": row["symbol"],
+                    "ex_date": row["ex_date"],
+                    "ratio": ratio,
+                    "observed_step": round(observed, 4),
+                }
+            )
+    return out

@@ -43,6 +43,10 @@ log = logging.getLogger(__name__)
 
 JOB_NAME = "fmp_events"
 BACKFILL_JOB_NAME = "fmp_corporate_actions_backfill"
+# Quarters of earnings history per symbol. 40 is ten years, which costs the
+# same single call as four and makes the backfill and the daily refresh the
+# same operation.
+EARNINGS_LIMIT = 40
 
 UPSERT_EVENT = """
     INSERT INTO events (
@@ -156,6 +160,65 @@ def parse_earnings(rows: list[dict], universe: set[str]) -> list[dict]:
             }
         )
     return out
+
+
+def parse_symbol_earnings(rows: list[dict], symbol: str) -> list[dict]:
+    """FMP `/stable/earnings?symbol=X` -> `events` params.
+
+    A SECOND parser rather than a shared one, because the field names differ
+    from the calendar's for the same facts: `epsActual` here against `eps`
+    there, `revenueActual` against `revenue`. Reading one payload with the
+    other's names yields rows that parse cleanly and carry nothing — the
+    quietest kind of wrong — so the two shapes are named separately and the
+    `events` parameter dict they build is the only thing they share.
+    """
+    out = []
+    for row in rows:
+        event_date = _as_date(row.get("date"))
+        if event_date is None:
+            continue
+        eps_actual = as_float(row.get("epsActual"))
+        revenue_actual = as_float(row.get("revenueActual"))
+        out.append(
+            {
+                **_blank_event(symbol, "earnings", event_date),
+                "is_confirmed": eps_actual is not None or revenue_actual is not None,
+                "title": f"{symbol} earnings",
+                "eps_estimate": as_float(row.get("epsEstimated")),
+                "eps_actual": eps_actual,
+                "revenue_estimate": as_float(row.get("revenueEstimated")),
+                "revenue_actual": revenue_actual,
+            }
+        )
+    return out
+
+
+def refresh_symbol_earnings(
+    client: FMPClient,
+    symbols: list[str],
+    *,
+    limit: int = EARNINGS_LIMIT,
+    run: object = None,
+) -> int:
+    """Earnings dates PER SYMBOL. One call each, no row cap.
+
+    **WHY NOT THE MARKET-WIDE CALENDAR.** It costs one call instead of 433 and
+    was the original design, but it is capped at 4,000 rows and says nothing
+    when it truncates: over the 190-day window this job asks for, it returned
+    the last 48 days and dropped every past earnings date. Live on 2026-10-21
+    that left 76 earnings rows for 433 symbols, zero of them in the past, which
+    is why `post_earnings_drift` could not fire and `pullback_to_trend` refused
+    every symbol for an unverifiable earnings exclusion.
+
+    The cost is the point: 433 calls buys a radar that is actually complete.
+    """
+
+    def one(symbol: str) -> int:
+        rows = parse_symbol_earnings(client.symbol_earnings(symbol, limit=limit), symbol)
+        return db.executemany(UPSERT_EVENT, rows) if rows else 0
+
+    outcome = for_each_symbol(symbols, one, run=run, label="earnings", stop_on=BudgetExhausted)
+    return outcome.rows
 
 
 def parse_dividends(rows: list[dict], universe: set[str]) -> tuple[list[dict], list[dict]]:
@@ -350,8 +413,7 @@ def run(client: FMPClient | None = None) -> dict[str, int]:
     with job_run(
         JOB_NAME, session_date=today, triggered_by="manual", clean_stop=BudgetExhausted
     ) as job:
-        earnings = parse_earnings(client.earnings_calendar(start, end), universe)
-        counts["earnings"] = db.executemany(UPSERT_EVENT, earnings)
+        counts["earnings"] = refresh_symbol_earnings(client, sorted(universe), run=job)
 
         div_events, div_actions = parse_dividends(client.dividend_calendar(start, end), universe)
         counts["dividends"] = db.executemany(UPSERT_EVENT, div_events)

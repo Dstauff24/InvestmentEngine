@@ -123,6 +123,21 @@ PROBES: list[tuple[str, tuple[str, dict], tuple[str, dict]]] = [
         (f"/api/v3/historical-price-full/{SYMBOL}", {"timeseries": 5}),
         ("/stable/historical-price-eod/full", {"symbol": SYMBOL, **WINDOW}),
     ),
+    (
+        # The RAW series D24 stores. Separate from the one above because the
+        # `full` variant is split-ADJUSTED, and a plan that gates one and not
+        # the other would leave the engine storing double-adjustable bars.
+        "daily bars (raw)",
+        (f"/api/v3/historical-price-full/{SYMBOL}", {"serietype": "line"}),
+        ("/stable/historical-price-eod/non-split-adjusted", {"symbol": SYMBOL, **WINDOW}),
+    ),
+    (
+        # Per-symbol earnings, which replaced the market-wide calendar for the
+        # event radar: that one is capped at 4,000 rows and truncates silently.
+        "earnings (per symbol)",
+        (f"/api/v3/historical/earning_calendar/{SYMBOL}", {}),
+        ("/stable/earnings", {"symbol": SYMBOL, "limit": 4}),
+    ),
 ]
 
 # What the free tier was observed to gate (D29). Printed alongside the result so

@@ -403,10 +403,14 @@ def test_premium_call_budget():
     A cold start costs 6,759 calls: universe 527 + estimates 1,039 +
     fundamentals 5,190 + events 3. The budget must clear that in ONE day or a
     first run can never complete, and it keeps a reserve for the event radar.
+    Raised to 12,000 for O7's one-time history backfill, which adds ~1,321
+    (actions 866 + bars 434 + earnings windows 21) on top of a cold start.
     """
     f = cfg.universe().fmp
-    assert f.daily_call_budget == 9000  # [OPEN] #31
-    assert f.daily_call_budget > 6759, "a cold start could not complete in one day"
+    assert f.daily_call_budget == 12000  # [OPEN] #31
+    assert f.daily_call_budget > 6759 + 1321, (
+        "a cold start plus the one-time history backfill could not complete in one day"
+    )
     assert f.reserve_for_events == 3
 
 
@@ -898,7 +902,10 @@ def test_the_events_reserve_matches_the_number_of_calendar_endpoints():
     calendars = [
         name
         for name, _ in inspect.getmembers(fmp_client.FMPClient, inspect.isfunction)
-        if name.endswith("_calendar")
+        # Public methods only: `_calendar` is the shared transport they all go
+        # through (it is what raises on a truncated response), not a fourth
+        # endpoint, and counting it would inflate the reserve.
+        if name.endswith("_calendar") and not name.startswith("_")
     ]
     assert sorted(calendars) == ["dividend_calendar", "earnings_calendar", "split_calendar"]
     assert cfg.universe().fmp.reserve_for_events == len(calendars) == 3
@@ -909,7 +916,7 @@ def test_a_reserve_that_consumes_the_whole_budget_is_rejected(tmp_path):
         tmp_path,
         "universe.yaml",
         # Equal to the budget: the reserve would leave nothing in the pool.
-        mutate("universe.yaml", ["fmp", "reserve_for_events"], 9000),
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 12000),
         "must be below",
     )
 
@@ -918,7 +925,7 @@ def test_a_reserve_above_the_budget_is_rejected(tmp_path):
     expect_error(
         tmp_path,
         "universe.yaml",
-        mutate("universe.yaml", ["fmp", "reserve_for_events"], 9500),
+        mutate("universe.yaml", ["fmp", "reserve_for_events"], 12500),
         "must be below",
     )
 

@@ -317,12 +317,23 @@ def compute(
 # ── loading (the only part that touches the database) ───────────────────────
 
 
+# POINT-IN-TIME ON THE FILING DATE, NOT THE FISCAL PERIOD END. A quarter
+# ending March 31 is not knowable until it is FILED, four to eight weeks later,
+# and keying `as_of` on `fiscal_date_ending` let a backtest standing on April 5
+# read numbers nobody had published — the identical mistake the insider rules
+# refuse by storing `filed_at NOT NULL` and keying every read on it.
+#
+# A row with neither date is EXCLUDED rather than dated by guesswork: it cannot
+# be read point-in-time at all, and inventing a reporting lag to rescue it
+# would be inventing the very fact the filter exists to check.
 QUARTERS_SQL = """
     SELECT symbol, fiscal_date_ending, fiscal_period, revenue, gross_profit,
            operating_income, net_income, eps_diluted, gross_margin,
-           operating_margin, net_margin, roe, roic, debt_to_equity
+           operating_margin, net_margin, roe, roic, debt_to_equity,
+           COALESCE(filing_date, accepted_date::date) AS known_on
     FROM   fundamentals
-    WHERE  symbol = %s AND period_type = 'quarter' AND fiscal_date_ending <= %s
+    WHERE  symbol = %s AND period_type = 'quarter'
+      AND  COALESCE(filing_date, accepted_date::date) <= %s
     ORDER  BY fiscal_date_ending
 """
 
@@ -336,12 +347,18 @@ SNAPSHOTS_SQL = """
 
 
 def load_fundamentals(symbol: str, *, as_of: date, limit: int = 12) -> list[dict]:
-    """Quarterly rows up to `as_of`, oldest first.
+    """Quarterly rows KNOWABLE on `as_of`, oldest first.
 
-    `as_of` filters on `fiscal_date_ending` rather than on when the row was
-    ingested, which is the honest reading for a point-in-fact table: a backtest
-    standing on 2026-03-01 should see the quarters that had ENDED, not the ones
-    we happen to have rows for now.
+    `as_of` filters on the FILING date, not on the fiscal period end. A quarter
+    that ended on March 31 is not public until it is filed weeks later, so
+    filtering on the period end handed a backtest standing on April 5 a set of
+    numbers nobody had seen — a lookahead that merely makes the results look
+    better. Same rule as `insider_transactions.filed_at`: a fact is a fact when
+    it is published.
+
+    Live runs are unaffected in practice (as_of is today and we only hold filed
+    statements), which is exactly why the leak was invisible until a backtest
+    asked for a date in the past.
     """
     rows = db.fetch_all(QUARTERS_SQL, (symbol, as_of))
     return rows[-limit:] if limit else rows

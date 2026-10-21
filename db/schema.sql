@@ -74,6 +74,13 @@ CREATE TABLE IF NOT EXISTS tickers (
 
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
     deactivated_on      DATE,
+    -- A BENCHMARK (SPY) carries prices and nothing else: no chains, no
+    -- fundamentals, no score, no idea. D17's risk-off rule, D35's sleeve
+    -- benchmarks and D39's per-regime expectancy all need a market series, and
+    -- the D14 universe of index CONSTITUENTS does not contain one. Excluded
+    -- from v_active_universe, which is what every job iterates. Added by
+    -- db/migrations/012_benchmark_tickers.sql.
+    is_benchmark        BOOLEAN NOT NULL DEFAULT FALSE,
 
     first_seen_on       DATE NOT NULL DEFAULT CURRENT_DATE,
     last_seen_on        DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -84,6 +91,8 @@ CREATE TABLE IF NOT EXISTS tickers (
 
 CREATE INDEX IF NOT EXISTS ix_tickers_active ON tickers (is_active) WHERE is_active;
 CREATE INDEX IF NOT EXISTS ix_tickers_sector ON tickers (sector);
+CREATE INDEX IF NOT EXISTS ix_tickers_benchmark
+    ON tickers (symbol) WHERE is_benchmark;
 CREATE INDEX IF NOT EXISTS ix_tickers_volume_staleness
     ON tickers (avg_volume_asof NULLS FIRST) WHERE is_active;
 
@@ -984,7 +993,12 @@ CREATE OR REPLACE VIEW v_active_universe AS
 SELECT symbol, company_name, sector, industry, avg_volume_20d,
        in_sp500, in_nasdaq100, in_watchlist
 FROM   tickers
-WHERE  is_active
+-- NOT is_benchmark: SPY is carried for prices only (D17/D35/D39) and must
+-- never be scored or surfaced as an idea. This file is applied AFTER the
+-- migrations, so the definition here is the one that survives — a migration
+-- that redefines a view in schema.sql and is not mirrored here is silently
+-- reverted on the next `db.init`.
+WHERE  is_active AND NOT is_benchmark
 ORDER  BY symbol;
 
 -- Per-day job health. `day_complete` is the gate the orchestrator honours: it

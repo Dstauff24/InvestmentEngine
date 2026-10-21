@@ -188,7 +188,14 @@ fmp:
   # than per-day: its job is no longer "stay inside the free allowance" but
   # "stop a runaway loop before it makes 200,000 calls". A bug that retries
   # forever is cheaper to catch here than on the invoice.
-  daily_call_budget: 9000      # [OPEN] #31
+  #
+  # Raised 9,000 -> 12,000 on 2026-10-21 for O7's one-time deep history
+  # backfill: corporate actions (2 calls/symbol, ~866) + five years of bars
+  # (1/symbol, ~434) + the earnings calendar in 90-day windows (~21) is ~1,321
+  # calls that can land on a day the cold start already spent 8,997. A bounded
+  # one-off is not what the guard is for, and at 12,000 it still catches a
+  # runaway loop within minutes.
+  daily_call_budget: 12000     # [OPEN] #31
   # Calls held back from the general pool for the market-wide calendars. NOT an
   # [OPEN] guess: it is exactly the number of calendar endpoints the events job
   # calls (earnings, dividends, splits), and a named test asserts it stays in
