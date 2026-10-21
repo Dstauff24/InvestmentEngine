@@ -947,7 +947,12 @@ def test_empty_estimate_period_types_are_rejected(tmp_path):
 # new value and forget the doc, and the next reader assumes an untested guess
 # was a decision.
 
-TAG = re.compile(r"^\s*([a-z_]+):.*#\s*\[OPEN\]\s*#(\d+)")
+# `[a-z0-9_]`, not `[a-z_]`. The first version could not match a parameter
+# name containing a DIGIT, so `tp1_depth_multiple` and `tp2_gap_multiple` were
+# invisible to this scanner — they could carry an [OPEN] tag with no doc row
+# and the sync test would have reported everything in agreement. Found when
+# five geometry tags silently failed to appear in the count.
+TAG = re.compile(r"^\s*([a-z0-9_]+):.*#\s*\[OPEN\]\s*#(\d+)")
 
 
 def tagged_parameters() -> dict[int, str]:
@@ -976,8 +981,8 @@ def documented_parameters() -> dict[int, str]:
     }
 
 
-def test_the_doc_lists_exactly_66_parameters():
-    assert len(documented_parameters()) == 66
+def test_the_doc_lists_exactly_76_parameters():
+    assert len(documented_parameters()) == 76
 
 
 def test_every_tagged_value_is_documented():
@@ -1003,8 +1008,8 @@ def test_the_tag_numbering_is_contiguous():
 
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
-    assert "D41" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 66
+    assert "D42" in doc  # the doc states the decision range it was built against
+    assert len(tagged_parameters()) == 76
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1042,3 +1047,18 @@ def test_a_missing_watchlist_is_not_an_error(tmp_path):
 def test_the_shipped_watchlist_is_readable():
     """It is all comments today; it must still parse to a list."""
     assert isinstance(cfg.load_watchlist(), list)
+
+
+def test_the_tag_scanner_can_see_a_parameter_name_with_a_digit():
+    """The scanner's own blind spot, pinned.
+
+    Its regex was `[a-z_]+`, which cannot match `tp1_depth_multiple`. Five
+    geometry tags were therefore invisible: they carried an [OPEN] number with
+    no doc row, and this file reported everything in agreement. A guard with a
+    hole in it is worse than no guard, because it is believed.
+    """
+    assert TAG.match("    tp1_depth_multiple: 1.0   # [OPEN] #73")
+    assert TAG.match("    tp2_gap_multiple: 2.0     # [OPEN] #76")
+    assert TAG.match("  rsi_period: 14              # [OPEN] #4")
+    # ...and the shipped config actually contains such names.
+    assert any(any(ch.isdigit() for ch in name) for name in tagged_parameters().values())

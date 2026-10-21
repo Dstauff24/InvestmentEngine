@@ -181,6 +181,8 @@ class ScoredSymbol:
     tier: str | None = None
     tier_reason: str = ""
     surfaced: bool = False
+    recipes: list = field(default_factory=list)
+    """RecipeResults for this symbol. Only the triggered ones carry a plan."""
     """Did this idea make the digest's `max_ideas_per_day` cut (D33)?"""
 
     @property
@@ -191,14 +193,38 @@ class ScoredSymbol:
     def pillars_scored(self) -> int:
         return len(self.pillars.scored)
 
+    @property
+    def triggered(self) -> list:
+        return [r for r in self.recipes if r.triggered]
+
+    @property
+    def best_plan(self):
+        """The triggered plan with the highest R:R, or None.
+
+        Highest R:R rather than first-in-order: if two setups fire on one
+        symbol they are two ways to express the same opinion, and the one with
+        the better reward per unit of risk is the one to print.
+        """
+        plans = [r for r in self.triggered if r.plan is not None]
+        return max(plans, key=lambda r: r.plan.risk_reward, default=None)
+
     def card_line(self) -> str:
         """One line for an idea card. The mask is ALWAYS shown (D41)."""
         composite = "—" if self.composite is None else f"{self.composite:5.1f}"
         pct = "" if self.percentile is None else f" p{self.percentile:.0f}"
+        best = self.best_plan
+        plan = ""
+        if best is not None:
+            p = best.plan
+            plan = (
+                f" | {best.recipe} entry {p.entry_low:.2f}-{p.entry_high:.2f} "
+                f"stop {p.stop:.2f} TP1 {p.target_1:.2f} TP2 {p.target_2:.2f} "
+                f"R:R {p.risk_reward:.1f}"
+            )
         return (
             f"{self.symbol:6} {composite}{pct} "
             f"[{self.mask or 'none'}] "
-            f"{self.tier or '-'}  {self.tier_reason}"
+            f"{self.tier or '-'}  {self.tier_reason}{plan}"
         )
 
 

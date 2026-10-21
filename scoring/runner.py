@@ -31,10 +31,17 @@ from features import sentiment as sentiment_features
 from features import technical as technical_features
 from scoring.composite import ScoredSymbol, UniverseRun, composite_score, rank_universe
 from scoring.pillars import PillarScore, PillarScores, score_all
+from scoring.recipes import evaluate_all
 
 log = logging.getLogger(__name__)
 
-__all__ = ["SectorCache", "abstaining_pillars", "score_symbol", "score_universe"]
+__all__ = [
+    "SectorCache",
+    "abstaining_pillars",
+    "record_daily_stats",
+    "score_symbol",
+    "score_universe",
+]
 
 
 def abstaining_pillars(symbol: str) -> PillarScores:
@@ -86,7 +93,7 @@ class SectorCache:
 
         members = technical_features.sector_members(sector, limit=self.max_members)
         self._members[sector] = members
-        if len(members) < 3:
+        if len(members) < config.universe().sector.min_members:
             # Not an index. Cached as empty so the decision is made once.
             log.info("sector %r has %d usable member(s); no composite", sector, len(members))
             self._composites[sector] = pd.Series(dtype=float)
@@ -99,7 +106,12 @@ class SectorCache:
             )
             if not bars.empty:
                 frames[symbol] = bars
-        series = technical_features.sector_composite(frames)
+        scope = config.universe().sector
+        series = technical_features.sector_composite(
+            frames,
+            min_member_fraction=scope.min_member_fraction,
+            min_members=scope.min_members,
+        )
         self.builds += 1
         log.info(
             "built sector composite for %r from %d member(s), %d bars",
@@ -154,10 +166,24 @@ def score_symbol(
 
     pillars = score_all(symbol, technical, fundamental, catalyst, sentiment)
     score, reason = composite_score(pillars)
-    return ScoredSymbol(symbol=symbol, pillars=pillars, composite=score, abstain_reason=reason)
+    return ScoredSymbol(
+        symbol=symbol,
+        pillars=pillars,
+        composite=score,
+        abstain_reason=reason,
+        # Recipes take FEATURES, not scores: "does this setup exist" is a
+        # question about the measurements, while "do the pillars agree" is
+        # D12's separate tiering question.
+        recipes=evaluate_all(technical, fundamental, catalyst),
+    )
 
 
-def score_universe(symbols: list[str] | None = None, *, as_of: date | None = None) -> UniverseRun:
+def score_universe(
+    symbols: list[str] | None = None,
+    *,
+    as_of: date | None = None,
+    record_stats: bool = True,
+) -> UniverseRun:
     """Both phases. Returns every symbol scored, ranked and tiered."""
     day = as_of or clock.session_date()
     universe = symbols if symbols is not None else db.active_symbols()
@@ -207,6 +233,8 @@ def score_universe(symbols: list[str] | None = None, *, as_of: date | None = Non
     rank_universe(scored)
 
     run = UniverseRun(scored=scored)
+    if record_stats:
+        record_daily_stats(run, day=day)
     log.info(
         "scored %d: %d tier A, %d tier B, %d abstained; pillars %s",
         len(scored),
@@ -216,6 +244,107 @@ def score_universe(symbols: list[str] | None = None, *, as_of: date | None = Non
         run.mask_histogram(),
     )
     return run
+
+
+STATS_UPSERT = """
+    INSERT INTO daily_scoring_stats (
+        session_date, symbols_scored, symbols_abstained, tier_a_count, tier_b_count,
+        surfaced_count, not_surfaced_count, mask_histogram,
+        composite_min, composite_p25, composite_median, composite_p75,
+        composite_p90, composite_max,
+        tier_a_min_composite, tier_b_min_composite, max_ideas_per_day, recipe_counts
+    ) VALUES (
+        %(session_date)s, %(symbols_scored)s, %(symbols_abstained)s, %(tier_a_count)s,
+        %(tier_b_count)s, %(surfaced_count)s, %(not_surfaced_count)s,
+        %(mask_histogram)s, %(composite_min)s, %(composite_p25)s, %(composite_median)s,
+        %(composite_p75)s, %(composite_p90)s, %(composite_max)s,
+        %(tier_a_min_composite)s, %(tier_b_min_composite)s, %(max_ideas_per_day)s,
+        %(recipe_counts)s
+    )
+    -- One row per session date: a day's scoring is a function of the data as
+    -- it stood, not an append-only history, so a re-run replaces it.
+    ON CONFLICT (session_date) DO UPDATE SET
+        symbols_scored     = EXCLUDED.symbols_scored,
+        symbols_abstained  = EXCLUDED.symbols_abstained,
+        tier_a_count       = EXCLUDED.tier_a_count,
+        tier_b_count       = EXCLUDED.tier_b_count,
+        surfaced_count     = EXCLUDED.surfaced_count,
+        not_surfaced_count = EXCLUDED.not_surfaced_count,
+        mask_histogram     = EXCLUDED.mask_histogram,
+        composite_min      = EXCLUDED.composite_min,
+        composite_p25      = EXCLUDED.composite_p25,
+        composite_median   = EXCLUDED.composite_median,
+        composite_p75      = EXCLUDED.composite_p75,
+        composite_p90      = EXCLUDED.composite_p90,
+        composite_max      = EXCLUDED.composite_max,
+        tier_a_min_composite = EXCLUDED.tier_a_min_composite,
+        tier_b_min_composite = EXCLUDED.tier_b_min_composite,
+        max_ideas_per_day  = EXCLUDED.max_ideas_per_day,
+        recipe_counts      = EXCLUDED.recipe_counts,
+        updated_at         = now()
+"""
+
+
+def record_daily_stats(run: UniverseRun, *, day: date) -> None:
+    """D42: one aggregate row for the ideas that qualified but were not surfaced.
+
+    The only record of what the engine ALMOST said. D39(3)'s paper phase tunes
+    the Tier A/B gates, and without this a threshold change would be guesswork
+    about the distribution just outside the cut.
+
+    The gates in force are stored WITH the row, so a later threshold change
+    cannot silently reinterpret today's distribution.
+    """
+    import json
+
+    cfg = config.scoring()
+    composites = sorted(s.composite for s in run.scored if s.composite is not None)
+    qualifying = [s for s in run.scored if s.tier is not None]
+
+    recipe_counts: dict[str, int] = {}
+    for item in run.scored:
+        for result in item.recipes:
+            if result.triggered:
+                recipe_counts[result.recipe] = recipe_counts.get(result.recipe, 0) + 1
+
+    db.execute(
+        STATS_UPSERT,
+        {
+            "session_date": day,
+            "symbols_scored": len(composites),
+            "symbols_abstained": len(run.abstained),
+            "tier_a_count": len(run.tier_a),
+            "tier_b_count": len(run.tier_b),
+            "surfaced_count": len(run.surfaced),
+            "not_surfaced_count": len(qualifying) - len(run.surfaced),
+            "mask_histogram": json.dumps({str(k): v for k, v in run.mask_histogram().items()}),
+            "composite_min": _quantile(composites, 0.0),
+            "composite_p25": _quantile(composites, 0.25),
+            "composite_median": _quantile(composites, 0.5),
+            "composite_p75": _quantile(composites, 0.75),
+            "composite_p90": _quantile(composites, 0.9),
+            "composite_max": _quantile(composites, 1.0),
+            "tier_a_min_composite": cfg.tiers.a.min_composite,
+            "tier_b_min_composite": cfg.tiers.b.min_composite,
+            "max_ideas_per_day": cfg.ranking.max_ideas_per_day,
+            "recipe_counts": json.dumps(recipe_counts),
+        },
+    )
+    log.info(
+        "D42 stats for %s: %d qualifying, %d surfaced, %d rolled into the aggregate",
+        day,
+        len(qualifying),
+        len(run.surfaced),
+        len(qualifying) - len(run.surfaced),
+    )
+
+
+def _quantile(values: list[float], q: float) -> float | None:
+    """Nearest-rank quantile. None on an empty population."""
+    if not values:
+        return None
+    index = min(len(values) - 1, max(0, round(q * (len(values) - 1))))
+    return round(values[index], 2)
 
 
 def main(argv: list[str] | None = None) -> int:

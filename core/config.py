@@ -230,6 +230,58 @@ class DriftRecipe(Base):
         return self
 
 
+class PullbackGeometry(Base):
+    swing_lookback_days: PositiveInt  # [OPEN] #71
+    tp2_measured_move: float  # [OPEN] #72
+
+
+class BreakoutGeometry(Base):
+    tp1_depth_multiple: float  # [OPEN] #73
+    tp2_depth_multiple: float  # [OPEN] #74
+
+
+class DriftGeometry(Base):
+    tp1_gap_multiple: float  # [OPEN] #75
+    tp2_gap_multiple: float  # [OPEN] #76
+
+
+class Geometry(Base):
+    """D11/D12: where the stop and targets go.
+
+    Targets come from STRUCTURE, not from R multiples. Setting TP2 at "3R"
+    would make R:R a constant and D12's R:R gates satisfied by construction on
+    every idea — a gate that can never bind.
+    """
+
+    stop_atr_buffer: float  # [OPEN] #68
+    entry_zone_atr: float  # [OPEN] #69
+    min_stop_atr: float  # [OPEN] #70
+    pullback_to_trend: PullbackGeometry
+    base_breakout: BreakoutGeometry
+    post_earnings_drift: DriftGeometry
+
+    @model_validator(mode="after")
+    def _tp2_must_be_beyond_tp1(self):
+        if self.pullback_to_trend.tp2_measured_move <= 1.0:
+            raise ValueError(
+                f"pullback tp2_measured_move is {self.pullback_to_trend.tp2_measured_move}; "
+                f"TP2 must extend BEYOND the TP1 reclaim (>1.0) or the runner has "
+                f"nowhere to run and D11's TP1/TP2 structure collapses to one target"
+            )
+        if self.base_breakout.tp2_depth_multiple <= self.base_breakout.tp1_depth_multiple:
+            raise ValueError("base_breakout tp2_depth_multiple must exceed tp1")
+        if self.post_earnings_drift.tp2_gap_multiple <= self.post_earnings_drift.tp1_gap_multiple:
+            raise ValueError("post_earnings_drift tp2_gap_multiple must exceed tp1")
+        for name, value in (
+            ("stop_atr_buffer", self.stop_atr_buffer),
+            ("entry_zone_atr", self.entry_zone_atr),
+            ("min_stop_atr", self.min_stop_atr),
+        ):
+            if value <= 0:
+                raise ValueError(f"geometry.{name} must be positive, got {value}")
+        return self
+
+
 class Recipes(Base):
     pullback_to_trend: PullbackRecipe
     base_breakout: BreakoutRecipe
@@ -450,6 +502,7 @@ class ScoringConfig(Base):
     tiers: Tiers
     min_surfaceable_composite: Score
     mapping: Mapping
+    geometry: Geometry
     sentiment: SentimentScope
     promotion: Promotion
     ranking: Ranking
@@ -988,6 +1041,27 @@ class FmpBudget(Base):
         return self
 
 
+class SectorScope(Base):
+    """D33: the sector index relative strength is measured against."""
+
+    min_member_fraction: Fraction  # [OPEN] #67
+    min_members: PositiveInt
+
+    @model_validator(mode="after")
+    def _a_sector_needs_more_than_a_pair(self):
+        if self.min_members < 3:
+            raise ValueError(
+                f"sector.min_members is {self.min_members}; with two members one of "
+                f"them IS the thing being measured against the other"
+            )
+        if self.min_member_fraction <= 0:
+            raise ValueError(
+                "sector.min_member_fraction must be above 0, or a single listed "
+                "member would constitute the sector on its first date"
+            )
+        return self
+
+
 class EdgarBudget(Base):
     """D39: SEC EDGAR is a provider like any other, with a runaway-loop guard."""
 
@@ -1038,6 +1112,7 @@ class UniverseConfig(Base):
     events: EventsScope
     news: NewsScope
     fmp: FmpBudget
+    sector: SectorScope
     edgar: EdgarBudget
     insider_cluster: InsiderCluster
 
@@ -1150,13 +1225,60 @@ def reload() -> None:
 
 
 def validate_all() -> list[str]:
-    """Validate every config file. Returns problems; empty means good."""
+    """Validate every config file, then the invariants that SPAN files.
+
+    Returns problems; empty means good.
+
+    The cross-file checks exist because pydantic validates one file at a time
+    and some contradictions live between two. They are not stylistic: each one
+    below made a feature silently impossible rather than loudly wrong.
+    """
     problems = []
     for filename in _MODELS:
         try:
             load_file(filename)
         except ConfigError as exc:
             problems.append(str(exc))
+    if problems:
+        # No point cross-checking models that did not load.
+        return problems
+
+    problems.extend(_cross_file_problems())
+    return problems
+
+
+def _cross_file_problems() -> list[str]:
+    """Invariants between scoring.yaml and universe.yaml."""
+    problems: list[str] = []
+    s, u = scoring(), universe()
+
+    # The ingestion window must cover what a recipe reads back. Found live on
+    # 2026-10-21: `events.backward_days` was 7 while
+    # `post_earnings_drift.max_days_since_earnings` was 10, and because
+    # earnings are QUARTERLY a 7-day window held a symbol's last report for 7
+    # of every ~92 days. The events table held zero past earnings and the
+    # recipe refused on all 433 symbols with "no past earnings date on record"
+    # — a recipe that cannot fire, for a reason no single file could show.
+    if u.events.backward_days <= s.recipes.post_earnings_drift.max_days_since_earnings:
+        problems.append(
+            f"universe.events.backward_days ({u.events.backward_days}) must exceed "
+            f"scoring.recipes.post_earnings_drift.max_days_since_earnings "
+            f"({s.recipes.post_earnings_drift.max_days_since_earnings}): the drift "
+            f"recipe reads a past earnings date that the ingestion window would "
+            f"never have stored, so it could never fire. Earnings are quarterly, so "
+            f"this wants ~100 days, not just more than the recipe's window."
+        )
+
+    # Sentiment's baseline cannot exceed what the news ingest stores.
+    if s.sentiment.baseline_days > u.news.lookback_days * 10:
+        problems.append(
+            f"scoring.sentiment.baseline_days ({s.sentiment.baseline_days}) is far "
+            f"beyond universe.news.lookback_days ({u.news.lookback_days}); the "
+            f"baseline window would mostly predate anything the engine collects. "
+            f"`news_coverage_start()` bounds the volume spike, but the tone delta "
+            f"would still be computed against a sparsely-covered window."
+        )
+
     return problems
 
 

@@ -1,6 +1,6 @@
 # Open Parameters (rebuild baseline, Oct 20 2026)
 
-Config values no decision (D1–D41) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
+Config values no decision (D1–D42) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
 
 Everything NOT tagged `[OPEN]` traces to a decision and is asserted by a named test in `tests/test_config.py`.
 
@@ -49,7 +49,7 @@ Sensitivity: High = changes which ideas surface or how they are sized. Medium = 
 | 27 | `fundamentals.annuals_history` | `5` | Same | | Low |
 | 28 | `fundamentals.refresh_after_days` | `7` | Cost control | Staleness-driven refresh (also re-pulls when a symbol has reported since). | Low |
 | 29 | `events.forward_days` | `90` | Must exceed the longest recipe horizon (45d) | Event radar depth. | Low |
-| 30 | `events.backward_days` | `7` | Catches actuals landing on known dates | | Low |
+| 30 | `events.backward_days` | `100` | Catches actuals landing on known dates — AND feeds `post_earnings_drift` | Raised from 7 on 2026-10-21. Earnings are QUARTERLY, so a 7-day window held a symbol's last report for 7 of every ~92 days: the events table held zero past earnings and the drift recipe refused on all 433 symbols. A cross-file invariant in `validate_all` now requires this to exceed `post_earnings_drift.max_days_since_earnings`. | High |
 | 31 | `fmp.daily_call_budget` | `9000` | Premium from 2026-10-21 (was `250` under D29's free tier) | Sized from measurement, not taste: a cold start costs 6,759 calls (universe 527 + estimates 1,039 + fundamentals 5,190 + events 3), so 9,000 leaves ~30% headroom. Its job changed with the upgrade — no longer "stay inside the allowance" but "stop a runaway loop before it makes 200,000 calls". | Medium |
 
 ## Added by the D32–D39 strategy refinements (Oct 20 2026)
@@ -161,6 +161,32 @@ would let one wild sub-signal dominate its pillar.
 | 64 | `mapping.catalyst.ex_div_penalty_days` | `3` | D19(3) forbids a new swing long within 2 days | An ex-date inside this many days scores 0 — a RISK, so it subtracts rather than abstaining. One day wider than D19's rule so the gate bites before the rule does. | Medium |
 | 65 | `mapping.sentiment.tone_delta_full_credit` | `0.25` | D32 says Pillar D measures change; no scale | Tone delta earning full credit on the scorer's −1..+1 scale. Scorer-specific: **a Phase 2 Claude scorer will need this re-tuned**, which is exactly why `scorer_id` is recorded. | Medium |
 | 66 | `mapping.sentiment.volume_spike_full_credit` | `3.0` | Same | Coverage multiple earning full credit. Maps from 1.0 (normal) UPWARD only and never below neutral — quiet news is not bearish. | Low |
+
+## Added by step 6 — sector membership and trade-plan geometry (Oct 21 2026)
+
+**The geometry rows should have existed since D25 and did not.** `risk.yaml`
+carried the trim fractions and the move-stop-to-breakeven rule, but the stop
+DISTANCE and the target levels were nowhere — so the first recipe would have
+hard-coded them.
+
+**Targets come from STRUCTURE, not from R multiples.** Setting TP2 at "3R"
+would make R:R a *constant*, and D12's "Tier A needs R:R ≥ 2, Tier B ≥ 3"
+would then be satisfied by construction on every idea — a gate that can never
+bind. Hanging targets on levels the market actually made means R:R varies and
+the gate does real work.
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 67 | `sector.min_member_fraction` | `0.8` | D33 needs a sector index; no rule for membership | Fraction of members that must have data on a date for it to count. Stops the early part of a window becoming a one-stock index: on a date where 3 of 40 had listed, the "sector" would be those three. `min_members` (3) is a HARD floor over this fraction, not the reverse. | Medium |
+| 68 | `geometry.stop_atr_buffer` | `0.5` | D17 sizes against a stop; no distance | ATR multiple below the structural level. Too tight and ordinary noise takes the trade out at the exact level everyone can see; too wide and position size shrinks for the same conviction. | High |
+| 69 | `geometry.entry_zone_atr` | `0.3` | Nothing; "entry zone" is undefined | Half-width of the entry zone. A zone rather than a price because a limit at one number either fills or watches the trade leave. | Medium |
+| 70 | `geometry.min_stop_atr` | `0.5` | Nothing | Below this the plan is REFUSED: a stop inside the noise produces a flattering R:R the market takes out on an ordinary day. | High |
+| 71 | `geometry.pullback_to_trend.swing_lookback_days` | `60` | Recipe 1 buys a pullback; no window | Window for the prior swing high the pullback should reclaim, which is TP1. | Medium |
+| 72 | `geometry.pullback_to_trend.tp2_measured_move` | `1.6` | D11's TP1/TP2 runner structure | TP2 as a multiple of the TP1 *distance*. Loader requires >1.0, or the runner has nowhere to run and D11's structure collapses to one target. | High |
+| 73 | `geometry.base_breakout.tp1_depth_multiple` | `1.0` | Recipe 2; no target rule | TP1 as a multiple of base depth — the classic measured move. | High |
+| 74 | `geometry.base_breakout.tp2_depth_multiple` | `1.8` | Same | TP2's extension. Loader requires it to exceed TP1's. | High |
+| 75 | `geometry.post_earnings_drift.tp1_gap_multiple` | `1.0` | Recipe 3; no target rule | TP1 as a multiple of the gap — the market's own statement about what the news was worth. | High |
+| 76 | `geometry.post_earnings_drift.tp2_gap_multiple` | `2.0` | Same | TP2's extension. Loader requires it to exceed TP1's. | High |
 
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.

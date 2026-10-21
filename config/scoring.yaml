@@ -240,6 +240,47 @@ promotion:
     min_closed_ideas: 20                 # [OPEN] #43
     expectancy_r_below: 0.0              # [OPEN] #44
 
+# ── Trade-plan geometry (D11/D12) ───────────────────────────────────────────
+# Where the stop and targets go, given the structure `features/technical.py`
+# measured. NOT previously in config despite D25 requiring it: the trim
+# fractions and the move-stop-to-breakeven rule were in risk.yaml, but the stop
+# DISTANCE and the target levels were nowhere, so the first recipe would have
+# hard-coded them.
+#
+# TARGETS COME FROM STRUCTURE, NOT FROM R MULTIPLES, and that is the important
+# choice. Setting TP2 at "3R" would make R:R a CONSTANT, and D12's "Tier A
+# needs R:R >= 2, Tier B >= 3" would then be satisfied by construction on every
+# single idea — a gate that can never bind. Hanging targets on levels the market
+# actually made means R:R varies per idea and the gate does real work.
+geometry:
+  # ATR multiple subtracted below the structural stop level, so ordinary noise
+  # does not take the trade out at the exact level everyone else sees.
+  stop_atr_buffer: 0.5        # [OPEN] #68
+  # Half-width of the entry zone, in ATR. An entry "zone" rather than a price
+  # because a limit at one number either fills or watches the trade leave.
+  entry_zone_atr: 0.3         # [OPEN] #69
+  # A stop closer than this to the entry is rejected: it is inside the noise,
+  # and the resulting R:R would be flattering nonsense.
+  min_stop_atr: 0.5           # [OPEN] #70
+
+  pullback_to_trend:
+    # Window for the prior swing high a pullback is expected to reclaim (TP1).
+    swing_lookback_days: 60   # [OPEN] #71
+    # TP2 as a multiple of the TP1 distance — the measured move beyond the
+    # reclaim. A multiple of a STRUCTURAL distance, not of risk.
+    tp2_measured_move: 1.6    # [OPEN] #72
+
+  base_breakout:
+    # TP1 = entry + base depth (the classic measured move). TP2 extends it.
+    tp1_depth_multiple: 1.0   # [OPEN] #73
+    tp2_depth_multiple: 1.8   # [OPEN] #74
+
+  post_earnings_drift:
+    # Targets measured from the gap size, which is the market's own statement
+    # about how much the news was worth.
+    tp1_gap_multiple: 1.0     # [OPEN] #75
+    tp2_gap_multiple: 2.0     # [OPEN] #76
+
 # ── Phase 1 recipes ─────────────────────────────────────────────────────────
 # Parameters for the three setups in the decision log, in implementation order.
 # Nothing here is scoring logic — these are the inputs that logic will read.

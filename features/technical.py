@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 TRADING_DAYS_PER_YEAR = 252
 
 __all__ = [
+    "PriceStructure",
     "TechnicalFeatures",
     "atr",
     "compute",
@@ -52,6 +53,7 @@ __all__ = [
     "load_actions",
     "load_bars",
     "ma_stack",
+    "price_structure",
     "relative_strength_vs_sector",
     "relative_volume",
     "rsi_wilder",
@@ -279,6 +281,164 @@ def fifty_two_week_structure(
     )
 
 
+# ── price structure: the levels a trade plan is built from ──────────────────
+#
+# These live HERE rather than in the recipes because they are MEASUREMENTS. A
+# recipe reads features and scores and does not re-measure — otherwise the
+# same swing high gets computed three slightly different ways and the stop a
+# card prints stops matching the stop the backtest used.
+
+
+@dataclass(frozen=True)
+class PriceStructure:
+    """Levels a stop and a target can be hung on.
+
+    Every field defaults to None so an empty frame yields `PriceStructure()`.
+    The first version built it with `*([None] * 9)`, which broke the moment a
+    tenth field was added — a positional splat over a dataclass is a
+    field-count assertion nobody remembers making.
+    """
+
+    swing_high: float | None = None
+    """Highest high in the lookback — the level a pullback would reclaim."""
+    swing_low: float | None = None
+    """Lowest low — where a long's thesis breaks."""
+    base_high: float | None = None
+    base_low: float | None = None
+    base_depth_pct: float | None = None
+    """Depth of the detected CONSOLIDATION, as a % of its high."""
+    base_weeks: float | None = None
+    base_contraction: float | None = None
+    """Recent ATR over the base-period ATR. Below 1 means range contraction."""
+    gap_up_pct: float | None = None
+    """Most recent session's gap vs the prior close, in %."""
+    gap_day_low: float | None = None
+    """The low of the gap session. A fill below it invalidates the drift."""
+    prior_close: float | None = None
+
+
+def price_structure(
+    bars: pd.DataFrame,
+    *,
+    swing_lookback: int = 60,
+    base_lookback: int = 120,
+    max_base_depth_pct: float = 25.0,
+    min_base_sessions: int = 20,
+) -> PriceStructure:
+    """Structural levels from the bar history. None where there is too little.
+
+    Two lookbacks on purpose: a swing is recent (the pullback a recipe is
+    buying) while a base is the longer consolidation a breakout emerges from,
+    and forcing one window on both would make a 4-week base and a 3-day
+    pullback the same measurement.
+
+    A BASE IS A CONSOLIDATION, NOT A WINDOW. The first version took the
+    high-low range of a fixed 120 sessions and called it the base, which for a
+    trending stock is the TREND: live on 2026-10-21 that reported bases 30-48%
+    deep and recipe 2's 25% cap rejected almost everything for the right-
+    sounding reason. `_detect_base` instead finds the longest RECENT stretch
+    whose range fits inside the depth cap, which is what "multi-week base"
+    means.
+    """
+    frame = bars.dropna(subset=["high", "low", "close"]) if len(bars) else bars
+    if frame is None or not len(frame):
+        return PriceStructure()
+
+    highs = frame["high"].astype(float)
+    lows = frame["low"].astype(float)
+    closes = frame["close"].astype(float)
+
+    swing = highs.iloc[-swing_lookback:] if len(highs) >= 2 else highs
+    swing_lows = lows.iloc[-swing_lookback:] if len(lows) >= 2 else lows
+
+    base_high, base_low, depth, weeks, contraction = _detect_base(
+        highs,
+        lows,
+        max_depth_pct=max_base_depth_pct,
+        min_sessions=min_base_sessions,
+        max_sessions=base_lookback,
+    )
+
+    gap_pct = gap_low = prior = None
+    if len(frame) >= 2:
+        prior = float(closes.iloc[-2])
+        today_open = float(frame["open"].astype(float).iloc[-1]) if "open" in frame else None
+        if today_open is not None and prior:
+            gap_pct = (today_open - prior) / prior * 100.0
+        gap_low = float(lows.iloc[-1])
+
+    return PriceStructure(
+        swing_high=float(swing.max()) if len(swing) else None,
+        swing_low=float(swing_lows.min()) if len(swing_lows) else None,
+        base_high=base_high,
+        base_low=base_low,
+        base_depth_pct=depth,
+        base_weeks=weeks,
+        base_contraction=contraction,
+        gap_up_pct=gap_pct,
+        gap_day_low=gap_low,
+        prior_close=prior,
+    )
+
+
+def _detect_base(
+    highs: pd.Series,
+    lows: pd.Series,
+    *,
+    max_depth_pct: float,
+    min_sessions: int,
+    max_sessions: int,
+) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+    """The longest recent stretch whose range fits inside `max_depth_pct`.
+
+    Walks BACKWARD from the latest bar, extending while the running range stays
+    within the cap, and stops at the first bar that would breach it. That is
+    the consolidation a breakout emerges from — as opposed to a fixed window,
+    which on a trending stock measures the trend and then fails its own depth
+    test.
+
+    Returns (high, low, depth_pct, weeks, contraction), all None when even
+    `min_sessions` cannot fit inside the cap — which is the correct answer for
+    a stock in a steep trend: it has no base.
+    """
+    if len(highs) < min_sessions:
+        return (None,) * 5
+
+    best: tuple[int, float, float] | None = None
+    running_high = running_low = None
+    for count in range(1, min(len(highs), max_sessions) + 1):
+        high = float(highs.iloc[-count])
+        low = float(lows.iloc[-count])
+        running_high = high if running_high is None else max(running_high, high)
+        running_low = low if running_low is None else min(running_low, low)
+        if running_high <= 0:
+            break
+        depth = (running_high - running_low) / running_high * 100.0
+        if depth > max_depth_pct:
+            break
+        if count >= min_sessions:
+            best = (count, running_high, running_low)
+
+    if best is None:
+        return (None,) * 5
+
+    count, high, low = best
+    depth = (high - low) / high * 100.0
+    # Five sessions a week. Calendar weeks would overstate a base that spans a
+    # holiday-shortened stretch.
+    weeks = count / 5.0
+
+    # The config's `range_contraction_ratio` compares recent range to the
+    # base's own range — a base that is TIGHTENING is the one that breaks
+    # cleanly. Measured on true ranges over the last fifth of the base.
+    recent = max(5, count // 5)
+    base_range = (highs.iloc[-count:] - lows.iloc[-count:]).mean()
+    recent_range = (highs.iloc[-recent:] - lows.iloc[-recent:]).mean()
+    contraction = None if not base_range else float(recent_range / base_range)
+
+    return high, low, depth, weeks, contraction
+
+
 # ── relative strength vs sector (D33) ───────────────────────────────────────
 
 
@@ -317,57 +477,61 @@ def sector_composite(
     frames: dict[str, pd.DataFrame],
     *,
     column: str = "adj_close",
-    min_bars: int = 64,
+    min_member_fraction: float = 0.8,
+    min_members: int = 3,
 ) -> pd.Series:
-    """An equal-weighted sector index from its members' bars.
+    """An equal-weighted sector index with PER-DATE membership.
 
     Equal-weighted, not cap-weighted: the question is "is this sector working",
-    and a cap-weighted composite of a sector with one mega-cap is mostly a chart
-    of that one name, against which every other member looks weak.
+    and a cap-weighted composite of a sector with one mega-cap is mostly a
+    chart of that one name, against which every other member looks weak.
 
-    Indexed by `session_date` and restricted to dates where EVERY member has a
-    bar, so a member's missing day cannot move the composite on its own.
-    Returns normalised levels (first date = 100).
+    PER-DATE MEMBERSHIP, which is the whole design. Each date averages the
+    members that HAVE data on it, and a date counts only when at least
+    `min_member_fraction` of members are present.
 
-    SHORT-HISTORY MEMBERS ARE DROPPED FIRST, and that is not tidiness. The
-    date join is an INTERSECTION, so one recently-listed member truncates the
-    index for every other member of its sector — observed live 2026-10-21,
-    where Industrials built from 40 members yielded 91 bars while sectors
-    without a new listing yielded 278. Left unchecked, one IPO could pull a
-    sector's index below `relative_strength_vs_sector`'s 63-bar window and
-    silently abstain relative strength for all forty of its members. `min_bars`
-    defaults just above that window.
+    The first version intersected dates across all members, so one short
+    history truncated the index for everybody: SPCX, listed June 2026, cut the
+    live Industrials index from 278 bars to 91 while every other sector got
+    278. Dropping short members was a patch that fixed the symptom — the index
+    still ended at the shortest SURVIVING member — and it threw away the
+    newcomer's data entirely once it did have history.
+
+    Averaging per date keeps the full span AND uses every member on every date
+    it exists. The fraction floor is what stops the early part of the window
+    becoming a one-stock index: on a date where only 3 of 40 members had
+    listed, the "sector" would be those three.
+
+    Each member is normalised to 100 at its OWN first in-window date before
+    averaging. Without that a newcomer entering at a raw price of 5 against
+    members at 300 would drag the mean on the day it joins, producing a step
+    change in the index that is pure membership rather than price.
     """
-    series = []
-    dropped: list[str] = []
+    series: dict[str, pd.Series] = {}
     for symbol, frame in frames.items():
         if column not in frame or "session_date" not in frame:
             log.warning("sector composite: skipping %s, missing %s", symbol, column)
             continue
         indexed = frame.set_index(_to_dates(frame["session_date"]))[column].astype(float)
-        indexed = indexed[~indexed.index.duplicated(keep="last")]
-        if len(indexed) < min_bars:
-            dropped.append(symbol)
+        indexed = indexed[~indexed.index.duplicated(keep="last")].dropna()
+        if indexed.empty or indexed.iloc[0] == 0:
             continue
-        series.append(indexed)
+        # Normalised per member, so joining the index is not a price event.
+        series[symbol] = indexed / indexed.iloc[0] * 100.0
 
-    if dropped:
-        log.info(
-            "sector composite: dropped %d short-history member(s) so they do not "
-            "truncate the index: %s",
-            len(dropped),
-            ", ".join(sorted(dropped)[:10]),
-        )
-
-    if not series:
+    if len(series) < min_members:
         return pd.Series(dtype=float)
 
-    joined = pd.concat(series, axis=1, join="inner").dropna()
-    if joined.empty:
+    wide = pd.DataFrame(series).sort_index()
+    present = wide.notna().sum(axis=1)
+    required = max(min_members, int(len(series) * min_member_fraction))
+    eligible = wide[present >= required]
+    if eligible.empty:
         return pd.Series(dtype=float)
 
-    normalised = joined.divide(joined.iloc[0], axis=1) * 100.0
-    return normalised.mean(axis=1).sort_index()
+    # mean(axis=1) skips NaN, so each date averages exactly the members that
+    # had data on it — the per-date membership the docstring promises.
+    return eligible.mean(axis=1).sort_index()
 
 
 # ── the bundle ──────────────────────────────────────────────────────────────
@@ -387,6 +551,7 @@ class TechnicalFeatures:
     relative_volume: float | None
     week52: WeekStructure
     rs_vs_sector: float | None
+    structure: PriceStructure
     bars_available: int
 
     def as_dict(self) -> dict:
@@ -394,6 +559,7 @@ class TechnicalFeatures:
         out = asdict(self)
         out["ma"] = asdict(self.ma)
         out["week52"] = asdict(self.week52)
+        out["structure"] = asdict(self.structure)
         return out
 
 
@@ -411,6 +577,7 @@ def compute(
     across every technical reading, not private to that recipe.
     """
     recipe = cfg or config.scoring().recipes.pullback_to_trend
+    breakout = config.scoring().recipes.base_breakout
     _require_ascending(bars)
 
     column = "adj_close" if "adj_close" in bars else "close"
@@ -430,6 +597,14 @@ def compute(
         atr_pct=atr_pct(bars),
         relative_volume=relative_volume(volumes),
         week52=fifty_two_week_structure(closes),
+        # The base cap and minimum come from the breakout recipe's own config
+        # (D25), so a change there moves the measurement rather than leaving
+        # this function's defaults silently disagreeing with the gate.
+        structure=price_structure(
+            bars,
+            max_base_depth_pct=breakout.max_base_depth_pct,
+            min_base_sessions=int(breakout.min_base_weeks * 5),
+        ),
         rs_vs_sector=(
             None if sector_closes is None else relative_strength_vs_sector(closes, sector_closes)
         ),

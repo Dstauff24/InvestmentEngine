@@ -304,25 +304,39 @@ def test_the_composite_is_equal_weighted():
     for frame in (big, small):
         frame["adj_close"] = frame["close"]
 
-    # `min_bars` lowered: this test is about WEIGHTING, not history length.
-    composite = tech.sector_composite({"BIG": big, "SMALL": small}, min_bars=10)
+    # `min_members` lowered: this test is about WEIGHTING, not membership.
+    composite = tech.sector_composite({"BIG": big, "SMALL": small}, min_members=2)
     assert len(composite) == 30
     assert composite.iloc[0] == pytest.approx(100.0), "normalised to 100 at the start"
     # BIG ends ~+29%, SMALL flat -> an equal-weighted mean lands near +14.5%.
     assert composite.iloc[-1] == pytest.approx(114.5, abs=0.6)
 
 
-def test_the_composite_uses_only_dates_every_member_shares():
-    """One member's missing day must not move the index on its own."""
-    full = ps.frame(ps.flat(30, 100.0))
-    short = ps.frame(ps.flat(30, 100.0)).iloc[10:].reset_index(drop=True)
-    for frame in (full, short):
-        frame["adj_close"] = frame["close"]
+def test_a_date_below_the_membership_floor_is_excluded():
+    """Replaces an intersection test. The composite no longer requires EVERY
+    member on every date — it requires `min_member_fraction` of them, so a
+    member's missing day narrows the average rather than deleting the date,
+    while a date where too few members have data is dropped.
 
-    # `min_bars` lowered so the SHORT member survives to be intersected —
-    # the date join is what this test is about.
-    composite = tech.sector_composite({"FULL": full, "SHORT": short}, min_bars=10)
-    assert len(composite) == 20
+    Ten members, six with full history and four listing late, so the FRACTION
+    is the binding constraint rather than the `min_members` hard floor.
+    """
+    members = {}
+    for i in range(6):
+        frame = ps.frame(ps.flat(100, 100.0))
+        frame["adj_close"] = frame["close"]
+        members[f"OLD{i}"] = frame
+    for i in range(4):
+        frame = ps.frame(ps.flat(30, 100.0))
+        frame["session_date"] = ps.sessions(100)[-30:]
+        frame["adj_close"] = frame["close"]
+        members[f"NEW{i}"] = frame
+
+    everyone = tech.sector_composite(members, min_member_fraction=1.0)
+    most = tech.sector_composite(members, min_member_fraction=0.6)
+
+    assert len(everyone) == 30, "a 100% floor admits only the dates all ten share"
+    assert len(most) == 100, "six of ten clears a 60% floor, so the full span counts"
 
 
 def test_an_empty_sector_yields_an_empty_series():
@@ -391,45 +405,101 @@ def test_as_dict_is_flat_enough_to_log():
     assert "range_position" in out["week52"]
 
 
-def test_a_short_history_member_does_not_truncate_the_whole_sector_index():
-    """The date join is an INTERSECTION, so one recent listing would otherwise
-    shorten the index for every other member.
+def test_a_short_history_member_does_not_truncate_the_sector_index():
+    """PER-DATE MEMBERSHIP. The first version intersected dates, so one recent
+    listing shortened the index for everybody.
 
-    Observed live 2026-10-21: Industrials built from 40 members yielded 91 bars
-    while sectors without a new listing yielded 278. Left unchecked, one IPO
-    could pull a sector below the 63-bar relative-strength window and silently
-    abstain the reading for all forty members.
+    Observed live 2026-10-21: SPCX, listed June 2026, cut the Industrials index
+    from 278 bars to 91 while every sector without a newcomer got 278. Dropping
+    short members fixed the symptom and still ended the index at the shortest
+    SURVIVOR, while discarding the newcomer entirely once it did have history.
     """
+    members = {}
+    for name in ("A", "B", "C", "D"):
+        frame = ps.frame(ps.rising(200))
+        frame["adj_close"] = frame["close"]
+        members[name] = frame
+
+    newcomer = ps.frame(ps.rising(20))
+    newcomer["adj_close"] = newcomer["close"]
+
+    without = tech.sector_composite(members, min_member_fraction=0.8)
+    with_new = tech.sector_composite({**members, "NEW": newcomer}, min_member_fraction=0.8)
+
+    assert len(without) == 200
+    assert len(with_new) == 200, "the newcomer joins late; it does not truncate"
+
+
+def test_the_newcomer_IS_used_on_the_dates_it_exists():
+    """The point of per-date membership rather than dropping it: once a member
+    has data, it counts."""
+    members = {}
+    for name in ("A", "B", "C", "D"):
+        frame = ps.frame(ps.flat(200, 100.0))
+        frame["adj_close"] = frame["close"]
+        members[name] = frame
+
+    # A newcomer that doubles over its short life, sharing the LAST dates.
+    tail = ps.frame(ps.rising(20, start=100.0, step=5.0))
+    tail["session_date"] = ps.sessions(200)[-20:]
+    tail["adj_close"] = tail["close"]
+
+    flat_only = tech.sector_composite(members, min_member_fraction=0.8)
+    with_new = tech.sector_composite({**members, "NEW": tail}, min_member_fraction=0.8)
+
+    assert flat_only.iloc[-1] == pytest.approx(100.0)
+    assert with_new.iloc[-1] > 100.0, "the newcomer lifts the index where it exists"
+
+
+def test_a_member_joining_is_not_a_price_event():
+    """Each member is normalised to 100 at its own first date, so a newcomer
+    entering at a raw price of 5 against members at 300 cannot step the index."""
+    members = {}
+    for name in ("A", "B", "C", "D"):
+        frame = ps.frame(ps.flat(100, 300.0))
+        frame["adj_close"] = frame["close"]
+        members[name] = frame
+
+    cheap = ps.frame(ps.flat(30, 5.0))
+    cheap["session_date"] = ps.sessions(100)[-30:]
+    cheap["adj_close"] = cheap["close"]
+
+    index = tech.sector_composite({**members, "CHEAP": cheap}, min_member_fraction=0.8)
+    assert index.max() == pytest.approx(100.0, abs=0.01)
+    assert index.min() == pytest.approx(100.0, abs=0.01), "no step at the join date"
+
+
+def test_the_membership_floor_excludes_dates_with_too_few_members():
+    """On a date where only 3 of 40 had listed, the "sector" would be those
+    three — and relative strength against three stocks is not relative
+    strength against a sector."""
     long_members = {}
-    for name in ("A", "B", "C"):
+    for name in ("A", "B"):
         frame = ps.frame(ps.rising(200))
         frame["adj_close"] = frame["close"]
         long_members[name] = frame
-
-    ipo = ps.frame(ps.rising(20))
-    ipo["adj_close"] = ipo["close"]
-
-    without = tech.sector_composite(long_members)
-    with_ipo = tech.sector_composite({**long_members, "IPO": ipo})
-
-    assert len(without) == 200
-    assert len(with_ipo) == 200, "the newcomer is dropped, not allowed to truncate"
-
-
-def test_a_sector_of_only_short_history_members_yields_nothing():
-    """Better an abstention than an index too short for the window that reads it."""
-    frames = {}
-    for name in ("A", "B", "C"):
-        frame = ps.frame(ps.rising(20))
+    for name in ("C", "D", "E"):
+        frame = ps.frame(ps.rising(50))
+        frame["session_date"] = ps.sessions(200)[-50:]
         frame["adj_close"] = frame["close"]
-        frames[name] = frame
-    assert tech.sector_composite(frames).empty
+        long_members[name] = frame
+
+    strict = tech.sector_composite(long_members, min_member_fraction=1.0)
+    loose = tech.sector_composite(long_members, min_member_fraction=0.4)
+    assert len(strict) == 50, "every member must be present"
+    # 0.4 of five is two, but `min_members`=3 is a HARD floor over the
+    # fraction — so the early dates where only two members exist are still
+    # excluded. My first expectation here was 200, which ignored that.
+    assert len(loose) == 50, "min_members floors the fraction, not the reverse"
+
+    relaxed = tech.sector_composite(long_members, min_member_fraction=0.4, min_members=2)
+    assert len(relaxed) == 200, "with the hard floor lowered too, two is enough"
 
 
-def test_min_bars_is_configurable_for_a_shorter_window():
+def test_a_sector_below_the_member_floor_has_no_index():
     frames = {}
     for name in ("A", "B"):
-        frame = ps.frame(ps.rising(30))
+        frame = ps.frame(ps.rising(200))
         frame["adj_close"] = frame["close"]
         frames[name] = frame
-    assert len(tech.sector_composite(frames, min_bars=10)) == 30
+    assert tech.sector_composite(frames, min_members=3).empty

@@ -100,11 +100,33 @@ fundamentals:
 events:
   forward_days: 90             # [OPEN] #29 — must exceed the longest recipe
                                # horizon (45d) and the expirations we snapshot
-  backward_days: 7             # [OPEN] #30
+  # MUST cover a full quarter, and that is a hard dependency rather than a
+  # preference. `post_earnings_drift` reads "days since the last earnings",
+  # which requires that date to be STORED — and earnings are quarterly, so a
+  # 7-day backward window held the last report for only 7 of every ~92 days.
+  # Live on 2026-10-21 the events table held ZERO past earnings and the recipe
+  # was structurally dead: 120 of 120 symbols refused with "no past earnings
+  # date on record". A cross-config invariant now requires this to exceed
+  # `post_earnings_drift.max_days_since_earnings`.
+  backward_days: 100           # [OPEN] #30
 
 # ── News scope (D5) ─────────────────────────────────────────────────────────
 news:
   lookback_days: 7             # rolling 7-day window
+
+# ── Sector composites (D33: relative strength) ──────────────────────────────
+# The sector index relative strength is measured against. Equal-weighted, with
+# PER-DATE membership: each date averages the members that have data on it.
+#
+# The floor stops the early part of a window becoming a one-stock index. On a
+# date where only 3 of 40 members had listed, the "sector" would be those
+# three — and relative strength against three stocks is not relative strength
+# against a sector.
+sector:
+  min_member_fraction: 0.8     # [OPEN] #67
+  # Below this many members with any history, a sector has no index at all:
+  # with two members, one of them IS the thing being measured.
+  min_members: 3
 
 # ── SEC EDGAR (D39: insider clusters) ───────────────────────────────────────
 # The SEC asks for a descriptive User-Agent with a contact address and no more

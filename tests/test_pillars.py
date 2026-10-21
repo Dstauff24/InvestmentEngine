@@ -15,7 +15,7 @@ from features.catalyst import CatalystFeatures, InsiderCluster
 from features.evidence import EMPTY, EvidenceDepth
 from features.fundamental import FundamentalFeatures, RevisionMomentum
 from features.sentiment import SentimentFeatures, ToneWindow
-from features.technical import MAStack, TechnicalFeatures, WeekStructure
+from features.technical import MAStack, PriceStructure, TechnicalFeatures, WeekStructure
 from scoring import pillars as pl
 
 AS_OF = date(2026, 10, 21)
@@ -63,6 +63,9 @@ def tech(**kw) -> TechnicalFeatures:
         "relative_volume": 1.1,
         "week52": week,
         "rs_vs_sector": 7.5,
+        # Pillar A does not read price structure — that is the recipes' input —
+        # so an empty one is honest here rather than a fabricated base.
+        "structure": PriceStructure(),
         "bars_available": 300,
     }
     base.update(kw)
