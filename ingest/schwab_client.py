@@ -23,6 +23,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 from core import netguard, settings
 from core.ratelimit import RateLimiter
 
@@ -32,6 +34,18 @@ log = logging.getLogger(__name__)
 # 561600s = 6.5 days, which leaves half a day of margin.
 REFRESH_TOKEN_LIFETIME = timedelta(days=7)
 TOKEN_WARN_BEFORE = timedelta(hours=24)
+
+# Statuses worth another attempt. 429 is the one that matters: Schwab's limit is
+# ~120/min and the limiter is set to 100, yet a long chain crawl still draws the
+# occasional 429 — observed 2026-10-21, two symbols out of 433 on the third
+# heavy run of the hour, and a DIFFERENT two than the run before.
+#
+# Without a retry those two become a permanent hole in an unbuyable series: the
+# chain and IV jobs are critical and SACRED (D7/D22), `partial` correctly fails
+# the day, and the engine would have been defeated by a rate limiter it was
+# already respecting. 401 is deliberately absent — a token problem is not
+# transient and must surface immediately for a human to re-auth.
+RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 class SchwabError(RuntimeError):
@@ -44,6 +58,10 @@ class SchwabTokenError(SchwabError):
     Not retryable and not fixable on the VM: a human has to re-run the login
     flow on a machine with a browser (scripts/schwab_auth.py) and sync the file.
     """
+
+
+class SchwabTransientError(SchwabError):
+    """A rate limit or a server-side blip. Retried with backoff."""
 
 
 class SchwabResponseError(SchwabError):
@@ -121,8 +139,18 @@ class SchwabClient:
             self._client = build_client()
         return self._client
 
+    @retry(
+        retry=retry_if_exception_type(SchwabTransientError),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        reraise=True,
+    )
     def _call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
-        """Invoke a schwab-py method, rate-limited, and return the parsed JSON."""
+        """Invoke a schwab-py method, rate-limited, and return the parsed JSON.
+
+        The retry wraps the WHOLE method, so each attempt re-acquires a limiter
+        slot — every attempt is a real request and must be paced like one.
+        """
         # D27: ahead of the limiter and the transport.
         netguard.require_live_calls("Schwab", method_name)
         self.limiter.acquire()
@@ -134,6 +162,9 @@ class SchwabClient:
                 "Schwab returned 401. The access token could not be refreshed — "
                 "re-auth on the laptop (scripts/schwab_auth.py) and re-sync."
             )
+        if status in RETRYABLE_STATUS:
+            body = getattr(response, "text", "")[:200]
+            raise SchwabTransientError(f"{method_name} -> HTTP {status} (retryable): {body}")
         if status is not None and status >= 400:
             body = getattr(response, "text", "")[:200]
             raise SchwabResponseError(f"{method_name} -> HTTP {status}: {body}")

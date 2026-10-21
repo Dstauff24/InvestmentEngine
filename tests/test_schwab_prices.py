@@ -6,12 +6,18 @@ import os
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from core import netguard
+from core.ratelimit import NullRateLimiter
 from ingest.schwab_client import (
     REFRESH_TOKEN_LIFETIME,
+    SchwabClient,
+    SchwabResponseError,
     SchwabTokenError,
+    SchwabTransientError,
     check_token,
     token_age,
     token_expires_at,
@@ -153,3 +159,100 @@ def test_the_client_never_uses_easy_client():
     source = (Path(__file__).resolve().parent.parent / "ingest" / "schwab_client.py").read_text()
     assert "client_from_token_file" in source
     assert "easy_client(" not in source
+
+
+# ── transient Schwab errors must be retried, not turned into holes ───────────
+#
+# Observed live 2026-10-21: a chain crawl drew HTTP 429 on 2 of 433 symbols on
+# the third heavy run of the hour — and a DIFFERENT two than the run before.
+# With no retry those became a permanent gap in an unbuyable series: chains and
+# IV are critical and SACRED (D7/D22), `partial` correctly fails the day, and
+# the engine would have been beaten by a rate limit it was already respecting.
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff_in_tests():
+    """Keep the real backoff out of the unit suite.
+
+    The client waits 2/4/8s between attempts, which is right in production and
+    turns these five tests into half a minute of sleeping. Only the WAIT is
+    neutralised — the retry count, the predicate and the limiter accounting are
+    exactly what ships, which is what the tests are actually about.
+    """
+    from tenacity import wait_none
+
+    original = SchwabClient._call.retry.wait
+    SchwabClient._call.retry.wait = wait_none()
+    yield
+    SchwabClient._call.retry.wait = original
+
+
+class CountingRateLimiter(NullRateLimiter):
+    def __init__(self):
+        super().__init__()
+        self.acquired = 0
+
+    def acquire(self, n: int = 1) -> None:
+        self.acquired += n
+
+
+class FlakyRaw:
+    """Fails with `status` for the first `fail_times` calls, then succeeds."""
+
+    def __init__(self, status: int, fail_times: int, payload=None):
+        self.status = status
+        self.fail_times = fail_times
+        self.payload = payload if payload is not None else {"ok": True}
+        self.calls = 0
+
+    def get_quotes(self, *a, **k):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            return SimpleNamespace(status_code=self.status, text="rate limited", json=lambda: {})
+        return SimpleNamespace(status_code=200, text="", json=lambda: self.payload)
+
+
+def _client(raw, monkeypatch):
+    monkeypatch.setattr(netguard, "require_live_calls", lambda *a, **k: None)
+    return SchwabClient(client=raw, limiter=NullRateLimiter())
+
+
+def test_a_429_is_retried_until_it_succeeds(monkeypatch):
+    raw = FlakyRaw(429, fail_times=2, payload={"SPY": {"symbol": "SPY"}})
+    client = _client(raw, monkeypatch)
+    assert client.quotes(["SPY"]) == {"SPY": {"symbol": "SPY"}}
+    assert raw.calls == 3, "two refusals then the real answer"
+
+
+def test_every_attempt_takes_a_limiter_slot(monkeypatch):
+    """A retry is a real request and must be paced like one."""
+    raw = FlakyRaw(503, fail_times=2, payload={"SPY": {}})
+    limiter = CountingRateLimiter()
+    monkeypatch.setattr(netguard, "require_live_calls", lambda *a, **k: None)
+    SchwabClient(client=raw, limiter=limiter).quotes(["SPY"])
+    assert limiter.acquired == 3
+
+
+def test_a_401_is_never_retried(monkeypatch):
+    """A stale refresh token is not transient — a human must re-auth."""
+    raw = FlakyRaw(401, fail_times=99)
+    client = _client(raw, monkeypatch)
+    with pytest.raises(SchwabTokenError):
+        client.quotes(["SPY"])
+    assert raw.calls == 1, "retrying a token failure just delays the alert"
+
+
+def test_a_404_is_never_retried(monkeypatch):
+    raw = FlakyRaw(404, fail_times=99)
+    client = _client(raw, monkeypatch)
+    with pytest.raises(SchwabResponseError):
+        client.quotes(["SPY"])
+    assert raw.calls == 1
+
+
+def test_retries_eventually_give_up_rather_than_loop(monkeypatch):
+    raw = FlakyRaw(429, fail_times=99)
+    client = _client(raw, monkeypatch)
+    with pytest.raises(SchwabTransientError):
+        client.quotes(["SPY"])
+    assert raw.calls == 4, "stop_after_attempt(4)"
