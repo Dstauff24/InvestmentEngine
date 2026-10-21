@@ -24,7 +24,9 @@ from datetime import date
 
 import pandas as pd
 
-from core import clock, config, db
+from core import clock, config, db, settings
+from decision.book import LADDER_STATES, load_book
+from decision.idea_builder import Idea, build_idea
 from features import catalyst as catalyst_features
 from features import fundamental as fundamental_features
 from features import sentiment as sentiment_features
@@ -38,6 +40,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "SectorCache",
     "abstaining_pillars",
+    "build_cards",
     "record_daily_stats",
     "score_symbol",
     "score_universe",
@@ -347,6 +350,70 @@ def _quantile(values: list[float], q: float) -> float | None:
     return round(values[index], 2)
 
 
+IV_SQL = """
+    SELECT iv_rank_252, history_days
+    FROM   iv_daily
+    WHERE  symbol = %s AND session_date <= %s
+    ORDER  BY session_date DESC
+    LIMIT  1
+"""
+
+
+def build_cards(run: UniverseRun, *, as_of: date) -> list[str]:
+    """Rendered cards for the surfaced ideas (D42), or the reason each refused.
+
+    A rejection is RETURNED, not swallowed. "EXPD: R:R 1.4 below the 3:1 Tier B
+    minimum" is the most useful line the engine can print about a symbol it
+    ranked first and then declined — and a silent omission would read as a bug.
+    """
+    account = settings.shadow_account_value()
+    sectors = sectors_by_symbol()
+    statuses = config.scoring().promotion.status
+    books = {state: load_book(state, account_value=account) for state in LADDER_STATES}
+
+    out: list[str] = []
+    for item in run.surfaced:
+        best = item.best_plan
+        if best is None:
+            triggered = ", ".join(r.recipe for r in item.triggered) or "none"
+            out.append(
+                f"{item.symbol}: no trade plan — tier {item.tier} on composite "
+                f"{item.composite:.1f}, but no recipe produced a plan "
+                f"(triggered: {triggered})"
+            )
+            continue
+
+        status = statuses.of(best.recipe)
+        iv = db.fetch_one(IV_SQL, (item.symbol, as_of)) or {}
+        catalyst = catalyst_features.compute(
+            item.symbol,
+            catalyst_features.load_events(item.symbol, as_of=as_of),
+            [],
+            as_of=as_of,
+        )
+        built = build_idea(
+            item,
+            best,
+            catalyst,
+            sector=sectors.get(item.symbol),
+            status=status,
+            book=books[status],
+            iv_rank=_float(iv.get("iv_rank_252")),
+            iv_history_days=iv.get("history_days"),
+            account_value=account,
+        )
+        out.append(
+            built.card()
+            if isinstance(built, Idea)
+            else f"{built.symbol}: REFUSED at {built.stage} — {built.reason}"
+        )
+    return out
+
+
+def _float(value) -> float | None:
+    return None if value is None else float(value)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -373,6 +440,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nsurfaced (max {cap}/day by rank, D33):")
     for item in run.surfaced:
         print("  " + item.card_line())
+
+    # D42: only SURFACED ideas become cards. Built here rather than in phase
+    # two because a card needs the ladder state, the open book and the IV
+    # history — state about the account, not about the symbol.
+    cards = build_cards(run, as_of=clock.session_date())
+    if cards:
+        print("\n" + "=" * 72)
+        print("IDEA CARDS")
+        print("=" * 72)
+        for card in cards:
+            print()
+            print(card)
     if not run.surfaced:
         print("  nothing today — which the engine is allowed to say (D1)")
     return 0

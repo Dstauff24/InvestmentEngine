@@ -229,6 +229,29 @@ def alert_email_onfail() -> str:
     return get("ALERT_EMAIL_ONFAIL") or alert_email_to()
 
 
+# ── Shadow / paper account (D44) ────────────────────────────────────────────
+
+
+def shadow_account_value() -> float:
+    """Account value the shadow and paper books size against (D44).
+
+    Not the live balance, and not optional. A default would silently make every
+    R-multiple in the Shadow Book a function of a number nobody chose, and D11
+    measures expectancy in R.
+    """
+    raw = require("SHADOW_ACCOUNT_VALUE")
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SettingsError(f"SHADOW_ACCOUNT_VALUE must be a number, got {raw!r}") from None
+    if value <= 0:
+        raise SettingsError(
+            f"SHADOW_ACCOUNT_VALUE must be positive, got {value}. Sizing divides "
+            f"by it, and a zero account would make every position size infinite."
+        )
+    return value
+
+
 # ── SEC EDGAR (D39: insider clusters) ───────────────────────────────────────
 # The SEC BLOCKS anonymous traffic. Their guidance asks for a descriptive
 # User-Agent carrying a contact address, and for no more than ~10 requests a
