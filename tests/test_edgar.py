@@ -337,3 +337,45 @@ def test_every_row_carries_the_same_filing_timestamp():
     rows = ins.parse_form4(fx.FORM4_TWO_TRANSACTIONS, accession="a-8", filed_at=FILED_AT)
     assert {r["filed_at"] for r in rows} == {FILED_AT}
     assert {r["filed_session"] for r in rows} == {date(2026, 10, 21)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The rendered view vs the data
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Found live 2026-10-21: every Form 4 fetched for AAPL and MSFT failed to parse
+# with "mismatched tag: line 29" until the XSL prefix was stripped. The trap is
+# that the rendered HTML is served with an `.xml` extension, so the name says
+# XML and the content is `<!DOCTYPE html>`.
+
+
+@pytest.mark.parametrize(
+    ("primary", "expected"),
+    [
+        ("xslF345X06/form4.xml", "form4.xml"),
+        ("xslF345X05/primary_doc.xml", "primary_doc.xml"),
+        ("xslF345X03/wk-form4_1234.xml", "wk-form4_1234.xml"),
+        # Already the data: left alone.
+        ("form4.xml", "form4.xml"),
+        ("primary_doc.xml", "primary_doc.xml"),
+    ],
+)
+def test_the_xsl_prefix_is_stripped_to_reach_the_raw_xml(primary, expected):
+    from ingest.edgar_client import raw_xml_document
+
+    assert raw_xml_document(primary) == expected
+
+
+def test_a_non_xsl_subdirectory_is_not_stripped():
+    """Only the transform directory is removed — not any path segment."""
+    from ingest.edgar_client import raw_xml_document
+
+    assert raw_xml_document("subdir/form4.xml") == "subdir/form4.xml"
+
+
+def test_html_served_as_xml_fails_loudly_rather_than_silently():
+    """The symptom that led here: an XML parser on an HTML page reports a
+    mismatched tag dozens of lines in, pointing nowhere near the cause."""
+    html = '<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">\n<html><head><br></head></html>'
+    with pytest.raises(EdgarError, match="did not parse"):
+        ins.parse_form4(html, accession="a-9", filed_at=FILED_AT)

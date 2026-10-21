@@ -34,7 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import clock, config, db
 from core.budget import BudgetExhausted
 from core.jobs import job_run
-from ingest.edgar_client import EdgarBlockedError, EdgarClient, EdgarError
+from ingest.edgar_client import (
+    EdgarBlockedError,
+    EdgarClient,
+    EdgarError,
+    raw_xml_document,
+)
 from ingest.runner import for_each_symbol
 
 log = logging.getLogger(__name__)
@@ -232,7 +237,9 @@ def ingest_symbol(client: EdgarClient, symbol: str, cik: str, *, since: date) ->
         if filing.accession in seen or not filing.document:
             continue
         try:
-            xml_text = client.filing_document(cik, filing.accession, filing.document)
+            # The submissions feed points at the RENDERED view; we need the data.
+            document = raw_xml_document(filing.document)
+            xml_text = client.filing_document(cik, filing.accession, document)
             parsed = parse_form4(xml_text, accession=filing.accession, filed_at=filing.filed_at)
         except EdgarError as exc:
             # One unparseable filing must not cost the other nineteen. Logged

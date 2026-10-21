@@ -166,6 +166,29 @@ class EdgarClient:
         )
 
 
+def raw_xml_document(primary_document: str) -> str:
+    """The machine-readable Form 4 behind EDGAR's rendered view.
+
+    `primaryDocument` in a submissions feed points at the XSL-TRANSFORMED HTML,
+    not the XML: `xslF345X06/form4.xml` renders as a styled page a person can
+    read, and `form4.xml` in the same folder is the data. The HTML is served
+    with an `.xml` extension, which is why this is easy to miss — the name says
+    XML, the content is `<!DOCTYPE html>`, and an XML parser fails on it with a
+    mismatched-tag error dozens of lines in rather than anything that points at
+    the cause.
+
+    Found live 2026-10-21: every Form 4 fetched for AAPL and MSFT failed to
+    parse until the prefix was stripped.
+
+    The transform directory is versioned (`xslF345X03`, `X05`, `X06`, ...), so
+    this strips any leading `xsl*/` segment rather than matching one spelling.
+    """
+    if "/" not in primary_document:
+        return primary_document
+    head, _, tail = primary_document.partition("/")
+    return tail if head.lower().startswith("xsl") else primary_document
+
+
 def to_edgar_ticker(symbol: str) -> str:
     """Canonical dash form -> EDGAR's form. BRK-B stays BRK-B.
 
