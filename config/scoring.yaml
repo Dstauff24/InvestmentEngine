@@ -104,6 +104,74 @@ sentiment_reinstatement:
   min_sample: 30                # [OPEN] #37
   restore_toward: 20            # D32 — back to the pre-demotion weight
 
+# ── Feature -> pillar-score mapping (step 5) ────────────────────────────────
+# Each pillar score is 0-100. Each sub-signal maps its feature value onto that
+# scale, and the pillar is the MEAN of the sub-signals that scored.
+#
+# EQUAL WEIGHTING WITHIN A PILLAR IS A DELIBERATE DECISION, not an oversight
+# and not a missing parameter. D2/D32 fix the weights BETWEEN pillars because
+# the decision log says what they are; nothing says whether revision momentum
+# should outrank margin trend inside Pillar B, and inventing a number would be
+# false precision dressed as configuration. D13's quarterly review introduces
+# sub-weights when there is evidence to set them. Until then a sub-signal's
+# influence is controlled by whether it scores at all, and abstention
+# renormalizes one level down exactly as D41 does one level up.
+#
+# What IS parameterised: the SCALE of each signed signal — the value that earns
+# full credit. A signed signal `x` maps as:
+#
+#     score = 50 + 50 * clamp(x / full_credit, -1, +1)
+#
+# so 0 is neutral (50), +full_credit is 100 and -full_credit is 0. One number
+# per signal, every one a judgment call, every one an [OPEN] row.
+mapping:
+  # Minimum pillars that must score for a composite to exist at all (D41).
+  # Technical is required separately and unconditionally.
+  min_scored_pillars: 2        # [OPEN] #52
+
+  technical:
+    # Relative strength vs sector, in percentage points over the window (D33).
+    # 15pp of quarterly outperformance is a strong leader; beyond that the
+    # signal saturates rather than growing without limit.
+    rs_full_credit_pct: 15.0   # [OPEN] #53
+    # RSI "healthy" band. Inside it scores 100, and the score falls off
+    # linearly to 0 at the extremes (0 and 100). NOT a recipe trigger — recipe
+    # 1's 40-50 reset band is separate and lives under `recipes`.
+    rsi_healthy_low: 45.0      # [OPEN] #54
+    rsi_healthy_high: 70.0     # [OPEN] #55
+
+  fundamental:
+    # YoY growth earning full credit, in percent.
+    growth_full_credit_pct: 25.0      # [OPEN] #56
+    # Change in the growth RATE, in percentage points.
+    acceleration_full_credit_pp: 10.0 # [OPEN] #57
+    # Margin expansion earning full credit, in percentage points.
+    margin_trend_full_credit_pp: 2.0  # [OPEN] #58
+    # Consensus EPS revision earning full credit, in percent.
+    revision_full_credit_pct: 5.0     # [OPEN] #59
+    # Revision momentum abstains below this much of OUR OWN series (D41 +
+    # features/evidence.py). Correct at 2 snapshots, trustworthy at 60 — this
+    # is where "trustworthy enough to score" is drawn.
+    revision_min_observations: 4      # [OPEN] #60
+
+  catalyst:
+    # Earnings within this many days is a live catalyst, scoring 100 and
+    # falling off linearly to 50 at the horizon.
+    earnings_near_days: 10            # [OPEN] #61
+    earnings_horizon_days: 45         # [OPEN] #62
+    # Post-earnings drift window (recipe 3's territory): days SINCE earnings
+    # that still count as a catalyst.
+    drift_window_days: 30             # [OPEN] #63
+    # An ex-dividend date inside this many days is a RISK, not a catalyst
+    # (D19(3) forbids a new swing long within 2 days) — it subtracts.
+    ex_div_penalty_days: 3            # [OPEN] #64
+
+  sentiment:
+    # Tone delta earning full credit, on the -1..+1 scorer scale.
+    tone_delta_full_credit: 0.25      # [OPEN] #65
+    # Volume spike earning full credit, as a ratio over normal flow.
+    volume_spike_full_credit: 3.0     # [OPEN] #66
+
 # ── Sentiment (Pillar D, D32) ───────────────────────────────────────────────
 # SENTIMENT MEASURES CHANGE, NOT LEVEL. A stock whose coverage is permanently
 # gloomy is not a sell signal every day; a stock whose coverage just turned is

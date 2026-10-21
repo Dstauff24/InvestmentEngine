@@ -304,7 +304,8 @@ def test_the_composite_is_equal_weighted():
     for frame in (big, small):
         frame["adj_close"] = frame["close"]
 
-    composite = tech.sector_composite({"BIG": big, "SMALL": small})
+    # `min_bars` lowered: this test is about WEIGHTING, not history length.
+    composite = tech.sector_composite({"BIG": big, "SMALL": small}, min_bars=10)
     assert len(composite) == 30
     assert composite.iloc[0] == pytest.approx(100.0), "normalised to 100 at the start"
     # BIG ends ~+29%, SMALL flat -> an equal-weighted mean lands near +14.5%.
@@ -318,7 +319,9 @@ def test_the_composite_uses_only_dates_every_member_shares():
     for frame in (full, short):
         frame["adj_close"] = frame["close"]
 
-    composite = tech.sector_composite({"FULL": full, "SHORT": short})
+    # `min_bars` lowered so the SHORT member survives to be intersected —
+    # the date join is what this test is about.
+    composite = tech.sector_composite({"FULL": full, "SHORT": short}, min_bars=10)
     assert len(composite) == 20
 
 
@@ -386,3 +389,47 @@ def test_as_dict_is_flat_enough_to_log():
     assert isinstance(out["ma"], dict)
     assert "stacked" in out["ma"]
     assert "range_position" in out["week52"]
+
+
+def test_a_short_history_member_does_not_truncate_the_whole_sector_index():
+    """The date join is an INTERSECTION, so one recent listing would otherwise
+    shorten the index for every other member.
+
+    Observed live 2026-10-21: Industrials built from 40 members yielded 91 bars
+    while sectors without a new listing yielded 278. Left unchecked, one IPO
+    could pull a sector below the 63-bar relative-strength window and silently
+    abstain the reading for all forty members.
+    """
+    long_members = {}
+    for name in ("A", "B", "C"):
+        frame = ps.frame(ps.rising(200))
+        frame["adj_close"] = frame["close"]
+        long_members[name] = frame
+
+    ipo = ps.frame(ps.rising(20))
+    ipo["adj_close"] = ipo["close"]
+
+    without = tech.sector_composite(long_members)
+    with_ipo = tech.sector_composite({**long_members, "IPO": ipo})
+
+    assert len(without) == 200
+    assert len(with_ipo) == 200, "the newcomer is dropped, not allowed to truncate"
+
+
+def test_a_sector_of_only_short_history_members_yields_nothing():
+    """Better an abstention than an index too short for the window that reads it."""
+    frames = {}
+    for name in ("A", "B", "C"):
+        frame = ps.frame(ps.rising(20))
+        frame["adj_close"] = frame["close"]
+        frames[name] = frame
+    assert tech.sector_composite(frames).empty
+
+
+def test_min_bars_is_configurable_for_a_shorter_window():
+    frames = {}
+    for name in ("A", "B"):
+        frame = ps.frame(ps.rising(30))
+        frame["adj_close"] = frame["close"]
+        frames[name] = frame
+    assert len(tech.sector_composite(frames, min_bars=10)) == 30

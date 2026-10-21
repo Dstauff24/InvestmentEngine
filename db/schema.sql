@@ -583,6 +583,17 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     status_at_call          TEXT CHECK (status_at_call IS NULL
                                         OR status_at_call IN ('shadow', 'paper', 'live')),
 
+    -- D41: WHICH pillars scored, and how many. The composite is computed over
+    -- scoring pillars with weights renormalized, so 72 from four pillars and
+    -- 72 from two are different claims and the number alone cannot say which.
+    -- D39's calibration groups on `pillars_scored` — whether thinner
+    -- composites are measurably less reliable is the only evidence that would
+    -- revise D41. Two columns because a reader wants to know it was Technical
+    -- and Catalyst while a GROUP BY wants the count.
+    scored_pillars          TEXT,
+    pillars_scored          SMALLINT CHECK (pillars_scored IS NULL
+                                            OR pillars_scored BETWEEN 0 AND 4),
+
     -- Projections AT TIME OF CALL. Frozen — never updated after insert. The
     -- whole point is measuring reality against what we said we expected.
     proj_entry_low          NUMERIC(18, 6),
@@ -631,6 +642,9 @@ CREATE INDEX IF NOT EXISTS ix_shadow_book_open
 -- Expectancy is always read per recipe AND per status (D40).
 CREATE INDEX IF NOT EXISTS ix_shadow_book_status_recipe
     ON shadow_book (recipe, status_at_call, called_on DESC);
+-- D39 calibration groups by how many pillars a composite rested on (D41).
+CREATE INDEX IF NOT EXISTS ix_shadow_book_pillars
+    ON shadow_book (pillars_scored, recipe, called_on DESC);
 CREATE INDEX IF NOT EXISTS ix_shadow_book_recipe_tier
     ON shadow_book (recipe, tier, called_on DESC);
 

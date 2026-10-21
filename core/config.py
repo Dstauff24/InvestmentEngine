@@ -315,6 +315,93 @@ class Promotion(Base):
         return self
 
 
+class TechnicalMapping(Base):
+    rs_full_credit_pct: float  # [OPEN] #53
+    rsi_healthy_low: Score  # [OPEN] #54
+    rsi_healthy_high: Score  # [OPEN] #55
+
+    @model_validator(mode="after")
+    def _the_band_must_be_a_band(self):
+        if self.rsi_healthy_low >= self.rsi_healthy_high:
+            raise ValueError(
+                f"rsi_healthy_low ({self.rsi_healthy_low}) must be below "
+                f"rsi_healthy_high ({self.rsi_healthy_high})"
+            )
+        return self
+
+
+class FundamentalMapping(Base):
+    growth_full_credit_pct: float  # [OPEN] #56
+    acceleration_full_credit_pp: float  # [OPEN] #57
+    margin_trend_full_credit_pp: float  # [OPEN] #58
+    revision_full_credit_pct: float  # [OPEN] #59
+    revision_min_observations: PositiveInt  # [OPEN] #60
+
+
+class CatalystMapping(Base):
+    earnings_near_days: PositiveInt  # [OPEN] #61
+    earnings_horizon_days: PositiveInt  # [OPEN] #62
+    drift_window_days: PositiveInt  # [OPEN] #63
+    ex_div_penalty_days: PositiveInt  # [OPEN] #64
+
+    @model_validator(mode="after")
+    def _near_is_inside_the_horizon(self):
+        if self.earnings_near_days >= self.earnings_horizon_days:
+            raise ValueError(
+                f"earnings_near_days ({self.earnings_near_days}) must be inside "
+                f"earnings_horizon_days ({self.earnings_horizon_days}), or the "
+                f"fall-off has nothing to fall off across"
+            )
+        return self
+
+
+class SentimentMapping(Base):
+    tone_delta_full_credit: float  # [OPEN] #65
+    volume_spike_full_credit: float  # [OPEN] #66
+
+
+class Mapping(Base):
+    """Feature -> pillar-score mapping. Equal sub-weights by design, not default.
+
+    See config/scoring.yaml: D2/D32 fix the weights BETWEEN pillars because the
+    log says what they are; nothing says whether revision momentum should
+    outrank margin trend INSIDE Pillar B, and inventing that number would be
+    false precision dressed as configuration.
+    """
+
+    min_scored_pillars: PositiveInt  # [OPEN] #52
+    technical: TechnicalMapping
+    fundamental: FundamentalMapping
+    catalyst: CatalystMapping
+    sentiment: SentimentMapping
+
+    @model_validator(mode="after")
+    def _full_credit_values_must_be_positive(self):
+        scales = {
+            "technical.rs_full_credit_pct": self.technical.rs_full_credit_pct,
+            "fundamental.growth_full_credit_pct": self.fundamental.growth_full_credit_pct,
+            "fundamental.acceleration_full_credit_pp": (
+                self.fundamental.acceleration_full_credit_pp
+            ),
+            "fundamental.margin_trend_full_credit_pp": (
+                self.fundamental.margin_trend_full_credit_pp
+            ),
+            "fundamental.revision_full_credit_pct": self.fundamental.revision_full_credit_pct,
+            "sentiment.tone_delta_full_credit": self.sentiment.tone_delta_full_credit,
+            "sentiment.volume_spike_full_credit": self.sentiment.volume_spike_full_credit,
+        }
+        for name, value in scales.items():
+            if value <= 0:
+                raise ValueError(
+                    f"mapping.{name} is {value}; a full-credit scale divides the "
+                    f"feature value, so zero or negative would invert or explode "
+                    f"every reading it maps"
+                )
+        if self.min_scored_pillars > 4:
+            raise ValueError("mapping.min_scored_pillars cannot exceed the four pillars")
+        return self
+
+
 class SentimentScope(Base):
     """D32: Pillar D measures CHANGE, not level."""
 
@@ -362,6 +449,7 @@ class ScoringConfig(Base):
     pillar_agreement: PillarAgreement
     tiers: Tiers
     min_surfaceable_composite: Score
+    mapping: Mapping
     sentiment: SentimentScope
     promotion: Promotion
     ranking: Ranking

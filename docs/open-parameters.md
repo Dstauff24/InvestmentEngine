@@ -1,6 +1,6 @@
 # Open Parameters (rebuild baseline, Oct 20 2026)
 
-Config values no decision (D1–D40) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
+Config values no decision (D1–D41) fixes a number for. Each carries a provisional default in `config/*.yaml` tagged `# [OPEN]` and a row here; `test_every_open_value_is_documented` keeps the tag count and this doc in sync. Rows 1–31 were approved Sep 1, 2026 as provisional starting values, with three adjustments (#12, #15, #18) applied below. Rows 32–37 arrived with the D32–D39 strategy refinements on Oct 20, 2026 and have never been exercised against data. Rows 38–44 are D40's promotion-ladder thresholds, added Oct 21, 2026; they cannot be exercised until a recipe has closed ideas. D13's quarterly Shadow Book review is where they stop being guesses.
 
 Everything NOT tagged `[OPEN]` traces to a decision and is asserted by a named test in `tests/test_config.py`.
 
@@ -124,6 +124,43 @@ window against itself and be permanently zero.
 | 49 | `sentiment.min_articles` | `5` | The abstention floor; no decision sets it | How much coverage a symbol needs before a tone delta is reported at all. Three articles can disagree wildly and average to anything, so below this the reading is `None`. Applies to SCORED articles on BOTH windows — five headlines the lexicon cannot read are not five articles of evidence. | High |
 | 50 | `sentiment.trailing_days` | `7` | D32 says "change"; no window | What counts as "just happened". Matches `news.lookback_days`, so the trailing window is exactly what one ingest cycle refreshes. | Medium |
 | 51 | `sentiment.baseline_days` | `30` | Same | What "normal" means for this symbol. The baseline EXCLUDES the trailing window, so this is effectively a 23-day comparison period. Longer is more stable and slower to notice a regime change. | Medium |
+
+## Added by step 5 — the feature→pillar-score mapping (Oct 21 2026)
+
+Every pillar score is 0-100. Each sub-signal maps its feature value onto that
+scale, and a pillar is the **mean of the sub-signals that scored** (D41's
+renormalization, one level down).
+
+**Equal weighting within a pillar is a decision, not a missing parameter.**
+D2/D32 fix the weights BETWEEN pillars because the log states them; nothing
+states whether revision momentum should outrank margin trend inside Pillar B,
+and a number there would be false precision dressed as configuration. D13's
+quarterly review introduces sub-weights when there is evidence to set them. So
+the rows below are the mapping SCALES and WINDOWS — the judgment calls that
+cannot be avoided rather than the ones that can.
+
+A signed signal maps as `50 + 50 × clamp(x / full_credit, −1, +1)`: neutral at
+50, saturating at ±full_credit. Saturation is deliberate — a company growing
+400% is not sixteen times better than one growing 25%, and an unbounded map
+would let one wild sub-signal dominate its pillar.
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 52 | `mapping.min_scored_pillars` | `2` | D41 sets the rule, not the floor | How few pillars may carry a composite. Technical is required separately, so this is really "Technical plus one". Raise it and thin-evidence ideas vanish; lower it and a single pillar decides. | High |
+| 53 | `mapping.technical.rs_full_credit_pct` | `15.0` | D33 makes relative strength a Pillar A input; no scale | Quarterly outperformance (percentage points) earning full credit. Lower makes every sector leader look exceptional. | High |
+| 54 | `mapping.technical.rsi_healthy_low` | `45.0` | Nothing; RSI "health" is undefined | Bottom of the band scoring 100. NOT recipe 1's 40-50 reset band, which is separate — this asks "is momentum healthy", not "is this a pullback entry". | Medium |
+| 55 | `mapping.technical.rsi_healthy_high` | `70.0` | Same | Top of that band. Above it the score falls off, because an RSI of 95 is not better than 60 — it is a different and worse thing. | Medium |
+| 56 | `mapping.fundamental.growth_full_credit_pct` | `25.0` | D2 names growth; sets no scale | YoY revenue/EPS growth earning full credit. Revenue and EPS are averaged into ONE growth sub-signal, so a company reporting both does not get double the influence. | High |
+| 57 | `mapping.fundamental.acceleration_full_credit_pp` | `10.0` | Pillar B reads acceleration | Change in the growth RATE earning full credit, in points. The signal D2 cares about more than level. | High |
+| 58 | `mapping.fundamental.margin_trend_full_credit_pp` | `2.0` | Same | Margin expansion earning full credit, in points. Small on purpose: two points of gross-margin expansion in a year is a lot. | Medium |
+| 59 | `mapping.fundamental.revision_full_credit_pct` | `5.0` | D7's revision momentum; no scale | Consensus EPS revision earning full credit. The live 2.00→2.39 example is +19.5%, which saturates — deliberately, since a 20% revision and a 40% one are both "sharply up". | High |
+| 60 | `mapping.fundamental.revision_min_observations` | `4` | D41 + `features/evidence.py` | Where "correct at 2 snapshots, trustworthy at 60" becomes "trustworthy enough to SCORE". Below it revision abstains instead of contributing a noisy trend estimate. **Nothing has 4 snapshots yet** — the series started 2026-10-21. | High |
+| 61 | `mapping.catalyst.earnings_near_days` | `10` | D2 names catalyst proximity; no window | Earnings inside this many days score 100. | Medium |
+| 62 | `mapping.catalyst.earnings_horizon_days` | `45` | Same | Beyond this, earnings score `None` rather than 0 — a catalyst 200 days out is no news, not bad news, and scoring it 0 would drag Pillar C down for every stock with nothing scheduled. | Medium |
+| 63 | `mapping.catalyst.drift_window_days` | `30` | Recipe 3's territory | How long after earnings still counts as a catalyst (post-earnings drift). | Medium |
+| 64 | `mapping.catalyst.ex_div_penalty_days` | `3` | D19(3) forbids a new swing long within 2 days | An ex-date inside this many days scores 0 — a RISK, so it subtracts rather than abstaining. One day wider than D19's rule so the gate bites before the rule does. | Medium |
+| 65 | `mapping.sentiment.tone_delta_full_credit` | `0.25` | D32 says Pillar D measures change; no scale | Tone delta earning full credit on the scorer's −1..+1 scale. Scorer-specific: **a Phase 2 Claude scorer will need this re-tuned**, which is exactly why `scorer_id` is recorded. | Medium |
+| 66 | `mapping.sentiment.volume_spike_full_credit` | `3.0` | Same | Coverage multiple earning full credit. Maps from 1.0 (normal) UPWARD only and never below neutral — quiet news is not bearish. | Low |
 
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.

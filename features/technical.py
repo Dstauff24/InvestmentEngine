@@ -313,7 +313,12 @@ def relative_strength_vs_sector(
     return None if None in (a, b) else a - b
 
 
-def sector_composite(frames: dict[str, pd.DataFrame], *, column: str = "adj_close") -> pd.Series:
+def sector_composite(
+    frames: dict[str, pd.DataFrame],
+    *,
+    column: str = "adj_close",
+    min_bars: int = 64,
+) -> pd.Series:
     """An equal-weighted sector index from its members' bars.
 
     Equal-weighted, not cap-weighted: the question is "is this sector working",
@@ -321,16 +326,38 @@ def sector_composite(frames: dict[str, pd.DataFrame], *, column: str = "adj_clos
     of that one name, against which every other member looks weak.
 
     Indexed by `session_date` and restricted to dates where EVERY member has a
-    bar, so a member's missing day cannot move the composite on its own. Returns
-    normalised levels (first date = 100).
+    bar, so a member's missing day cannot move the composite on its own.
+    Returns normalised levels (first date = 100).
+
+    SHORT-HISTORY MEMBERS ARE DROPPED FIRST, and that is not tidiness. The
+    date join is an INTERSECTION, so one recently-listed member truncates the
+    index for every other member of its sector — observed live 2026-10-21,
+    where Industrials built from 40 members yielded 91 bars while sectors
+    without a new listing yielded 278. Left unchecked, one IPO could pull a
+    sector's index below `relative_strength_vs_sector`'s 63-bar window and
+    silently abstain relative strength for all forty of its members. `min_bars`
+    defaults just above that window.
     """
     series = []
+    dropped: list[str] = []
     for symbol, frame in frames.items():
         if column not in frame or "session_date" not in frame:
             log.warning("sector composite: skipping %s, missing %s", symbol, column)
             continue
         indexed = frame.set_index(_to_dates(frame["session_date"]))[column].astype(float)
-        series.append(indexed[~indexed.index.duplicated(keep="last")])
+        indexed = indexed[~indexed.index.duplicated(keep="last")]
+        if len(indexed) < min_bars:
+            dropped.append(symbol)
+            continue
+        series.append(indexed)
+
+    if dropped:
+        log.info(
+            "sector composite: dropped %d short-history member(s) so they do not "
+            "truncate the index: %s",
+            len(dropped),
+            ", ".join(sorted(dropped)[:10]),
+        )
 
     if not series:
         return pd.Series(dtype=float)
