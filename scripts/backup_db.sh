@@ -94,6 +94,12 @@ else
   # --no-owner / --no-privileges so the dump restores cleanly onto a fresh box
   # with a differently-named role. Plain SQL (not -Fc) so a restore needs only
   # psql and gunzip, which is what you want at 3am on an unfamiliar machine.
+  #
+  # pg_dump prints a "circular foreign-key constraints on continuous_agg" warning
+  # here and suggests --disable-triggers or a full dump. IGNORE IT: `continuous_agg`
+  # is TimescaleDB's own catalog, not ours, and this IS a full dump — the hint is
+  # generic text attached to the circularity check. The restore was verified
+  # end-to-end with this exact command (see the TO RESTORE block above).
   PGPASSWORD="${PGPASSWORD:-}" pg_dump \
       --host="${PGHOST:-localhost}" \
       --port="${PGPORT:-5432}" \
@@ -155,8 +161,17 @@ if [[ $UPLOAD -eq 1 && -n "${BACKUP_S3_BUCKET:-}" ]]; then
         run aws "${AWS_ARGS[@]}" s3 rm "s3://$BACKUP_S3_BUCKET/$S3_PREFIX/$old"
       done
 elif [[ $UPLOAD -eq 1 ]]; then
-  echo "==> BACKUP_S3_BUCKET is not set; keeping the dump locally only"
-  echo "    a backup that lives on the same VM as the database is not a backup"
+  # A SUPPORTED MODE, not a degraded one. With no bucket configured the dump is
+  # kept locally and pruned on the same retention below, and the script exits 0
+  # — the production droplet takes provider-level snapshots as the outer layer,
+  # so local dumps are the fast-restore tier rather than the only copy.
+  #
+  # Still worth saying out loud every night: a local dump does not survive the
+  # loss of the machine holding it. If the droplet snapshots are ever turned
+  # off, set BACKUP_S3_BUCKET the same day.
+  echo "==> BACKUP_S3_BUCKET is not set; keeping compressed dumps locally"
+  echo "    retention below still applies (${RETENTION_DAYS}d)"
+  echo "    off-site copy is the droplet-level snapshot, not this script"
 fi
 
 echo "==> pruning local dumps older than ${RETENTION_DAYS}d"

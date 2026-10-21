@@ -129,6 +129,40 @@ mkdir -p data/logs
 Every variable is documented in [.env.example](.env.example). **Never commit
 `.env` or the Schwab token file** — `.gitignore` blocks both.
 
+#### Secrets do not travel with the repo
+
+`.env` is gitignored, so **nothing in a Codespace secret, a GitHub Actions
+secret or a local `.env` reaches the server**. Those populate the *development*
+environment only. Every key — FMP, Finnhub, Schwab, SMTP, Telegram — has to be
+written into the VM's own `.env` explicitly, once, by hand. A `git pull` will
+never bring them, and a job that is missing one fails at the consent gate or
+the settings accessor rather than silently running on nothing.
+
+**Prefer single-line commands over heredoc pastes.** A multi-line heredoc
+(`cat <<'EOF' … EOF`) pasted into a browser-based terminal — the DigitalOcean
+droplet console, a web SSH session — is unreliable: the paste can be split
+across reads, a line can arrive out of order, and the shell then either hangs
+waiting for the terminator or writes a truncated file. With `.env` that failure
+is quiet and expensive, because a half-written file still parses. Append one
+variable per command instead:
+
+```bash
+# one line, one variable, each independently verifiable
+printf 'TELEGRAM_BOT_TOKEN=%s\n' 'PASTE_TOKEN_HERE' >> .env
+printf 'TELEGRAM_CHAT_ID=%s\n'   'PASTE_CHAT_ID_HERE' >> .env
+
+# then check what landed, without printing the values
+grep -oE '^[A-Z_]+=' .env | tr -d '=' | sort        # names only
+grep -c . .env                                       # expected line count
+python -c "from core import settings; print(settings.telegram_configured())"
+```
+
+If you must transfer several at once, write them on the laptop and `scp` the
+file, or paste into `$EDITOR .env` where a truncated paste is visible before
+you save. Do not pipe secrets through `echo` in a way that leaves them in
+`~/.bash_history` — `printf` with the value quoted as above is fine, but
+consider `unset HISTFILE` for the session on a shared box.
+
 ```bash
 python -m core.config      # validate config/*.yaml before anything else
 python -m db.init          # create/upgrade the schema (idempotent)
@@ -137,20 +171,32 @@ python -m db.init --check  # verify only; exits 1 if anything is missing
 
 ### 5. Populate the universe source
 
-While FMP's constituents endpoints are plan-gated (D29), the universe builds
-from [config/constituents_static.txt](config/constituents_static.txt). That file
-ships empty with sourcing instructions and a dated header; **populate it before
-gate 1a** or the universe builder will refuse rather than write an empty
-universe.
+Since the Premium upgrade (2026-10-21) the universe builds from the **API** —
+the source line reads `universe [fmp]`. [config/constituents_static.txt](config/constituents_static.txt)
+remains the documented FALLBACK, taken automatically when the constituents
+endpoints answer 402 or the day's budget is spent, and it logs a warning naming
+its `AS_OF` date so falling back is never silent. Keep it populated: a plan can
+lapse, and a stale universe beats no universe.
 
 ### 6. Backups
 
-Nightly `pg_dump`, gzipped, to S3-compatible object storage (D20). Set
-`BACKUP_S3_BUCKET` and the `AWS_*` credentials in `.env`.
+Nightly `pg_dump`, gzipped (D20). With `BACKUP_S3_BUCKET` and the `AWS_*`
+credentials set, dumps upload to S3-compatible object storage and remote objects
+are pruned on the same retention.
+
+**With no bucket configured the script keeps compressed dumps locally, applies
+the 30-day retention, and exits 0.** That is a supported mode, not a degraded
+one: the production droplet takes provider-level snapshots as the outer layer,
+so local dumps are the fast-restore tier rather than the only copy. Failing the
+nightly job over an absent bucket would turn a deliberate configuration into a
+red cron mail every morning. If the droplet snapshots are ever turned off, set
+`BACKUP_S3_BUCKET` the same day — a local dump does not survive the loss of the
+machine holding it.
 
 ```bash
 ./scripts/backup_db.sh --dry-run   # show what it would do
-./scripts/backup_db.sh             # dump, upload, prune to BACKUP_RETENTION_DAYS
+./scripts/backup_db.sh             # dump, verify, upload if configured, prune
+./scripts/backup_db.sh --no-upload # local dump only, even with a bucket set
 ```
 
 This is more than hygiene. The D7 snapshot history cannot be re-fetched from any
@@ -215,8 +261,9 @@ session, a Codespace.
 > paste it into a chat, a ticket, or any shell that records history. It expires
 > within a couple of minutes, so finish promptly.
 
-`scripts/token_expiry_check.py` emails `ALERT_EMAIL_ONFAIL` 24h before expiry. A
-lapsed token means a missed D7 snapshot, and a missed day cannot be bought back.
+`scripts/token_expiry_check.py` alerts 24h before expiry — on every configured
+channel, so it reaches a phone and not only an inbox. A lapsed token means a
+missed D7 snapshot, and a missed day cannot be bought back.
 
 ---
 
@@ -235,7 +282,14 @@ ALLOW_LIVE_CALLS=1 python scripts/fmp_probe.py          # what does the plan cov
 ALLOW_LIVE_CALLS=1 python -m ingest.universe            # rebuild the universe (D14)
 ALLOW_LIVE_CALLS=1 python -m ingest.universe --dry-run  # report only, write nothing
 ALLOW_LIVE_CALLS=1 python -m jobs.daily_close           # the full post-close pipeline
+ALLOW_LIVE_CALLS=1 python -m scripts.telegram_test      # prove alerts reach a phone
 ```
+
+Run `scripts.telegram_test` once on a new VM, **before** trusting that a 16:30
+snapshot failure will reach you. It goes through the real `alerts/telegram.py`
+with the real consent gate and the real redaction, so a success means the alert
+path works rather than that a harness does. `--long` exercises the
+over-4096-character split; `--no-record` leaves the `alerts` table untouched.
 
 Run `ingest.fmp_events --backfill-actions` once before the first backtest:
 `corporate_actions` must reach back at least as far as the price history the
@@ -261,7 +315,8 @@ MAILTO=you@example.com
 # Post-close pipeline. 16:30 ET Mon-Fri. ONE entry for the whole pipeline:
 # dependency order lives in jobs/daily_close.py, so a half-run day is impossible
 # and job_runs keeps a single coherent story. Exit 1 (a failed step, or a day
-# left incomplete) also emails ALERT_EMAIL_ONFAIL.
+# left incomplete) alerts on every configured channel — email and, where
+# TELEGRAM_* are set, a push notification.
 30 16 * * 1-5  cd $ENGINE && ALLOW_LIVE_CALLS=1 .venv/bin/python -m jobs.daily_close >> data/logs/daily_close.log 2>&1
 
 # Universe rebuild — Sunday 08:00 ET. Weekly, not daily: index membership and

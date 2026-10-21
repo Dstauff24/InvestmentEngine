@@ -1,5 +1,5 @@
 # Investment Engine — Decision Log & To-Do Tracker
-**v2.5 (gate 1b closed, FMP Premium live) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
+**v2.6 (PRODUCTION LIVE — gates 1b, 3, 4 closed) — reconstructed Oct 20, 2026 after loss of the original repo. This file is canonical (D26); the design chat supplies paste-ready entries.**
 
 Companion: `CLAUDE.md` (conventions + validated findings), `docs/open-parameters.md`, `docs/REBUILD_KICKOFF.md`.
 
@@ -192,6 +192,37 @@ critical job — 431 of 433 chains is a permanent hole, not a rounding error.
 
 ---
 
+## 🚀 PRODUCTION LIVE — 2026-10-21
+
+**Gates 3 and 4 closed the same day FMP went Premium.** The engine now runs
+unattended on a DigitalOcean droplet, on cron, on ET host time, and the first
+production run reported `DAY COMPLETE`.
+
+**THE PRODUCTION D7 CLOCKS BOTH START 2026-10-21 — on the VM.** Two series, one
+date, and neither can be backdated:
+
+* the **IV / option-chain** series (D7/D22), which the self-built IV rank and
+  therefore D36's vehicle selection depend on; and
+* the **estimate-revision** series, which went live the same day with the
+  Premium upgrade and which D32 pre-weighted Fundamental to 30 for.
+
+**The Codespace database is DEV-ONLY and its history does not count.** Both
+databases are named `investment_engine` and both contain a day that looks
+complete for 2026-10-21, which is precisely why this needs writing down: the
+production series is the one on the droplet. The Codespace copy was built and
+rebuilt several times on 2026-10-21 while finding the Premium-upgrade bugs, its
+`job_runs` shows 34 attempts for that date, and it must never be treated as the
+start of anything. If a backtest or a revision diff is ever run against the
+Codespace database, its early history is an artefact of debugging, not a record
+of the market.
+
+**Still open from gate 3:** `--backfill-actions` has not been run on the VM.
+That is the O7 prerequisite — without it `features/adjustment.py` produces a
+wrong total-return series for every bar earlier than the first corporate action
+on record, silently and with no error.
+
+---
+
 ## ⏱ THE ESTIMATE-REVISION CLOCK STARTED 2026-10-21
 
 **Record the date; it cannot be backdated.** D7's edge is the day-over-day diff
@@ -262,14 +293,15 @@ collection database.
 **Gate 1a — Free-tier live. ⚠️ MOSTLY DONE Oct 20, 2026 (`64be4fd`).** Probe confirms `/stable/`, 10/15 usable, the 402s are exactly the known five. Universe builds from static constituents; news ran live (2,598 rows / 22 symbols). **Blocked on quota, not on code:** the free daily allowance was already largely spent when the first live universe run started, so only 22 of 519 symbols got a verified volume. Re-run on a fresh allowance to continue converging (250 -> 500 -> 519). Also learned: **batched `/stable/quote` is plan-gated — one symbol per call on free**, so the descriptive enrichment pass is skipped entirely and the whole budget goes to average volume (the only field the D14 filter needs).
 **Gate 1b — Premium unlock. ✅ CLOSED Oct 21, 2026.** Probe **15/15** on `/stable/` (the five previously-402 endpoints — `sp500-constituent`, `nasdaq-constituent`, `ratios`, `key-metrics`, `analyst-estimates` — all pass). Universe now builds from the **API**, not the static file (`universe [fmp]`, sp500=503 + nasdaq100=101). `analyst-estimates` probes clean, so `fmp_estimates` is recorded **`is_critical=True`** and took its **first snapshot**. Budget raised 250 → 9,000 and the limiter 300 → 600/min. Note `/api/v3/` now answers **403 (key rejected)** rather than 402: the legacy generation is not merely ungated, it is unavailable on this plan, which is fine — the client has been `/stable/`-only since step 4.
 **Gate 2 — Schwab live. ✅ DONE Oct 20, 2026 (`64be4fd`).** Token written Oct 20, **expires Oct 27** (7-day refresh life); live SPY quote verified. Fixture diff against a fresh live chain: **zero drift in 47 days** — same 20 top-level keys, same 54 contract fields, no renames, no type changes, all four `expirationType` values present (S 2088 / W 4912 / Q 650 / M 564). `has_options` writeback confirmed for all 22 active tickers, **and the D14 gate it arms was found permanently disarmed and fixed** (see below). End-to-end live: schwab_prices 6,094 rows, schwab_chains 2,908 rows, schwab_iv 22 rows.
-**Gate 3 — VM.** Provision (Hetzner/DO), Postgres 16 + Timescale, deploy, `--backfill-actions`, restore-test the backup.
-**Gate 4 — Cron on.** First `day_complete = true`; record the date; the D7 IV clock starts. After gate 4 the engine is collecting, not yet deciding: scoring, recipes, decision layer, Shadow Book, digest are the remaining Phase 1 work — see the **build map** above for which decision binds each. Per **D39(3)** the first 4–8 weeks after the scoring brain goes live run **Shadow Book-only**, with the Tier A threshold tuned to 2–5 ideas per week before any of it informs a real order.
+**Gate 3 — VM. ✅ CLOSED Oct 21, 2026.** DigitalOcean droplet, Postgres 16 + TimescaleDB, deployed and running. Droplet-level snapshots are enabled as the outer backup layer, so `scripts/backup_db.sh` keeping compressed local dumps with 30-day retention (no object-storage bucket configured) is a supported configuration rather than a gap. **Still open from this gate:** `--backfill-actions` has NOT been run on the VM, which remains the O7 prerequisite before any backtest is trusted.
+**Gate 4 — Cron on. ✅ CLOSED Oct 21, 2026.** Cron installed and running on ET host time. **First production `day_complete = true` on 2026-10-21** (prices 119,772, chains 39,462, iv 433, estimates 2,598, fundamentals 7,325, news 17,388). After gate 4 the engine is collecting, not yet deciding: scoring, recipes, decision layer, Shadow Book, digest are the remaining Phase 1 work — see the **build map** above for which decision binds each. Per **D39(3)** the first 4–8 weeks after the scoring brain goes live run **Shadow Book-only**, with the Tier A threshold tuned to 2–5 ideas per week before any of it informs a real order.
 
 ---
 
 ## 🗒 SESSION NOTES
 - Aug 30 – Sep 3: original build, steps 1–7 complete and live-validated (see CLAUDE.md "Validated API findings" for everything learned). Full detail preserved in the design chat and the prior Claude Code session transcript.
 - Oct 20: loss discovered (unpushed Codespace auto-deleted). D30, D31 adopted. Rebuild package authored: CLAUDE.md, this log v2.0, open-parameters.md, REBUILD_KICKOFF.md.
+- **Oct 21: PRODUCTION LIVE — gates 3 and 4 CLOSED.** Droplet deployed, cron running on ET, first production `DAY COMPLETE` on 2026-10-21. **Both production D7 clocks start 2026-10-21 on the VM**; the Codespace database is dev-only and its 2026-10-21 history is a debugging artefact, not a record. D16 amended: Telegram added as the page channel behind `alerts/notify.py`. Two more real bugs fixed in `fmp_events`: `cuts` was reporting the UPDATE's rowcount (the live `cuts=84` was 84 rows examined, **0 actual cuts**, 82 with no prior dividend at all), and a restated amount left a stale `is_dividend_cut` flag that could never clear. Still open: `--backfill-actions` on the VM (O7).
 - **Oct 21: FMP Premium live; gate 1b CLOSED.** Probe 15/15. Universe from the API (503 + 101 constituents, 433 kept of 518). `fmp_estimates` probed clean, flipped to `is_critical`, and took its **FIRST SNAPSHOT** — **the estimate-revision clock starts 2026-10-21**. Budget 250 → 9,000 (sized from a measured 6,759-call cold start), limiter 300 → 600. D29 free-tier mode retired to a documented fallback. **Six more defects**, five of them hidden by the free tier rather than caused by the upgrade — see "WHAT THE PREMIUM UPGRADE FOUND". Next: gate 3 (VM).
 - Oct 20 (strategy): **D32–D39 adopted.** Sentiment demoted to 10 and Fundamental raised to 30 (D32); cross-sectional ranking (D33); Tier A diversity gate requiring Technical + one of Fundamental/Catalyst (D34); barbell sleeves with a one-way profit ratchet (D35); IV rank selecting the vehicle (D36); pyramiding that never raises initial risk (D37); sector correlation guard (D38); Phase 2 learning-loop guardrails (D39). Six new `[OPEN]` parameters (#32–#37), all validated by the loader so a typo fails at startup, none read by any code yet. No scoring/decision/allocation logic was written — these bind those layers when they are built, and the build map in "What is NOT done" records which decision binds which layer.
 - Oct 20 (later still): **hardening.** Provider-exhausted marker so a spent allowance is discovered once per day rather than once per symbol; live and scratch databases separated by protection class after the integration suite wiped a day of collection. `extrinsicValue` diagnosed as distance-from-the-money and recorded in CLAUDE.md as unusable by construction, not merely imprecise.

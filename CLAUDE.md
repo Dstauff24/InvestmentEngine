@@ -26,7 +26,7 @@ A personal investment decision-support engine for a Schwab brokerage account (sw
 - **Risk (D17/D18):** Tier A 2.5% of account per trade; Tier B 0.75%/idea with hybrid monthly budget (4% base at entry, 50% of realized Tier B gains replenish, 6% ceiling, calendar month); max 6 concurrent swings; total open heat ≤10% (active trades only; holds/ETFs excluded, they run on thesis triggers with no hard stops); options defined-risk only, 5%/mo realized-loss budget, 3% max per position; circuit breaker (2 losing weeks or −5% month → Tier B paused, Tier A halved until a winning week). Buckets: ETF 35 / holds 30 / swings 20 / options 10 / cash 5; risk-off (SPY<200MA + VIX>25) → swings 10, options 5, cash 20+. Single name ≤10%, sector ≤30%. All in `config/risk.yaml`.
 - **Dividends (D19):** total-return measurement everywhere; dividend-adjusted stops; no new swing long within 2 days of ex-date; flag short-call assignment risk when extrinsic (use `timeValue`) < dividend × buffer; dividend cut = thesis-review trigger; ETF DRIP on, hold dividends → cash bucket.
 - **Shadow Book (D13):** every surfaced idea (Tier A, Tier B, and discretionary) logged with projections at time of call, tracked to outcome whether or not taken. `shadow_book.symbol` has NO FK to `tickers` (discretionary ideas may be off-universe). North-star metric = expectancy per recipe and tier.
-- **Alerts (D16):** daily email digest, Tier A and Tier B clearly separated.
+- **Alerts (D16, amended Oct 21 2026):** daily email digest, Tier A and Tier B clearly separated, PLUS Telegram as the page channel. `alerts/notify.py` fans out to whatever is configured; `alerts/telegram.py` and `alerts/mailer.py` never raise, sit behind the D27 gate, refuse under pytest, and write one `alerts` row per channel with a namespaced dedupe key. Telegram's token travels in the URL (redact it everywhere) and 4096 chars is a hard limit Telegram rejects rather than truncates (split on line boundaries).
 - **Network consent (D27):** `core/netguard.py`. No live network call without `ALLOW_LIVE_CALLS=1` on the invocation (CLI/cron, never `.env`). Inside pytest the answer is always no, flag or not. The gate sits ahead of the rate limiter and transport in every client. A blocked call is a failed job step, never a silent zero-row success.
 - **Exits:** per-strategy shape enforced by the loader. `swing` has `max_holding_days` (45, [OPEN]); `option` times out at expiration (`max_holding_days` must be null); `hold` exits on thesis triggers only (null). A day-count on options or holds is a hard config error.
 - **[OPEN] parameters (D25):** every number no decision fixes lives in config tagged `# [OPEN]`, with a row in `docs/open-parameters.md` and a sync test. Changing a decision-fixed value without a decision fails a named test.
@@ -63,10 +63,10 @@ features/        adjustment.py, iv.py, (later: technical.py, fundamental.py, cat
 scoring/         pillars.py, composite.py, recipes/
 decision/        idea_builder.py, tiering.py, risk_manager.py
 shadow_book/     logger.py, outcome_tracker.py, analytics.py
-alerts/          mailer.py, email_digest.py
+alerts/          notify.py (the facade), mailer.py, telegram.py, store.py, email_digest.py
 jobs/            daily_close.py, snapshot jobs
 backtest/        (Phase 2)
-scripts/         fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py
+scripts/         fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py, telegram_test.py
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)
 docs/            engine-decisions-and-todo.md (canonical log), open-parameters.md, REBUILD_KICKOFF.md
 ```
@@ -81,7 +81,7 @@ docs/            engine-decisions-and-todo.md (canonical log), open-parameters.m
 ## Conventions
 - Python 3.11+, `requirements.txt` + `requirements-dev.txt` split, `psycopg[binary]` v3, pydantic v2, `requests` + `tenacity` (no provider SDKs for FMP/Finnhub), `schwab-py`, pandas/numpy.
 - ruff: py311, line 100, rules E/W/F/I/UP/B/C4/SIM/RET/PTH/DTZ/T20/ARG/RUF. DTZ is deliberate (bans naive datetimes). T20 waived for jobs/, scripts/, ingest/, db/init.py.
-- Never commit secrets. `.gitignore` blocks `.env*` (except `.env.example`), `*token*.json`, `data/*`. `.env.example` documents every variable (FMP_API_KEY, FINNHUB_API_KEY, SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL=https://127.0.0.1, SCHWAB_TOKEN_PATH=data/schwab_token.json, DB vars incl. separate admin creds, SMTP + ALERT_EMAIL_ONFAIL).
+- Never commit secrets. `.gitignore` blocks `.env*` (except `.env.example`), `*token*.json`, `data/*`. `.env.example` documents every variable (FMP_API_KEY, FINNHUB_API_KEY, SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL=https://127.0.0.1, SCHWAB_TOKEN_PATH=data/schwab_token.json, DB vars incl. separate admin creds, SMTP + ALERT_EMAIL_ONFAIL, TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).
 - Idempotent ingestion (re-running a day upserts, never duplicates). Rate limiter is a sliding window, not a token bucket, shared via core. `for_each_symbol` fails a job above 25% symbol-failure rate with a 10-symbol minimum sample; total failure always raises regardless of sample size (never "ok, 0 rows" when everything failed).
 - Scoring logic unit-testable with fixture DataFrames, no network. Integration tests only under `pytest -m integration`.
 - Prefer boring, explicit code. This runs unattended.
