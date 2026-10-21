@@ -470,6 +470,13 @@ CREATE TABLE IF NOT EXISTS news_articles (
 
     -- Filled by the Phase 2 sentiment pillar; NULL until then.
     sentiment_score NUMERIC(12, 6),
+    -- WHICH scorer produced that score, as "name/version". A lexicon scorer
+    -- ships in Phase 1 and a Claude API scorer arrives in Phase 2; the two are
+    -- differently calibrated instruments and their readings must never be
+    -- averaged. Without this the migration between them is silent and D39's
+    -- calibration curve would measure neither. Versioned because a reworded
+    -- lexicon is a different instrument under the same name. See migration 008.
+    sentiment_scorer TEXT,
     sentiment_label TEXT CHECK (sentiment_label IN ('bullish', 'bearish', 'neutral')),
     materiality     NUMERIC(12, 6),
     classified_at   TIMESTAMPTZ,

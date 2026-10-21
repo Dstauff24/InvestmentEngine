@@ -104,6 +104,30 @@ sentiment_reinstatement:
   min_sample: 30                # [OPEN] #37
   restore_toward: 20            # D32 — back to the pre-demotion weight
 
+# ── Sentiment (Pillar D, D32) ───────────────────────────────────────────────
+# SENTIMENT MEASURES CHANGE, NOT LEVEL. A stock whose coverage is permanently
+# gloomy is not a sell signal every day; a stock whose coverage just turned is
+# information. So the readings are a tone DELTA — trailing window against a
+# longer baseline — and a news-VOLUME spike against the symbol's own normal
+# flow. Absolute tone feeds those; it is not a signal on its own.
+#
+# Per-symbol normalisation matters as much as the delta: a biotech with two
+# articles a week and a mega-cap with forty have different "normal", and a raw
+# article count would make the mega-cap look permanently newsworthy.
+sentiment:
+  # Trailing window: what just happened.
+  trailing_days: 7             # [OPEN] #50
+  # Baseline it is compared against. Must exceed the trailing window, or the
+  # comparison is a window against itself.
+  baseline_days: 30            # [OPEN] #51
+  # ABSTENTION FLOOR. Below this many articles in the trailing window the
+  # reading is None rather than a confident delta computed from almost
+  # nothing. Three articles can disagree wildly and average to anything.
+  min_articles: 5              # [OPEN] #49
+  # Phase 1 scorer. The Claude API scorer arrives in Phase 2 and every reading
+  # records which one produced it, so calibration never mixes them (D39).
+  scorer: lexicon
+
 # ── Strategy promotion ladder (D40) ─────────────────────────────────────────
 # What the engine is ALLOWED to do with a recipe's ideas:
 #

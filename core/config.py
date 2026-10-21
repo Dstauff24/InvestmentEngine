@@ -315,6 +315,27 @@ class Promotion(Base):
         return self
 
 
+class SentimentScope(Base):
+    """D32: Pillar D measures CHANGE, not level."""
+
+    trailing_days: PositiveInt  # [OPEN] #50
+    baseline_days: PositiveInt  # [OPEN] #51
+    min_articles: PositiveInt  # [OPEN] #49
+    # Phase 1 is a lexicon; Phase 2 adds the Claude API scorer. Every reading
+    # records which one produced it so D39 calibration never mixes them.
+    scorer: Literal["lexicon"]
+
+    @model_validator(mode="after")
+    def _the_baseline_must_be_longer_than_the_trailing_window(self):
+        if self.baseline_days <= self.trailing_days:
+            raise ValueError(
+                f"sentiment.baseline_days ({self.baseline_days}) must exceed "
+                f"trailing_days ({self.trailing_days}); otherwise the delta compares a "
+                f"window against itself and is always zero"
+            )
+        return self
+
+
 class Ranking(Base):
     """D33: ideas are ranked by composite percentile within the universe."""
 
@@ -341,6 +362,7 @@ class ScoringConfig(Base):
     pillar_agreement: PillarAgreement
     tiers: Tiers
     min_surfaceable_composite: Score
+    sentiment: SentimentScope
     promotion: Promotion
     ranking: Ranking
     sentiment_reinstatement: SentimentReinstatement

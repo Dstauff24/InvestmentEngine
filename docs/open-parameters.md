@@ -109,5 +109,21 @@ somebody set months ago rather than an opinion about today.
 | 47 | `insider_cluster.min_aggregate_usd` | `250000` | D39 says "a minimum aggregate dollar value" | The floor that stops three directors buying $2,000 each from reading as conviction. Absolute dollars, not a fraction of market cap, which would make the rule fire far more readily on small caps. | High |
 | 48 | `edgar.daily_call_budget` | `2000` | No decision; SEC publishes no daily cap | A RUNAWAY-LOOP GUARD, not an allowance: the risk is a retry bug hammering a public service that has asked for restraint, and being the reason they introduce a cap. A full universe pass is ~1 + 1/symbol + 1 per new filing, so this clears a busy filing day across ~430 symbols with room to spare. | Medium |
 
+## Added by step 4 — sentiment windows (Oct 21 2026)
+
+D32 demoted Pillar D to weight 10 and says the pillar measures CHANGE; it fixes
+none of the windows. The abstention floor is the one the user named explicitly,
+and the two window lengths are open for the same D25 reason — no decision sets
+them.
+
+The loader rejects `baseline_days <= trailing_days`: the delta would compare a
+window against itself and be permanently zero.
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 49 | `sentiment.min_articles` | `5` | The abstention floor; no decision sets it | How much coverage a symbol needs before a tone delta is reported at all. Three articles can disagree wildly and average to anything, so below this the reading is `None`. Applies to SCORED articles on BOTH windows — five headlines the lexicon cannot read are not five articles of evidence. | High |
+| 50 | `sentiment.trailing_days` | `7` | D32 says "change"; no window | What counts as "just happened". Matches `news.lookback_days`, so the trailing window is exactly what one ingest cycle refreshes. | Medium |
+| 51 | `sentiment.baseline_days` | `30` | Same | What "normal" means for this symbol. The baseline EXCLUDES the trailing window, so this is effectively a 23-day comparison period. Longer is more stable and slower to notice a regime change. | Medium |
+
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.
