@@ -212,10 +212,18 @@ def test_the_reserve_cannot_push_total_spend_over_the_budget():
 
 
 def test_the_shipped_config_reserves_the_three_calendar_calls():
+    """Premium from 2026-10-21: 9000/day, still with the 3-call events floor.
+
+    Asserted as budget-minus-reserve rather than a literal, so a future budget
+    change does not need this test edited — what matters is that the floor is
+    exactly the three market-wide calendar endpoints and that the events job
+    itself can spend into it.
+    """
     b = DayBudget.for_fmp()
     events = DayBudget.for_fmp(honour_events_reserve=False)
-    assert b.budget - b.reserve == 247
-    assert events.budget == 250
+    assert b.reserve == 3
+    assert b.budget - b.reserve == b.budget - 3
+    assert events.budget == b.budget
     assert events.reserve == 0
 
 

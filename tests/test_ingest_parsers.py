@@ -836,3 +836,95 @@ def test_without_a_canary_the_old_conservative_behaviour_holds():
     assert _optional("key-metrics", gated) == []
     assert unavailable_endpoints() == ["key-metrics"]
     reset_availability()
+
+
+def test_every_valuation_column_populates():
+    """A renamed provider field must fail a test, not empty a column.
+
+    Live on 2026-10-21: seven of these were still /api/v3/ spellings that
+    `/stable/` had renamed. Because `ratios` and `key-metrics` were 402-gated
+    on the free tier the mismatch was never exercised — the crawl reported
+    success, `unavailable_endpoints` came back empty, and six of ten valuation
+    columns were silently NULL for every symbol. `unavailable_endpoints == []`
+    proves the endpoint answered; it says nothing about the answer being read.
+    """
+    from ingest.fmp_fundamentals import merge_statements
+
+    rows = merge_statements(
+        "AAPL",
+        "quarter",
+        fx.INCOME,
+        fx.BALANCE,
+        fx.CASHFLOW,
+        fx.RATIOS,
+        fx.KEY_METRICS,
+    )
+    assert rows, "the fixture must produce at least one row"
+    row = rows[0]
+
+    valuation = (
+        "pe_ratio",
+        "ps_ratio",
+        "pb_ratio",
+        "peg_ratio",
+        "ev_to_ebitda",
+        "roic",
+        "current_ratio",
+        "debt_to_equity",
+        "dividend_per_share",
+        "payout_ratio",
+    )
+    empty = [c for c in valuation if row.get(c) is None]
+    assert empty == [], f"valuation columns left NULL by the fixture payloads: {empty}"
+
+
+def test_a_zero_dividend_is_kept_not_treated_as_missing():
+    """`a or b` would read 0.0 as absent and fall through to the other source."""
+    from ingest.fmp_fundamentals import merge_statements
+
+    ratios = [{**fx.RATIOS[0], "dividendPerShare": 0.0}]
+    metrics = [{**fx.KEY_METRICS[0], "dividendPerShare": 9.99}]
+    rows = merge_statements("AAPL", "quarter", fx.INCOME, fx.BALANCE, fx.CASHFLOW, ratios, metrics)
+    assert rows[0]["dividend_per_share"] == 0.0
+
+
+def test_the_legacy_spellings_are_still_tolerated():
+    """A v3-shaped payload must not silently empty the columns either."""
+    from ingest.fmp_fundamentals import merge_statements
+
+    legacy_ratios = [
+        {
+            "date": "2026-06-27",
+            "currentRatio": 0.94,
+            "debtEquityRatio": 0.78,
+            "priceEarningsRatio": 33.2,
+            "priceToSalesRatio": 8.7,
+            "priceToBookRatio": 47.1,
+            "priceEarningsToGrowthRatio": 2.4,
+            "payoutRatio": 0.16,
+        }
+    ]
+    legacy_metrics = [
+        {
+            "date": "2026-06-27",
+            "roic": 0.55,
+            "enterpriseValueOverEBITDA": 24.8,
+            "dividendPerShare": 1.0,
+        }
+    ]
+    rows = merge_statements(
+        "AAPL",
+        "quarter",
+        fx.INCOME,
+        fx.BALANCE,
+        fx.CASHFLOW,
+        legacy_ratios,
+        legacy_metrics,
+    )
+    row = rows[0]
+    assert row["pe_ratio"] == 33.2
+    assert row["debt_to_equity"] == 0.78
+    assert row["roic"] == 0.55
+    assert row["ev_to_ebitda"] == 24.8
+    assert row["payout_ratio"] == 0.16
+    assert row["dividend_per_share"] == 1.0

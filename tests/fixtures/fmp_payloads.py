@@ -297,26 +297,35 @@ CASHFLOW = [
     },
 ]
 
+# Field names captured live from /stable/ on 2026-10-21, the day the Premium
+# upgrade made these endpoints reachable for the first time. SEVEN of the names
+# previously here were /api/v3/ spellings that `/stable/` renamed, and because
+# `ratios` and `key-metrics` were 402-gated on the free tier the mismatch had
+# never once been exercised: `unavailable_endpoints` came back empty, the crawl
+# reported success, and six of ten valuation columns stayed silently NULL.
+#
+# `test_every_valuation_column_populates` pins the lot, so the next rename
+# fails a test instead of quietly emptying a column.
 RATIOS = [
     {
         "date": "2026-06-27",
         "returnOnEquity": 1.42,
         "currentRatio": 0.94,
-        "debtEquityRatio": 0.78,
-        "priceEarningsRatio": 33.2,
+        "debtToEquityRatio": 0.78,  # was debtEquityRatio
+        "priceToEarningsRatio": 33.2,  # was priceEarningsRatio
         "priceToSalesRatio": 8.7,
         "priceToBookRatio": 47.1,
-        "priceEarningsToGrowthRatio": 2.4,
-        "payoutRatio": 0.16,
+        "priceToEarningsGrowthRatio": 2.4,  # was priceEarningsToGrowthRatio
+        "dividendPayoutRatio": 0.16,  # was payoutRatio
+        "dividendPerShare": 1.00,  # lives in ratios, NOT key-metrics
     },
 ]
 
 KEY_METRICS = [
     {
         "date": "2026-06-27",
-        "roic": 0.55,
-        "enterpriseValueOverEBITDA": 24.8,
-        "dividendPerShare": 1.00,
+        "returnOnInvestedCapital": 0.55,  # was roic
+        "evToEBITDA": 24.8,  # was enterpriseValueOverEBITDA
     },
 ]
 

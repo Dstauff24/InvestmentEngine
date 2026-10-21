@@ -212,16 +212,27 @@ def merge_statements(
                 "operating_margin": safe_ratio(row.get("operatingIncome"), revenue),
                 "net_margin": safe_ratio(row.get("netIncome"), revenue),
                 "roe": as_float(rat.get("returnOnEquity")),
-                "roic": as_float(met.get("roic")),
+                # `/stable/` renamed most of these; the second spelling in each
+                # `_first` is the /api/v3/ name they replaced. Kept because a
+                # silently-NULL column is the exact failure this caused once
+                # already, and tolerating both spellings costs nothing.
+                "roic": as_float(_first(met, "returnOnInvestedCapital", "roic")),
                 "current_ratio": as_float(rat.get("currentRatio")),
-                "debt_to_equity": as_float(rat.get("debtEquityRatio")),
-                "pe_ratio": as_float(rat.get("priceEarningsRatio")),
+                "debt_to_equity": as_float(_first(rat, "debtToEquityRatio", "debtEquityRatio")),
+                "pe_ratio": as_float(_first(rat, "priceToEarningsRatio", "priceEarningsRatio")),
                 "ps_ratio": as_float(rat.get("priceToSalesRatio")),
                 "pb_ratio": as_float(rat.get("priceToBookRatio")),
-                "ev_to_ebitda": as_float(met.get("enterpriseValueOverEBITDA")),
-                "peg_ratio": as_float(rat.get("priceEarningsToGrowthRatio")),
-                "dividend_per_share": as_float(met.get("dividendPerShare")),
-                "payout_ratio": as_float(rat.get("payoutRatio")),
+                "ev_to_ebitda": as_float(_first(met, "evToEBITDA", "enterpriseValueOverEBITDA")),
+                "peg_ratio": as_float(
+                    _first(rat, "priceToEarningsGrowthRatio", "priceEarningsToGrowthRatio")
+                ),
+                # In `ratios` on /stable/, not `key-metrics` where it used to be.
+                # In `ratios` on /stable/, not `key-metrics` where it used to
+                # be. Merged rather than `a or b`: a 0.0 dividend is a real
+                # figure and `or` would read it as missing and fall through.
+                # `rat` wins on conflict because it is the current home.
+                "dividend_per_share": as_float(_first({**met, **rat}, "dividendPerShare")),
+                "payout_ratio": as_float(_first(rat, "dividendPayoutRatio", "payoutRatio")),
                 "filing_date": _as_date(row.get("filingDate") or row.get("fillingDate")),
                 "accepted_date": row.get("acceptedDate") or None,
                 "raw": None,
@@ -234,6 +245,15 @@ def merge_statements(
 # symbol. Deliberately not taken from the universe: it must be a constant, or
 # the canary could itself be the odd symbol that triggered the 402.
 CANARY_SYMBOL = "AAPL"
+
+
+def _first(row: dict, *keys: str):
+    """First key present and non-None. Tolerates a provider rename."""
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def _optional(label: str, fetch, *, canary=None) -> list[dict]:

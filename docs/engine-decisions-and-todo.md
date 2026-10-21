@@ -165,6 +165,33 @@ real protection.
 
 ---
 
+## 🔬 WHAT THE PREMIUM UPGRADE FOUND (Oct 21, 2026)
+
+Six more defects, every one of them **hidden by the free tier** rather than
+caused by the upgrade. The pattern from Oct 20 repeated exactly: a paid plan
+removes the loud refusals that were masking quiet bugs underneath.
+
+| # | Defect | Why the free tier hid it |
+|---|--------|--------------------------|
+| 1 | `quotes()` sent a comma list to `/stable/quote`, which returns **HTTP 200 and `[]`**. The batch endpoint is `/stable/batch-quote?symbols=` — note the PLURAL parameter; `symbol` there is a 400. | The free tier answered that exact request with a 402, so the mistake sat behind a plan gate for the whole free-tier period. The upgrade turned a loud refusal into a silent empty result — the more dangerous of the two. A wholly empty BATCH now raises; a single-symbol miss stays tolerated. |
+| 2 | **A 402 does not prove a plan gate.** `/stable/ratios?symbol=BRK.B` answers 402 while `?symbol=AAPL` answers 200, and an unknown symbol answers 200 with `[]`. | On free, `ratios` was genuinely gated, so the inference was accidentally right. `_optional` now confirms against a known-good canary before marking an endpoint unavailable — otherwise one odd symbol NULLs the valuation columns for every remaining symbol under a log line naming the wrong cause. |
+| 3 | **The canonical symbol form is DASH, and two functions disagreed.** FMP `/stable/` returns `BRK-B`/`BF-B`; `to_schwab_symbol` translated only `.` → `/`, so `BRK-B` reached Schwab verbatim and the only two share-class names in the S&P 500 got no option chain. With the D14 gate armed they would have been dropped from the universe over punctuation. Both docstrings asserted the dot form was canonical; both were wrong. | Constituents were plan-gated, so the universe came from the static file and never reached a Schwab chain call for those names. |
+| 4 | **`config/constituents_static.txt` carries the DOT form**, which FMP 402s — so the D29 fallback would have stored `BRK.B` and `enrich_with_liquidity`'s systemic-error abort would have killed the ENTIRE universe build on the first one. | A fallback that worked only while the budget was too exhausted to make the call that broke it. `normalize_symbol` now canonicalises dots to dashes, pinned by a test. |
+| 5 | **Seven ratio field names were still `/api/v3/` spellings.** `priceEarningsRatio` → `priceToEarningsRatio`, `debtEquityRatio` → `debtToEquityRatio`, `payoutRatio` → `dividendPayoutRatio`, `priceEarningsToGrowthRatio` → `priceToEarningsGrowthRatio`, `roic` → `returnOnInvestedCapital`, `enterpriseValueOverEBITDA` → `evToEBITDA`, and `dividendPerShare` moved from `key-metrics` into `ratios`. | `ratios` and `key-metrics` were 402-gated, so the mapping had never been exercised ONCE. The crawl reported success, `unavailable_endpoints` came back empty, and **six of ten valuation columns were silently NULL for every symbol**. `unavailable_endpoints == []` proves the endpoint answered; it says nothing about the answer being read. Now 99.7% populated with real values, pinned by a test that fails if any valuation column comes back NULL from a fixture payload. |
+| 6 | **No retry on transient Schwab errors.** A chain crawl drew 429 on 2 of 433 symbols — a different two each run — and each became a permanent hole in an unbuyable series. | Nothing to do with FMP: this was simply never exercised at 433-symbol scale before. Now 408/429/5xx retry with backoff; 401 deliberately does not, because a stale token is not transient. Each attempt re-takes a limiter slot, so a backoff storm cannot exceed the limit it is backing off from. |
+
+**And one that was not hidden, just wrong:** `v_day_status` counted every row
+for a date, so one failed attempt poisoned that day permanently and no re-run
+could recover it. A timed-out `daily_close` left estimates abandoned and chains
+partial; the re-run succeeded at every step and `day_complete` stayed false.
+Gate 4 starts the D7 clock on the first `day_complete = true`, so a bad first
+night would have meant the clock never started while every step showed green.
+Now judged by each job's LATEST run, with an `attempts` column so a day that
+needed three goes does not look serene. `partial` still fails the day for a
+critical job — 431 of 433 chains is a permanent hole, not a rounding error.
+
+---
+
 ## ⏱ THE ESTIMATE-REVISION CLOCK STARTED 2026-10-21
 
 **Record the date; it cannot be backdated.** D7's edge is the day-over-day diff
@@ -243,6 +270,7 @@ collection database.
 ## 🗒 SESSION NOTES
 - Aug 30 – Sep 3: original build, steps 1–7 complete and live-validated (see CLAUDE.md "Validated API findings" for everything learned). Full detail preserved in the design chat and the prior Claude Code session transcript.
 - Oct 20: loss discovered (unpushed Codespace auto-deleted). D30, D31 adopted. Rebuild package authored: CLAUDE.md, this log v2.0, open-parameters.md, REBUILD_KICKOFF.md.
+- **Oct 21: FMP Premium live; gate 1b CLOSED.** Probe 15/15. Universe from the API (503 + 101 constituents, 433 kept of 518). `fmp_estimates` probed clean, flipped to `is_critical`, and took its **FIRST SNAPSHOT** — **the estimate-revision clock starts 2026-10-21**. Budget 250 → 9,000 (sized from a measured 6,759-call cold start), limiter 300 → 600. D29 free-tier mode retired to a documented fallback. **Six more defects**, five of them hidden by the free tier rather than caused by the upgrade — see "WHAT THE PREMIUM UPGRADE FOUND". Next: gate 3 (VM).
 - Oct 20 (strategy): **D32–D39 adopted.** Sentiment demoted to 10 and Fundamental raised to 30 (D32); cross-sectional ranking (D33); Tier A diversity gate requiring Technical + one of Fundamental/Catalyst (D34); barbell sleeves with a one-way profit ratchet (D35); IV rank selecting the vehicle (D36); pyramiding that never raises initial risk (D37); sector correlation guard (D38); Phase 2 learning-loop guardrails (D39). Six new `[OPEN]` parameters (#32–#37), all validated by the loader so a typo fails at startup, none read by any code yet. No scoring/decision/allocation logic was written — these bind those layers when they are built, and the build map in "What is NOT done" records which decision binds which layer.
 - Oct 20 (later still): **hardening.** Provider-exhausted marker so a spent allowance is discovered once per day rather than once per symbol; live and scratch databases separated by protection class after the integration suite wiped a day of collection. `extrinsicValue` diagnosed as distance-from-the-money and recorded in CLAUDE.md as unusable by construction, not merely imprecise.
 - Oct 20 (later): **gate 1a mostly live, gate 2 live (`64be4fd`).** Schwab token written Oct 20, **expires Oct 27**. Chain fixture diff: zero drift in 47 days. Six defects found and fixed by running against real providers — see "WHAT THE FIRST LIVE RUN FOUND". **The estimate-revision clock remains STOPPED**: `/stable/analyst-estimates` is still 402 on this plan, so no snapshot has ever been taken and D7's revision history has not begun. It starts on FMP upgrade day, and that date must be recorded here. Next: fresh FMP allowance -> re-run the universe to convergence, then gate 3 (VM).
