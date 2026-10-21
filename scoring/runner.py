@@ -26,7 +26,7 @@ import pandas as pd
 
 from core import clock, config, db, settings
 from decision.book import LADDER_STATES, load_book
-from decision.idea_builder import Idea, build_idea
+from decision.idea_builder import Idea, Rejection, build_idea
 from features import catalyst as catalyst_features
 from features import fundamental as fundamental_features
 from features import sentiment as sentiment_features
@@ -44,6 +44,7 @@ __all__ = [
     "record_daily_stats",
     "score_symbol",
     "score_universe",
+    "top_candidates",
 ]
 
 
@@ -359,19 +360,24 @@ IV_SQL = """
 """
 
 
-def build_cards(run: UniverseRun, *, as_of: date) -> list[str]:
-    """Rendered cards for the surfaced ideas (D42), or the reason each refused.
+def build_ideas(run: UniverseRun, *, as_of: date) -> list[Idea | Rejection | str]:
+    """Idea OBJECTS for the surfaced symbols (D42), or why each refused.
+
+    Objects rather than rendered text, because the Shadow Book must log the
+    idea while the digest must render it, and deriving one from the other's
+    string would be parsing nobody should have to write. A plain `str` appears
+    only for a symbol that surfaced with no plan at all.
 
     A rejection is RETURNED, not swallowed. "EXPD: R:R 1.4 below the 3:1 Tier B
     minimum" is the most useful line the engine can print about a symbol it
-    ranked first and then declined — and a silent omission would read as a bug.
+    ranked first and then declined — a silent omission would read as a bug.
     """
     account = settings.shadow_account_value()
     sectors = sectors_by_symbol()
     statuses = config.scoring().promotion.status
     books = {state: load_book(state, account_value=account) for state in LADDER_STATES}
 
-    out: list[str] = []
+    out: list[Idea | Rejection | str] = []
     for item in run.surfaced:
         best = item.best_plan
         if best is None:
@@ -402,10 +408,48 @@ def build_cards(run: UniverseRun, *, as_of: date) -> list[str]:
             iv_history_days=iv.get("history_days"),
             account_value=account,
         )
+        out.append(built)
+    return out
+
+
+def build_cards(run: UniverseRun, *, as_of: date) -> list[str]:
+    """`build_ideas`, rendered. What the digest and the CLI print."""
+    return [render_idea(item) for item in build_ideas(run, as_of=as_of)]
+
+
+def render_idea(item: Idea | Rejection | str) -> str:
+    if isinstance(item, Idea):
+        return item.card()
+    if isinstance(item, Rejection):
+        return f"{item.symbol}: REFUSED at {item.stage} — {item.reason}"
+    return item
+
+
+def top_candidates(run: UniverseRun, limit: int = 5) -> list[dict]:
+    """The closest-ranked symbols, for a zero-plan digest to report (D1/D33).
+
+    Taken from the ranked population rather than the surfaced one: on a day
+    when nothing surfaced, "what came closest" is the only informative thing
+    the engine can say, and it has to come from somewhere other than the empty
+    surfaced list.
+    """
+    ranked = [s for s in run.scored if s.composite is not None]
+    ranked.sort(key=lambda s: (-(s.composite or 0.0), s.symbol))
+    out = []
+    for item in ranked[:limit]:
+        best = item.best_plan
         out.append(
-            built.card()
-            if isinstance(built, Idea)
-            else f"{built.symbol}: REFUSED at {built.stage} — {built.reason}"
+            {
+                "symbol": item.symbol,
+                "composite": item.composite,
+                "percentile": item.percentile,
+                "mask": item.mask,
+                "reason": (
+                    item.tier_reason
+                    if best is not None
+                    else ((item.triggered and "no plan") or "no recipe fired")
+                ),
+            }
         )
     return out
 

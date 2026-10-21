@@ -38,6 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
+from alerts import digest
 from alerts import notify as notifier
 from core import clock, config, db, settings
 from core.budget import BudgetExhausted, DayBudget
@@ -53,6 +54,8 @@ from ingest import (
 )
 from ingest.fmp_estimates import EstimatesPlanBlocked
 from ingest.schwab_client import SchwabTokenError, check_token
+from jobs import scoring_pass
+from shadow_book import outcome_tracker
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +182,44 @@ def build_plan() -> list[Step]:
             lambda: finnhub_news.run(),
             description="rolling 7-day company news (Pillar D corpus)",
         ),
+        # ── derived layers ──────────────────────────────────────────────────
+        # All three NON-CRITICAL, and for a reason that is the inverse of the
+        # snapshot jobs': every one of these is recomputable from data already
+        # stored. A failed scoring pass costs an evening; a failed chain
+        # snapshot costs a day of history nobody can sell back.
+        Step(
+            "scoring_pass",
+            lambda: scoring_pass.run(),
+            depends_on=("schwab_prices",),
+            description="score the universe, rank, log surfaced ideas (D33/D41/D42)",
+        ),
+        Step(
+            "outcome_tracker",
+            lambda: outcome_tracker.run(),
+            depends_on=("schwab_prices",),
+            description="mark open Shadow Book calls against today's bars (D13/D19)",
+        ),
+        Step(
+            "daily_digest",
+            lambda: _send_digest(),
+            # AFTER the tracker, so the digest can report yesterday's outcome
+            # changes alongside today's ideas (D16).
+            depends_on=("outcome_tracker",),
+            description="the post-close digest, on every configured channel (D16)",
+        ),
     ]
+
+
+def _send_digest() -> int:
+    """Render and send the digest from this process's scoring pass.
+
+    Reads the pass in-process rather than re-deriving: the two steps run
+    seconds apart in the same pipeline, and scoring 433 symbols again to render
+    them would double the run for nothing.
+    """
+    result = scoring_pass.latest()
+    digest.run(result.cards, result.candidates, refusals=result.refusals)
+    return len(result.cards) or len(result.candidates)
 
 
 # ── preflight ───────────────────────────────────────────────────────────────

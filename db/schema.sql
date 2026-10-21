@@ -594,6 +594,23 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     pillars_scored          SMALLINT CHECK (pillars_scored IS NULL
                                             OR pillars_scored BETWEEN 0 AND 4),
 
+    -- PROVENANCE: the machinery that produced the projections, so calibration
+    -- can group by it. A lexicon tone scorer ships now and a Claude one
+    -- arrives in Phase 2; they are differently calibrated and averaging their
+    -- readings measures neither. The gates travel too, because a threshold
+    -- change must not silently reinterpret yesterday's calls (as D42 does for
+    -- the daily aggregate). See migration 011.
+    sentiment_scorer        TEXT,
+    gates_in_force          JSONB,
+
+    -- TRACKING. `proj_stop` is frozen at call time, so the stop the tracker
+    -- enforces lives here: it moves to breakeven at TP1 per the trim rules and
+    -- is dividend-adjusted per D19(2). `last_evaluated_on` makes the tracker
+    -- idempotent — re-running a day must not double-count an excursion.
+    current_stop            NUMERIC(18, 6),
+    stop_to_breakeven_on    DATE,
+    last_evaluated_on       DATE,
+
     -- Projections AT TIME OF CALL. Frozen — never updated after insert. The
     -- whole point is measuring reality against what we said we expected.
     proj_entry_low          NUMERIC(18, 6),
@@ -645,6 +662,9 @@ CREATE INDEX IF NOT EXISTS ix_shadow_book_status_recipe
 -- D39 calibration groups by how many pillars a composite rested on (D41).
 CREATE INDEX IF NOT EXISTS ix_shadow_book_pillars
     ON shadow_book (pillars_scored, recipe, called_on DESC);
+-- The outcome tracker's working set: open ideas not yet seen today.
+CREATE INDEX IF NOT EXISTS ix_shadow_book_tracking
+    ON shadow_book (outcome, last_evaluated_on) WHERE outcome = 'open';
 CREATE INDEX IF NOT EXISTS ix_shadow_book_recipe_tier
     ON shadow_book (recipe, tier, called_on DESC);
 

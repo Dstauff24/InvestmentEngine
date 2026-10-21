@@ -34,6 +34,8 @@ A personal investment decision-support engine for a Schwab brokerage account (sw
 - **Risk (D17/D18):** Tier A 2.5% of account per trade; Tier B 0.75%/idea with hybrid monthly budget (4% base at entry, 50% of realized Tier B gains replenish, 6% ceiling, calendar month); max 6 concurrent swings; total open heat ≤10% (active trades only; holds/ETFs excluded, they run on thesis triggers with no hard stops); options defined-risk only, 5%/mo realized-loss budget, 3% max per position; circuit breaker (2 losing weeks or −5% month → Tier B paused, Tier A halved until a winning week). Buckets: ETF 35 / holds 30 / swings 20 / options 10 / cash 5; risk-off (SPY<200MA + VIX>25) → swings 10, options 5, cash 20+. Single name ≤10%, sector ≤30%. All in `config/risk.yaml`.
 - **Dividends (D19):** total-return measurement everywhere; dividend-adjusted stops; no new swing long within 2 days of ex-date; flag short-call assignment risk when extrinsic (use `timeValue`) < dividend × buffer; dividend cut = thesis-review trigger; ETF DRIP on, hold dividends → cash bucket.
 - **Shadow Book (D13):** every surfaced idea (Tier A, Tier B, and discretionary) logged with projections at time of call, tracked to outcome whether or not taken. `shadow_book.symbol` has NO FK to `tickers` (discretionary ideas may be off-universe). North-star metric = expectancy per recipe and tier.
+- **Projections are frozen; the enforced stop is not.** `shadow_book` carries `proj_stop` (what we said at the call, never written again) beside `current_stop` (what the tracker enforces, moved to breakeven at TP1 per the trim rules, lowered by a dividend per D19(2)). A projection that drifted toward the outcome would measure nothing, which is the entire point of D13.
+- **The ambiguous bar resolves PESSIMISTICALLY.** Daily bars carry no intrabar sequence, so a bar touching both stop and target is unresolvable — and the cost is asymmetric: assuming the target came first flatters every result in exactly the case where a real trade was most likely stopped out. `shadow_book/outcome_tracker.py` books the stop, unless the stop is already at breakeven, where TP1 was already paid. `last_evaluated_on` is what makes the daily job safe to re-run.
 - **Alerts (D16, amended Oct 21 2026):** daily email digest, Tier A and Tier B clearly separated, PLUS Telegram as the page channel. `alerts/notify.py` fans out to whatever is configured; `alerts/telegram.py` and `alerts/mailer.py` never raise, sit behind the D27 gate, refuse under pytest, and write one `alerts` row per channel with a namespaced dedupe key. Telegram's token travels in the URL (redact it everywhere) and 4096 chars is a hard limit Telegram rejects rather than truncates (split on line boundaries).
 - **Network consent (D27):** `core/netguard.py`. No live network call without `ALLOW_LIVE_CALLS=1` on the invocation (CLI/cron, never `.env`). Inside pytest the answer is always no, flag or not. The gate sits ahead of the rate limiter and transport in every client. A blocked call is a failed job step, never a silent zero-row success.
 - **Exits:** per-strategy shape enforced by the loader. `swing` has `max_holding_days` (45, [OPEN]); `option` times out at expiration (`max_holding_days` must be null); `hold` exits on thesis triggers only (null). A day-count on options or holds is a hard config error.
@@ -83,9 +85,9 @@ ingest/          fmp_client.py, universe.py, fmp_fundamentals.py, fmp_estimates.
 features/        adjustment.py, iv.py, evidence.py, technical.py, fundamental.py, catalyst.py, sentiment.py
 scoring/         pillars.py, composite.py, runner.py, recipes/{base,pullback,breakout,drift}.py
 decision/        idea_builder.py, tiering.py, risk_manager.py
-shadow_book/     logger.py, outcome_tracker.py, analytics.py
-alerts/          notify.py (the facade), mailer.py, telegram.py, store.py, email_digest.py
-jobs/            daily_close.py, snapshot jobs
+shadow_book/     logger.py, outcome_tracker.py, (later: analytics.py)
+alerts/          notify.py (the facade), mailer.py, telegram.py, store.py, digest.py
+jobs/            daily_close.py, scoring_pass.py, snapshot jobs
 backtest/        (Phase 2)
 scripts/         fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py, telegram_test.py
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)

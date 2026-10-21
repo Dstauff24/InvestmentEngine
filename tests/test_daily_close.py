@@ -64,8 +64,35 @@ def test_fundamentals_run_after_events():
     assert names.index("fmp_events") < names.index("fmp_fundamentals")
 
 
-def test_news_is_last_because_it_is_slowest_and_nothing_depends_on_it():
-    assert build_plan()[-1].name == "finnhub_news"
+def test_news_is_the_last_INGESTION_step():
+    """It is the slowest and nothing ingested depends on it.
+
+    No longer the last step overall: the derived layers (scoring, tracking,
+    digest) follow every ingestion step, because they read what was ingested.
+    """
+    names = [s.name for s in build_plan()]
+    derived = {"scoring_pass", "outcome_tracker", "daily_digest"}
+    ingestion = [n for n in names if n not in derived]
+    assert ingestion[-1] == "finnhub_news"
+
+
+def test_the_derived_layers_come_after_all_ingestion_and_in_order():
+    """The digest must run AFTER the tracker (D16): it reports yesterday's
+    outcome changes alongside today's ideas."""
+    names = [s.name for s in build_plan()]
+    derived = {"scoring_pass", "outcome_tracker", "daily_digest"}
+    first_derived = min(names.index(n) for n in derived)
+    assert all(names.index(n) >= first_derived for n in derived)
+    assert names.index("outcome_tracker") < names.index("daily_digest")
+
+
+def test_the_derived_layers_are_all_non_critical():
+    """The inverse of the snapshot jobs' reason: every one is recomputable
+    from data already stored. A failed scoring pass costs an evening; a failed
+    chain snapshot costs a day of history nobody can sell back."""
+    plan = {s.name: s for s in build_plan()}
+    for name in ("scoring_pass", "outcome_tracker", "daily_digest"):
+        assert plan[name].critical is False, f"{name} must not gate the day"
 
 
 def test_only_estimates_declares_a_known_gap():

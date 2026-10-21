@@ -1,0 +1,268 @@
+"""The daily digest (D1/D16/D41/D42). Fixtures only — no DB, no network.
+
+The zero-plan shape is the one that matters: the engine saying "nothing today"
+is edge source #1 (D1), and the digest has to read like a decision.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+from alerts.digest import DigestContent, render
+
+DAY = date(2026, 10, 21)
+
+
+def content(**kw) -> DigestContent:
+    base = {
+        "session_date": DAY,
+        "cards": [],
+        "refusals": [],
+        "candidates": [],
+        "stats": None,
+        "closed": [],
+        "open_calls": [],
+    }
+    base.update(kw)
+    return DigestContent(**base)
+
+
+STATS = {
+    "symbols_scored": 432,
+    "symbols_abstained": 1,
+    "tier_a_count": 15,
+    "tier_b_count": 175,
+    "surfaced_count": 5,
+    "not_surfaced_count": 185,
+    "mask_histogram": {"2": 263, "3": 137, "4": 32},
+    "composite_min": 18.68,
+    "composite_median": 54.05,
+    "composite_p90": 74.20,
+    "composite_max": 92.92,
+}
+
+CANDIDATES = [
+    {
+        "symbol": "EXPD",
+        "composite": 92.9,
+        "percentile": 100.0,
+        "mask": "A,B",
+        "reason": "no recipe fired",
+    },
+    {
+        "symbol": "MPC",
+        "composite": 92.0,
+        "percentile": 100.0,
+        "mask": "A,B",
+        "reason": "no recipe fired",
+    },
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The zero-plan shape is NOT a fallback
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_zero_plan_day_says_nothing_today_in_the_subject():
+    subject, _ = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "nothing today" in subject
+
+
+def test_the_zero_plan_body_frames_selectivity_as_the_engine_working():
+    """D1: selectivity is edge source #1. A digest that said so apologetically
+    would train the reader to treat silence as a failure."""
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "NOTHING TODAY" in body
+    assert "the engine working, not failing" in body
+    assert "edge source #1" in body
+
+
+def test_the_zero_plan_body_reports_what_was_looked_at():
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "Scored 432 symbols" in body
+    assert "Tier A 15" in body and "Tier B 175" in body
+    assert "aggregated 185 (D42)" in body
+
+
+def test_the_zero_plan_body_reports_the_composite_distribution():
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "median 54.05" in body
+    assert "max 92.92" in body
+
+
+def test_the_zero_plan_body_reports_the_pillar_mask_histogram():
+    """D41: a composite built on two pillars is not the claim four would be,
+    and a reader comparing days needs to know which they are looking at."""
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "evidence depth (D41)" in body
+    assert "2 pillar(s): 263" in body
+    assert "not the claim four would be" in body
+
+
+def test_the_zero_plan_body_names_the_closest_candidates():
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "CLOSEST 2" in body
+    assert "EXPD" in body and "p100" in body
+    assert "[A,B]" in body
+
+
+def test_the_zero_plan_body_states_the_gates_in_force():
+    """So a reader can judge the near-misses against the bar they missed."""
+    _, body = render(content(stats=STATS, candidates=CANDIDATES))
+    assert "Gates in force" in body
+    assert "Tier A composite >=" in body
+
+
+def test_refusals_are_reported_separately_from_candidates():
+    """A symbol that ranked top and was then declined is the most informative
+    line available on a zero-plan day."""
+    _, body = render(
+        content(
+            stats=STATS,
+            candidates=CANDIDATES,
+            refusals=["EXPD: REFUSED at risk_reward — R:R 1.4 below 3:1"],
+        )
+    )
+    assert "RANKED BUT NOT ACTIONABLE" in body
+    assert "R:R 1.4 below 3:1" in body
+
+
+def test_a_zero_plan_digest_still_renders_without_stats():
+    """A first-ever run has no aggregate row yet; the digest must not break."""
+    _, body = render(content())
+    assert "NOTHING TODAY" in body
+    assert body.strip()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The idea shape
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_day_with_ideas_leads_with_them():
+    subject, body = render(content(cards=["AAPL  Tier A  pullback_to_trend\n  entry 1-2"]))
+    assert "1 idea(s)" in subject
+    assert body.startswith("IDEAS FOR")
+    assert "AAPL" in body
+
+
+def test_a_refusal_in_cards_would_have_mis_shaped_the_digest():
+    """The bug this separation fixed: `has_ideas` decides the shape, so a
+    refusal placed in `cards` rendered a zero-plan day as an IDEAS digest whose
+    ideas all said there were none."""
+    assert content(cards=[], refusals=["X: no plan"]).has_ideas is False
+    assert content(cards=["a real card"]).has_ideas is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Yesterday's news
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_closed_ideas_are_reported_with_their_outcome():
+    """A digest that only showed new ideas would never tell the reader that
+    last week's idea just stopped out — the half that costs money."""
+    closed = [
+        {
+            "symbol": "AAPL",
+            "recipe": "pullback_to_trend",
+            "tier": "A",
+            "outcome": "stopped",
+            "r_multiple": -1.0,
+            "return_pct": -5.2,
+            "days_held": 4,
+            "actual_entry": 100.0,
+            "actual_exit": 95.0,
+            "hit_target_1": False,
+            "hit_target_2": False,
+        }
+    ]
+    _, body = render(content(stats=STATS, closed=closed))
+    assert "CLOSED SINCE YESTERDAY" in body
+    assert "STOPPED" in body
+    assert "-1.00R" in body
+    assert "-5.2%" in body
+
+
+def test_a_win_is_reported_with_a_positive_r():
+    closed = [
+        {
+            "symbol": "MSFT",
+            "recipe": "base_breakout",
+            "tier": "A",
+            "outcome": "target_2",
+            "r_multiple": 3.4,
+            "return_pct": 12.1,
+            "days_held": 9,
+            "actual_entry": 100.0,
+            "actual_exit": 112.0,
+            "hit_target_1": True,
+            "hit_target_2": True,
+        }
+    ]
+    _, body = render(content(stats=STATS, closed=closed))
+    assert "+3.40R" in body
+
+
+def test_open_calls_are_listed_with_their_current_stop():
+    open_calls = [
+        {
+            "symbol": "NVDA",
+            "recipe": "pullback_to_trend",
+            "tier": "B",
+            "called_on": date(2026, 10, 15),
+            "proj_target_1": 110.0,
+            "current_stop": 100.0,
+            "hit_target_1": True,
+            "stop_to_breakeven_on": date(2026, 10, 18),
+        }
+    ]
+    _, body = render(content(stats=STATS, open_calls=open_calls))
+    assert "STILL OPEN (1)" in body
+    assert "NVDA" in body
+    assert "stop at breakeven" in body, "D18 zeroed the heat; the reader needs to know"
+
+
+def test_a_digest_with_ideas_also_carries_yesterdays_outcomes():
+    closed = [
+        {
+            "symbol": "AAPL",
+            "recipe": "pullback_to_trend",
+            "tier": "A",
+            "outcome": "timeout",
+            "r_multiple": 0.2,
+            "return_pct": 1.0,
+            "days_held": 15,
+            "actual_entry": 100.0,
+            "actual_exit": 101.0,
+            "hit_target_1": False,
+            "hit_target_2": False,
+        }
+    ]
+    _, body = render(content(cards=["a card"], closed=closed))
+    assert body.startswith("IDEAS FOR")
+    assert "CLOSED SINCE YESTERDAY" in body
+
+
+def test_a_missing_number_renders_as_a_dash_not_an_error():
+    open_calls = [
+        {
+            "symbol": "X",
+            "recipe": "r",
+            "tier": "A",
+            "called_on": DAY,
+            "proj_target_1": None,
+            "current_stop": None,
+            "hit_target_1": None,
+            "stop_to_breakeven_on": None,
+        }
+    ]
+    _, body = render(content(stats=STATS, open_calls=open_calls))
+    assert "stop —" in body
+
+
+def test_the_body_always_ends_with_exactly_one_newline():
+    for kw in ({}, {"cards": ["a"]}, {"stats": STATS}):
+        _, body = render(content(**kw))
+        assert body.endswith("\n") and not body.endswith("\n\n")
