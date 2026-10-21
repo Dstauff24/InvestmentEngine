@@ -36,7 +36,8 @@ shadow_book/   logger.py, outcome_tracker.py, analytics.py
 alerts/        mailer.py, email_digest.py
 jobs/          daily_close.py
 backtest/      (Phase 2)
-scripts/       fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py
+scripts/       fmp_probe.py, schwab_auth.py, sync_token.sh, backup_db.sh, token_expiry_check.py,
+               telegram_test.py
 tests/         fixture-driven; no network, no DB by default
 docs/          decision log, open parameters, rebuild kickoff
 data/          runtime artifacts (Schwab token, dumps, logs) — gitignored
@@ -115,7 +116,8 @@ so lint catches syntax the VM could not run, but only an explicit interpreter
 keeps the installed wheels identical to what production resolves.
 
 ```bash
-git clone https://github.com/Dstauff24/InvestmentEngine ~/engine && cd ~/engine
+git clone https://github.com/Dstauff24/InvestmentEngine ~/InvestmentEngine
+cd ~/InvestmentEngine
 /usr/bin/python3 -m venv .venv            # distro Python, not a newer one on PATH
 source .venv/bin/activate
 python --version                          # confirm it is the distro version
@@ -228,8 +230,28 @@ makes this a weekly chore rather than one-time setup.
 # on the laptop, with SCHWAB_APP_KEY / SCHWAB_APP_SECRET / SCHWAB_CALLBACK_URL set
 python scripts/schwab_auth.py            # writes data/schwab_token.json (chmod 600)
 python scripts/schwab_auth.py --status   # token age and time remaining
+./scripts/sync_token.sh --dry-run        # check the server, send nothing
 ./scripts/sync_token.sh                  # copy it to the VM
 ```
+
+### Pointing sync_token.sh at the VM
+
+Three `.env` settings, documented in [.env.example](.env.example) and **not
+committed** — this is the address of a box holding a live brokerage token, and a
+repo is a poor place to publish where that lives:
+
+| Setting | Meaning |
+|---|---|
+| `ENGINE_HOST` | `user@host`. Required; the script refuses without it. |
+| `ENGINE_PATH` | repo path on the VM. Defaults to `/home/engine/InvestmentEngine`. |
+| `ENGINE_SSH_KEY` | private key to use. Optional — blank uses your agent or `~/.ssh/config`. A leading `~` is expanded. |
+
+`--dry-run` opens a **real** connection and checks that `$ENGINE_PATH` is a git
+repo with a `data/` directory before it will send anything, then sends nothing.
+Both checks run *before* the token is read, because a wrong `ENGINE_PATH` would
+otherwise scp a brokerage credential into an arbitrary directory on the server.
+`BatchMode=yes` throughout, so a missing key fails instead of hanging on a
+password prompt.
 
 The script picks its flow from the callback URL:
 
@@ -309,7 +331,7 @@ The orchestrator refuses to mark a day complete if a critical snapshot job faile
 # ── Investment Decision Engine ────────────────────────────────────────────────
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
-ENGINE=/home/engine/engine
+ENGINE=/home/engine/InvestmentEngine
 MAILTO=you@example.com
 
 # Post-close pipeline. 16:30 ET Mon-Fri. ONE entry for the whole pipeline:

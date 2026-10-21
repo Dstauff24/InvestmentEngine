@@ -244,3 +244,95 @@ def test_sync_token_refuses_an_unconfigured_host():
     script = (SCRIPT.parent / "sync_token.sh").read_text()
     assert "REPLACE_ME" in script
     assert "set -euo pipefail" in script
+
+
+# The VM's address is configuration, not code: it names a box holding a live
+# brokerage token, so it belongs in gitignored .env rather than in the repo.
+
+
+def shell_code(path) -> str:
+    """A shell script with whole-line comments removed.
+
+    Needed because a prohibited construct and the COMMENT explaining why it is
+    prohibited look identical to a substring search. The first version of the
+    test below failed on this file's own "rather than `source .env`" comment —
+    the same trap that once made a schema scanner report a view called `may`.
+    """
+    return "\n".join(
+        line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_sync_token_reads_its_target_from_env_not_a_hardcoded_host():
+    script = (SCRIPT.parent / "sync_token.sh").read_text()
+    for key in ("ENGINE_HOST", "ENGINE_PATH", "ENGINE_SSH_KEY"):
+        assert key in script, f"{key} should be read from the environment"
+    # ...and read with a targeted grep, never by sourcing .env, which would
+    # execute it as bash (SEC_EDGAR_USER_AGENT contains parentheses).
+    code = shell_code(SCRIPT.parent / "sync_token.sh")
+    assert "read_env" in code
+    assert "source .env" not in code
+    assert ". .env" not in code
+
+
+def test_no_ip_address_is_committed_anywhere():
+    """A literal host in the repo is the thing these settings exist to avoid."""
+    import re
+
+    repo = SCRIPT.parent.parent
+    # Any dotted quad that is not an example/placeholder range.
+    quad = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    allowed = {
+        "127.0.0.1",  # the Schwab callback
+        "0.0.0.0",
+        "255.255.255.255",
+        "1.5.1",  # version strings caught by the pattern
+    }
+    offenders = []
+    for path in sorted(repo.rglob("*")):
+        if not path.is_file() or path.name == ".env":
+            continue
+        if any(part in {".git", ".venv", "__pycache__", "data"} for part in path.parts):
+            continue
+        if path.suffix not in {".py", ".sh", ".md", ".yaml", ".yml", ".toml", ".example", ".txt"}:
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for match in quad.findall(text):
+            if match in allowed or match.startswith(("192.0.2.", "198.51.100.", "203.0.113.")):
+                continue  # RFC 5737 documentation ranges are fine in examples
+            offenders.append(f"{path.relative_to(repo)}: {match}")
+    assert offenders == [], f"a real-looking IP is committed: {offenders}"
+
+
+def test_sync_token_verifies_the_remote_path_before_sending_a_credential():
+    """A wrong ENGINE_PATH would scp a brokerage token somewhere arbitrary."""
+    script = (SCRIPT.parent / "sync_token.sh").read_text()
+    check = script.index("checking the remote repo and data directory")
+    send = script.index("scp -q")
+    assert check < send, "verify the destination BEFORE transferring the token"
+    assert "no-repo" in script and "no-data-dir" in script
+
+
+def test_sync_token_uses_batch_mode_so_it_fails_instead_of_hanging():
+    script = (SCRIPT.parent / "sync_token.sh").read_text()
+    assert "BatchMode=yes" in script
+    assert "ConnectTimeout" in script
+
+
+def test_sync_token_dry_run_sends_nothing():
+    """--dry-run must reach the server but never transfer."""
+    script = (SCRIPT.parent / "sync_token.sh").read_text()
+    dry = script.index("[dry-run] would scp")
+    send = script.index("scp -q")
+    assert dry < send, "the dry-run branch must exit before the real scp"
+    assert "nothing was sent" in script
+
+
+def test_sync_token_expands_a_tilde_in_the_key_path():
+    """`~/.ssh/engine_vm` from .env is a literal tilde, not $HOME."""
+    script = (SCRIPT.parent / "sync_token.sh").read_text()
+    assert "ENGINE_SSH_KEY/#" in script, "a leading ~ must be expanded"
+    assert "IdentitiesOnly=yes" in script
