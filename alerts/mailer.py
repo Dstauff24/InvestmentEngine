@@ -17,12 +17,10 @@ from __future__ import annotations
 
 import logging
 import smtplib
-from datetime import date
 from email.message import EmailMessage
 
-import psycopg
-
-from core import clock, db, settings
+from alerts import store
+from core import settings
 
 log = logging.getLogger(__name__)
 
@@ -81,40 +79,20 @@ def send(
 def _record(
     subject: str, body: str, alert_type: str, severity: str, dedupe_key: str | None
 ) -> int | None:
-    """Insert a pending alert row. Returns None if this alert already went out."""
-    try:
-        with db.connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO alerts (alert_type, severity, subject, body, channel,
-                                    status, dedupe_key)
-                VALUES (%s, %s, %s, %s, 'email', 'pending', %s)
-                ON CONFLICT (dedupe_key) DO NOTHING
-                RETURNING id
-                """,
-                (alert_type, severity, subject, body, dedupe_key),
-            )
-            row = cur.fetchone()
-            return row["id"] if row else None
-    except psycopg.Error as exc:
-        # A database that is down is exactly when we most want the email to go
-        # out, so fall through and send it unrecorded.
-        log.error("could not record alert (sending anyway): %s", exc)
-        return -1
+    """Insert a pending alert row. Returns None if this alert already went out.
+
+    Thin wrapper over `alerts.store`, which Telegram shares. The dedupe key is
+    namespaced to the email channel so the same problem can also page over
+    Telegram without one suppressing the other.
+    """
+    return store.record(
+        subject, body, alert_type, severity, store.channel_key(dedupe_key, "email"), "email"
+    )
 
 
 def _mark(alert_id: int | None, status: str, error: str | None) -> None:
-    if not alert_id or alert_id < 0:
-        return
-    try:
-        db.execute(
-            "UPDATE alerts SET status = %s, sent_at = now(), error = %s WHERE id = %s",
-            (status, error, alert_id),
-        )
-    except psycopg.Error as exc:
-        log.error("could not update alert %s: %s", alert_id, exc)
+    store.mark(alert_id, status, error)
 
 
-def job_failure_key(job_name: str, day: date | None = None) -> str:
-    """A dedupe key stable for one job on one trading day."""
-    return f"job_failure:{job_name}:{day or clock.session_date()}"
+# Re-exported: callers have always imported it from here.
+job_failure_key = store.job_failure_key

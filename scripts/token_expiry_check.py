@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from alerts import mailer
+from alerts import notify as notifier
 from core import settings
 from ingest.schwab_client import (
     REFRESH_TOKEN_LIFETIME,
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(subject)
         if not args.check:
-            mailer.send(
+            notifier.notify(
                 subject,
                 body,
                 alert_type="token_expiry",
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.check:
         # One reminder per day, not one per cron fire.
-        mailer.send(
+        notifier.notify(
             subject,
             body,
             alert_type="token_expiry",

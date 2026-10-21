@@ -229,6 +229,28 @@ def alert_email_onfail() -> str:
     return get("ALERT_EMAIL_ONFAIL") or alert_email_to()
 
 
+# ── Telegram (D16, amended 2026-10-21) ──────────────────────────────────────
+# The channel that reaches a phone. Email is the digest; Telegram is the page.
+
+
+def telegram_bot_token() -> str:
+    return require("TELEGRAM_BOT_TOKEN")
+
+
+def telegram_chat_id() -> str:
+    return require("TELEGRAM_CHAT_ID")
+
+
+def telegram_configured() -> bool:
+    """Both values present and non-empty.
+
+    Checked rather than assumed so `alerts/notify.py` can fan out to whatever
+    is configured instead of failing where Telegram was never set up — a dev
+    box, or a VM before the token is written.
+    """
+    return bool(get("TELEGRAM_BOT_TOKEN") and get("TELEGRAM_CHAT_ID"))
+
+
 # ── Backups (D20) ───────────────────────────────────────────────────────────
 # scripts/backup_db.sh parses .env itself (it is bash and must not source the
 # file); these exist for any Python that needs the same values.

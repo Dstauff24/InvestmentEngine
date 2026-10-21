@@ -682,7 +682,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     body       TEXT,
     payload    JSONB,
 
-    channel    TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('email', 'log')),
+    channel    TEXT NOT NULL DEFAULT 'email' CHECK (channel IN ('email', 'log', 'telegram')),
     status     TEXT NOT NULL DEFAULT 'pending'
                CHECK (status IN ('pending', 'sent', 'failed', 'suppressed')),
     sent_at    TIMESTAMPTZ,

@@ -98,8 +98,38 @@ def test_the_restore_procedure_is_documented_with_the_timescale_pair():
     assert "db.init --check" in script
 
 
-def test_it_says_a_local_only_dump_is_not_a_backup():
-    assert "not a backup" in BACKUP.read_text()
+def test_no_bucket_keeps_local_dumps_and_does_not_fail():
+    """With no object store configured, local dumps + retention is a SUPPORTED mode.
+
+    The droplet takes provider-level snapshots as the outer layer, so local
+    dumps are the fast-restore tier rather than the only copy. Failing the
+    nightly job because a bucket is absent would turn a deliberate
+    configuration into a red cron mail every morning.
+
+    This test replaces one that asserted the string "not a backup" was present.
+    That assertion passed by ACCIDENT after the warning was reworded — it was
+    matching an unrelated comment about hypertables further down the file, so a
+    test named for the local-only warning was checking nothing to do with it.
+    """
+    script = BACKUP.read_text()
+
+    # The no-bucket branch must not bail out.
+    branch = script.split("elif [[ $UPLOAD -eq 1 ]]; then", 1)[1].split("\nfi", 1)[0]
+    assert "exit 1" not in branch, "an absent bucket must not fail the nightly job"
+    assert "retention" in branch.lower(), "the branch should say retention still applies"
+
+    # ...and the local prune must sit OUTSIDE the upload conditional, or dumps
+    # would accumulate for ever in exactly the configuration that keeps them.
+    prune = script.index("pruning local dumps older than")
+    upload_block_end = script.index("elif [[ $UPLOAD -eq 1 ]]; then")
+    assert prune > upload_block_end, "local pruning must not be nested in the S3 branch"
+
+
+def test_the_hypertable_check_refuses_an_incomplete_dump():
+    """The other place the script talks about what is not a backup."""
+    script = BACKUP.read_text()
+    assert "is not a backup of THIS" in script
+    assert "refusing to upload or prune" in script
 
 
 def test_it_uses_strict_bash():
@@ -179,7 +209,7 @@ def test_check_mode_sends_no_email(tmp_path, monkeypatch):
 
     sent = []
     monkeypatch.setattr(settings, "schwab_token_path", lambda: tmp_path / "nope.json")
-    monkeypatch.setattr(token_expiry_check.mailer, "send", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(token_expiry_check.notifier, "notify", lambda *a, **k: sent.append(a))
     token_expiry_check.main(["--check"])
     assert sent == []
 
@@ -191,8 +221,8 @@ def test_the_message_explains_that_a_missed_snapshot_is_permanent(tmp_path, monk
     captured = {}
     monkeypatch.setattr(settings, "schwab_token_path", lambda: tmp_path / "nope.json")
     monkeypatch.setattr(
-        token_expiry_check.mailer,
-        "send",
+        token_expiry_check.notifier,
+        "notify",
         lambda subject, body, **k: captured.update(subject=subject, body=body) or True,
     )
     token_expiry_check.main([])
