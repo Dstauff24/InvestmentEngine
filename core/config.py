@@ -878,6 +878,45 @@ class FmpBudget(Base):
         return self
 
 
+class EdgarBudget(Base):
+    """D39: SEC EDGAR is a provider like any other, with a runaway-loop guard."""
+
+    daily_call_budget: PositiveInt  # [OPEN] #48
+    lookback_days: PositiveInt
+
+
+class InsiderCluster(Base):
+    """D39: N distinct insiders buying on the open market within D days."""
+
+    min_distinct_insiders: PositiveInt  # [OPEN] #45
+    window_days: PositiveInt  # [OPEN] #46
+    min_aggregate_usd: float  # [OPEN] #47
+    # Locked by the decision rather than open: the code filter IS the
+    # definition of "open-market purchase". 'A' is an award, 'M' an option
+    # exercise, 'F' tax withholding — counting those measures a compensation
+    # schedule rather than an opinion.
+    purchase_code: Literal["P"]
+    exclude_derivatives: bool
+
+    @model_validator(mode="after")
+    def _a_cluster_needs_more_than_one_person(self):
+        if self.min_distinct_insiders < 2:
+            raise ValueError(
+                f"insider_cluster.min_distinct_insiders is {self.min_distinct_insiders}; "
+                f"a 'cluster' of one is just a purchase, and the whole point of the "
+                f"rule is that several people acted independently"
+            )
+        if self.min_aggregate_usd < 0:
+            raise ValueError("insider_cluster.min_aggregate_usd cannot be negative")
+        if not self.exclude_derivatives:
+            raise ValueError(
+                "insider_cluster.exclude_derivatives cannot be false: a derivative "
+                "row is an option grant or exercise, which is compensation rather "
+                "than a conviction purchase (D39)"
+            )
+        return self
+
+
 class UniverseConfig(Base):
     version: PositiveInt
     sources: UniverseSources
@@ -889,6 +928,8 @@ class UniverseConfig(Base):
     events: EventsScope
     news: NewsScope
     fmp: FmpBudget
+    edgar: EdgarBudget
+    insider_cluster: InsiderCluster
 
     @model_validator(mode="after")
     def _scopes_are_mutually_coherent(self):

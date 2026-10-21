@@ -752,6 +752,83 @@ CREATE INDEX IF NOT EXISTS ix_api_budget_date ON api_budget (session_date DESC);
 
 
 -- ============================================================================
+-- 12b. INSIDER TRANSACTIONS  (relational)  — SEC Form 4, Pillar C (D39)
+-- ============================================================================
+--
+-- POINT-IN-TIME HONESTY IS THE WHOLE DESIGN. A Form 4 becomes known to the
+-- market when the SEC ACCEPTS it, not when the trade happened, and the two can
+-- differ by two business days. Keying a read or a backtest on
+-- `transaction_date` would let it "see" a purchase up to two days before anyone
+-- could act on it — the lookahead that makes a strategy look profitable and
+-- then lose money live. So both timestamps are stored and every as_of read
+-- keys on `filed_at`.
+--
+-- NOT a hypertable: D20 fixes that list at four, and filings are sparse.
+
+CREATE TABLE IF NOT EXISTS insider_transactions (
+    accession_number   TEXT NOT NULL,
+    txn_index          INTEGER NOT NULL,
+    symbol             TEXT NOT NULL REFERENCES tickers (symbol),
+    issuer_cik         TEXT,
+
+    -- The knowledge moment. NOT NULL on purpose: a row whose filing time is
+    -- unknown cannot be read point-in-time, so it must not be stored at all.
+    filed_at           TIMESTAMPTZ NOT NULL,
+    filed_session      DATE NOT NULL,
+    transaction_date   DATE,
+
+    insider_cik        TEXT,
+    insider_name       TEXT,
+    insider_title      TEXT,
+    is_director        BOOLEAN,
+    is_officer         BOOLEAN,
+    is_ten_percent_owner BOOLEAN,
+
+    -- SEC transaction codes. 'P' is an OPEN-MARKET PURCHASE, the only code the
+    -- cluster rule counts: 'A' is a grant or award, 'M' an option exercise,
+    -- 'F' shares withheld for tax. Treating those as conviction buying is the
+    -- classic way to build an insider signal that measures compensation
+    -- schedules instead of opinion. Stored unfiltered so the rule can change
+    -- in config without a re-fetch.
+    transaction_code   TEXT,
+    acquired_disposed  TEXT CHECK (acquired_disposed IS NULL
+                                   OR acquired_disposed IN ('A', 'D')),
+    shares             NUMERIC(20, 4),
+    price_per_share    NUMERIC(18, 6),
+    value_usd          NUMERIC(20, 2),
+    shares_owned_after NUMERIC(20, 4),
+
+    -- A 10b5-1 plan sale was scheduled months earlier and carries no opinion
+    -- about today. Recorded so SALE context can discount it; purchases under a
+    -- plan are rare but equally uninformative.
+    is_10b5_1          BOOLEAN,
+
+    security_title     TEXT,
+    is_derivative      BOOLEAN NOT NULL DEFAULT FALSE,
+    source             TEXT NOT NULL DEFAULT 'sec_edgar',
+    ingested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT pk_insider_transactions PRIMARY KEY (accession_number, txn_index)
+);
+
+-- The cluster query: one symbol, purchases, within a rolling window of FILING
+-- time. Ordered by filed_at so the window scan is a range scan.
+CREATE INDEX IF NOT EXISTS ix_insider_txn_symbol_filed
+    ON insider_transactions (symbol, filed_at DESC);
+CREATE INDEX IF NOT EXISTS ix_insider_txn_purchases
+    ON insider_transactions (symbol, filed_session DESC)
+    WHERE transaction_code = 'P' AND NOT is_derivative;
+
+COMMENT ON COLUMN insider_transactions.filed_at IS
+    'When the SEC ACCEPTED the filing — the moment the market could know. '
+    'Every as_of read and every backtest keys on this, never on '
+    'transaction_date, which can precede it by two business days.';
+COMMENT ON COLUMN insider_transactions.transaction_date IS
+    'When the insider traded. DESCRIPTIVE ONLY — keying a read on this leaks '
+    'information nobody had yet.';
+
+
+-- ============================================================================
 -- 13. JOB RUNS  (relational)  — the audit trail every job writes to
 -- ============================================================================
 

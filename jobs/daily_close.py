@@ -39,10 +39,11 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from alerts import notify as notifier
-from core import clock, config, db
+from core import clock, config, db, settings
 from core.budget import BudgetExhausted, DayBudget
 from core.jobs import clear_stale_runs, day_is_complete, failed_critical_jobs, job_run
 from ingest import (
+    edgar_insiders,
     finnhub_news,
     fmp_estimates,
     fmp_events,
@@ -164,6 +165,16 @@ def build_plan() -> list[Step]:
             description="quarterly financials + ratios, stale symbols only",
         ),
         Step(
+            "edgar_insiders",
+            lambda: edgar_insiders.run(),
+            # NON-CRITICAL, and the reason is the opposite of the chain jobs':
+            # EDGAR filings are permanent public records, re-fetchable at any
+            # time, so a failure costs FRESHNESS rather than history. The
+            # snapshot jobs are critical precisely because their data cannot be
+            # bought back.
+            description="Form 4 insider transactions (Pillar C, point-in-time)",
+        ),
+        Step(
             "finnhub_news",
             lambda: finnhub_news.run(),
             description="rolling 7-day company news (Pillar D corpus)",
@@ -215,6 +226,15 @@ def preflight(day: date) -> tuple[list[str], list[str]]:
     except SchwabTokenError as exc:
         skips.append(f"schwab: {exc}")
 
+    # EDGAR needs a declared contact address before it may be called at all.
+    # An expected skip, not an error: it is a state we know about, and mailing
+    # nightly about it would train the operator to ignore the alert that
+    # matters. Scoped to `edgar` so it cannot skip another provider's steps.
+    try:
+        settings.sec_edgar_user_agent()
+    except settings.SettingsError as exc:
+        skips.append(f"edgar: {exc}")
+
     budget = DayBudget.for_fmp()
     remaining = budget.remaining(day)
     if remaining == 0:
@@ -236,8 +256,20 @@ def preflight(day: date) -> tuple[list[str], list[str]]:
 
 
 def run_pipeline(
-    *, only: list[str] | None = None, skip_schwab: bool = False, day: date | None = None
+    *,
+    only: list[str] | None = None,
+    unprovisioned: frozenset[str] = frozenset(),
+    day: date | None = None,
 ) -> RunReport:
+    """Run the plan. `unprovisioned` names PROVIDERS whose steps to skip.
+
+    A set of provider names, not a boolean. The previous signature took
+    `skip_schwab=bool(expected_skips)`, which worked only while Schwab was the
+    only provider that could be unprovisioned: adding EDGAR meant an
+    unconfigured SEC User-Agent would set that flag and skip the SACRED chain
+    and IV jobs, failing the day over an unrelated provider. Step names are
+    `provider_thing`, so the prefix is the provider.
+    """
     day = day or clock.session_date()
     report = RunReport(session_date=day)
     plan = build_plan()
@@ -246,8 +278,11 @@ def run_pipeline(
 
     succeeded: set[str] = set()
     for step in plan:
-        if skip_schwab and step.name.startswith("schwab"):
-            report.results.append(StepResult(step.name, "skipped", "Schwab is not provisioned"))
+        provider = step.name.split("_", 1)[0]
+        if provider in unprovisioned:
+            report.results.append(
+                StepResult(step.name, "skipped", f"{provider} is not provisioned")
+            )
             continue
 
         unmet = [dep for dep in step.depends_on if dep not in succeeded]
@@ -408,7 +443,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     with job_run(JOB_NAME, session_date=day, triggered_by="cron") as job:
-        report = run_pipeline(only=args.only, skip_schwab=bool(expected_skips), day=day)
+        # Each skip line is "provider: detail", so the provider names come
+        # straight from preflight rather than being inferred from a count.
+        unprovisioned = frozenset(s.split(":", 1)[0].strip() for s in expected_skips)
+        report = run_pipeline(only=args.only, unprovisioned=unprovisioned, day=day)
         report.expected_skips = expected_skips
 
         job.add_rows(sum(1 for r in report.results if r.status == "success"))

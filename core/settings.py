@@ -229,6 +229,52 @@ def alert_email_onfail() -> str:
     return get("ALERT_EMAIL_ONFAIL") or alert_email_to()
 
 
+# ── SEC EDGAR (D39: insider clusters) ───────────────────────────────────────
+# The SEC BLOCKS anonymous traffic. Their guidance asks for a descriptive
+# User-Agent carrying a contact address, and for no more than ~10 requests a
+# second. Both are conditions of access, not suggestions: ignoring them gets
+# the IP blocked, and the engine then loses a free data source for a while.
+
+
+EDGAR_PLACEHOLDER_MARKERS = ("you@example.com", "CHANGE_ME", "example.com")
+
+
+def sec_edgar_user_agent() -> str:
+    """A descriptive UA with a real contact address, or a hard error.
+
+    The placeholder from `.env.example` is REFUSED rather than sent. Sending
+    `you@example.com` to the SEC is worse than sending nothing: it satisfies
+    the format while giving them no way to reach us, which is precisely the
+    anonymous traffic the rule exists to stop.
+    """
+    value = require("SEC_EDGAR_USER_AGENT").strip()
+    if any(marker in value for marker in EDGAR_PLACEHOLDER_MARKERS):
+        raise SettingsError(
+            f"SEC_EDGAR_USER_AGENT is still the example value ({value!r}). The SEC "
+            f"asks for a real contact address; put yours in .env. Sending the "
+            f"placeholder satisfies the format while giving them no way to reach "
+            f"us, which is the anonymous traffic the rule exists to stop."
+        )
+    if "@" not in value:
+        raise SettingsError(
+            f"SEC_EDGAR_USER_AGENT ({value!r}) has no contact address. Use the "
+            f"form 'AppName/0.1 (you@yourdomain.com)'."
+        )
+    return value
+
+
+def sec_edgar_rate_limit() -> int:
+    """Requests per SECOND. The limiter uses a one-second window for this.
+
+    Defaults to 5, half the SEC's ~10/s guidance. Deliberately expressed per
+    second rather than per minute like the other providers: a 300/minute
+    sliding window would happily allow all 300 inside one second, which breaks
+    the only limit the SEC actually states. A one-second window makes a burst
+    structurally impossible instead of merely unlikely.
+    """
+    return get_int("SEC_EDGAR_RATE_LIMIT_PER_SEC", 5)
+
+
 # ── Telegram (D16, amended 2026-10-21) ──────────────────────────────────────
 # The channel that reaches a phone. Email is the digest; Telegram is the page.
 

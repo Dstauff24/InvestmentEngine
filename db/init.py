@@ -36,6 +36,7 @@ EXPECTED_TABLES = [
     "events",
     "fundamentals",
     "ideas",
+    "insider_transactions",
     "iv_daily",
     "job_runs",
     "news_articles",
@@ -245,12 +246,49 @@ def main(argv: list[str] | None = None) -> int:
     print(f"initializing {settings.database_name()!r} on {settings.get('PGHOST', 'localhost')}")
     if not args.skip_create:
         create_database_if_missing()
-    apply_schema()
+    # SCHEMA, MIGRATIONS, THEN SCHEMA AGAIN.
+    #
+    # The second pass is not belt-and-braces; it is required. On a FRESH
+    # database schema.sql creates everything and the migrations are no-ops. On
+    # an EXISTING one, `CREATE TABLE IF NOT EXISTS` skips a table that already
+    # exists — so a column a migration adds is absent during the first pass,
+    # and any schema.sql statement depending on that column fails.
+    #
+    # That is not hypothetical. Migration 006 added `shadow_book.status_at_call`
+    # and schema.sql gained an index on it; on a database holding migrations
+    # 001-005 the first pass died on "column status_at_call does not exist",
+    # which would have broken the next production deploy — `git pull &&
+    # python -m db.init` on a VM that was provisioned before the migration.
+    #
+    # The first pass is still needed: migrations ALTER tables that must already
+    # exist. Reversing the order would break a fresh database instead. So the
+    # first pass is allowed to fail on exactly this class of error, the
+    # migrations run, and the second pass completes the schema. schema.sql is
+    # idempotent throughout (IF NOT EXISTS / CREATE OR REPLACE), so running it
+    # twice costs a second of redundant DDL and nothing else.
+    first_pass_error = None
+    try:
+        apply_schema()
+    except psycopg.errors.UndefinedColumn as exc:
+        # A pending migration almost certainly adds the column. Carry on and
+        # report it only if the second pass cannot recover.
+        first_pass_error = exc
+        print(f"  schema pass 1 incomplete ({str(exc).splitlines()[0]}); migrations first")
+
     try:
         count = apply_migrations()
     except (RuntimeError, psycopg.Error) as exc:
         print(f"\nmigration failed: {exc}")
         return 1
+
+    try:
+        apply_schema()
+    except psycopg.Error as exc:
+        print(f"\nschema failed after migrations: {exc}")
+        if first_pass_error is not None:
+            print(f"  (pass 1 also failed: {first_pass_error})")
+        return 1
+
     if count == 0:
         print("  no pending migrations")
 

@@ -106,6 +106,43 @@ events:
 news:
   lookback_days: 7             # rolling 7-day window
 
+# ── SEC EDGAR (D39: insider clusters) ───────────────────────────────────────
+# The SEC asks for a descriptive User-Agent with a contact address and no more
+# than ~10 requests/second. Both are conditions of access: SEC_EDGAR_USER_AGENT
+# lives in .env (the placeholder is refused), and the per-second rate is
+# SEC_EDGAR_RATE_LIMIT_PER_SEC, defaulting to 5 — half the stated line.
+edgar:
+  # Not an allowance (the SEC publishes no daily cap) but a runaway-loop guard.
+  # A full universe pass costs roughly 1 (ticker map) + 1 submissions call per
+  # symbol + 1 document per new Form 4; 2,000 leaves room for a busy filing day
+  # across ~430 symbols without letting a retry bug run unbounded.
+  daily_call_budget: 2000      # [OPEN] #48
+  # How far back to look for filings on a normal run. Filings are re-fetchable,
+  # so this only bounds freshness work, not history.
+  lookback_days: 14
+
+# ── Insider-buying clusters (D39 / Pillar C) ────────────────────────────────
+# A cluster is N or more DISTINCT insiders making OPEN-MARKET PURCHASES within
+# a rolling window of D days, together worth at least some dollar amount.
+#
+# "Open-market purchase" means SEC transaction code 'P' and nothing else.
+# Awards ('A'), option exercises ('M') and tax withholding ('F') are
+# compensation events on a schedule somebody set months ago; counting them
+# would build a signal that measures payroll rather than opinion. Derivative
+# rows are excluded for the same reason.
+#
+# DISTINCT insiders, not transactions: one director filing four purchases in a
+# week is one person's opinion reported four times, and counting it as four
+# would make a single buyer look like a consensus.
+insider_cluster:
+  # D39 states the rule and fixes none of the numbers.
+  min_distinct_insiders: 3     # [OPEN] #45
+  window_days: 90              # [OPEN] #46
+  min_aggregate_usd: 250000    # [OPEN] #47
+  # Locked by the decision, not open: the code filter IS the definition.
+  purchase_code: P
+  exclude_derivatives: true
+
 # ── FMP call budgeting (D29) ────────────────────────────────────────────────
 # Free-tier operation. The staleness filter in fundamentals trickles the crawl
 # so a day's spend stays inside the plan. Raise this on upgrade.

@@ -107,6 +107,19 @@ class DayBudget:
             reserve=cfg.reserve_for_events if honour_events_reserve else 0,
         )
 
+    @classmethod
+    def for_edgar(cls) -> DayBudget:
+        """The SEC EDGAR budget from config.
+
+        The SEC publishes no daily cap, so unlike FMP this is not about staying
+        inside an allowance. It is a runaway-loop guard: a bug that re-fetched
+        in a loop would hammer a public service that has asked politely for
+        restraint, and being the reason they introduce a cap is a worse outcome
+        than a job that stops early.
+        """
+        cfg = config.universe().edgar
+        return cls("edgar", cfg.daily_call_budget)
+
     # ── the one mutating operation ──────────────────────────────────────────
 
     def spend(self, n: int = 1, *, day: date | None = None) -> Grant:

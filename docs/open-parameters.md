@@ -93,5 +93,21 @@ oscillate for ever), or a demotion sample floor above the promotion floor
 | 43 | `promotion.demotion.min_closed_ideas` | `20` | Same | How much evidence is needed to demote. Below the promotion floor deliberately — a bad run should be able to remove what a good run added. | High |
 | 44 | `promotion.demotion.expectancy_r_below` | `0.0` | Same | The line below which a strategy is demoted. Zero means "stops making money", not "stops being impressive". Loader requires it < row 38 so a strategy cannot be demoted the moment it is promoted. | High |
 
+## Added by step 3 — insider clusters and EDGAR (Oct 21 2026)
+
+D39 names insider clusters as an early Pillar C input and states the rule's
+SHAPE — N distinct insiders, a D-day window, a dollar floor — without fixing
+any of the three. The code filter is NOT open: "open-market purchase" means SEC
+transaction code `P`, and the loader rejects a config that tries to count
+derivatives, because an option grant or exercise is compensation on a schedule
+somebody set months ago rather than an opinion about today.
+
+| # | Parameter | Default | Derives from | What moves if it changes | Sens. |
+|---|---|---|---|---|---|
+| 45 | `insider_cluster.min_distinct_insiders` | `3` | D39 says "N or more DISTINCT insiders" | How many separate people must act before it counts as a signal. The loader refuses `1`: a cluster of one is just a purchase, and independent agreement is the whole point. Raise it and clusters become rare but meaningful; lower it and routine director buying fires it. | High |
+| 46 | `insider_cluster.window_days` | `90` | D39 says "a rolling window of D days" | How far apart those purchases may be. About a quarter, so it spans one earnings cycle — long enough that insiders acting on the same information are caught together, short enough that two unrelated decisions a season apart are not. | High |
+| 47 | `insider_cluster.min_aggregate_usd` | `250000` | D39 says "a minimum aggregate dollar value" | The floor that stops three directors buying $2,000 each from reading as conviction. Absolute dollars, not a fraction of market cap, which would make the rule fire far more readily on small caps. | High |
+| 48 | `edgar.daily_call_budget` | `2000` | No decision; SEC publishes no daily cap | A RUNAWAY-LOOP GUARD, not an allowance: the risk is a retry bug hammering a public service that has asked for restraint, and being the reason they introduce a cap. A full universe pass is ~1 + 1/symbol + 1 per new filing, so this clears a busy filing day across ~430 symbols with room to spare. | Medium |
+
 ## How to change one
 1. Edit the value in `config/*.yaml`, keep the `# [OPEN]` tag. 2. Update its row here. 3. `python -m core.config` (cross-field invariants may reject it). 4. `pytest`. If a decision fixes a value, drop the tag, remove the row, log the decision, add a named assertion in `tests/test_config.py`.

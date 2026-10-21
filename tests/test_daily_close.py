@@ -162,9 +162,31 @@ def test_schwab_steps_are_skipped_wholesale_when_unprovisioned(monkeypatch):
             Step("fmp_events", lambda: ran.append("e") or 1, description="x"),
         ],
     )
-    result = daily_close.run_pipeline(day=DAY, skip_schwab=True)
+    result = daily_close.run_pipeline(day=DAY, unprovisioned=frozenset({"schwab"}))
     assert ran == ["e"]
     assert result.results[0].status == "skipped"
+
+
+def test_one_unprovisioned_provider_does_not_skip_another(monkeypatch):
+    """The coupling this replaced: `skip_schwab=bool(expected_skips)` meant an
+    unconfigured SEC User-Agent would skip the SACRED chain and IV jobs,
+    failing the day over an unrelated provider."""
+    ran = []
+    stub_plan(
+        monkeypatch,
+        [
+            Step(
+                "schwab_chains", lambda: ran.append("chains") or 1, critical=True, description="x"
+            ),
+            Step("edgar_insiders", lambda: ran.append("edgar") or 1, description="x"),
+        ],
+    )
+    result = daily_close.run_pipeline(day=DAY, unprovisioned=frozenset({"edgar"}))
+
+    assert ran == ["chains"], "an unprovisioned EDGAR must not touch Schwab"
+    statuses = {r.name: r.status for r in result.results}
+    assert statuses["schwab_chains"] == "success"
+    assert statuses["edgar_insiders"] == "skipped"
 
 
 def test_only_runs_the_named_steps(monkeypatch):

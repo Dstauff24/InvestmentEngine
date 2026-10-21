@@ -40,6 +40,20 @@ def session_date(at: datetime | None = None) -> date:
     return moment.astimezone(EASTERN).date()
 
 
+def to_utc(moment: datetime) -> datetime:
+    """A provider timestamp as a tz-aware UTC instant.
+
+    A NAIVE timestamp is read as EASTERN, not as UTC. Every provider the engine
+    reads is a US venue or regulator publishing US market times, so Eastern is
+    the correct assumption — and reading a naive 16:30 as UTC would place it at
+    12:30 ET, four hours before it happened, which is exactly the kind of
+    silent shift that makes a point-in-time read dishonest.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=EASTERN)
+    return moment.astimezone(UTC)
+
+
 def session_close_utc(day: date) -> datetime:
     """The 16:00 ET close of `day` as a UTC instant. The `ts` on daily bars."""
     return datetime.combine(day, MARKET_CLOSE, tzinfo=EASTERN).astimezone(UTC)
