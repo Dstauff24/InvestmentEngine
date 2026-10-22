@@ -376,3 +376,23 @@ def test_it_prefers_the_virtualenv_but_still_runs_without_one():
     text = DEPLOY.read_text()
     assert ".venv/bin/python" in text
     assert "command -v python3" in text
+
+
+def test_the_deploy_checks_env_against_the_example():
+    """A setting added in code must not reach production without its value —
+    the 2026-10-22 VM ran an evening with SHADOW_ACCOUNT_VALUE missing."""
+    text = DEPLOY.read_text()
+    assert "scripts/env_contract.py" in text
+    assert "checking .env against .env.example" in text
+
+
+def test_the_env_check_runs_before_config_validation_and_preflight():
+    """A missing variable makes both of those report confusing secondary
+    failures, so the primary cause has to be found first."""
+    text = DEPLOY.read_text()
+    positions = [
+        text.index("env_contract.py"),
+        text.index("-m core.config"),
+        text.index("jobs.daily_close --dry-run"),
+    ]
+    assert positions == sorted(positions)

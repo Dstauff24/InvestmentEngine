@@ -337,3 +337,92 @@ def test_an_open_call_is_visible_as_open_and_absent_from_expectancy():
     assert found.open_now == 1
     assert found.closed == 0
     assert found.expectancy_r is None
+
+
+# ── the digest cannot claim selectivity when scoring failed ─────────────────
+
+
+def test_a_failed_scoring_pass_makes_the_digest_say_incomplete(monkeypatch):
+    """End to end against real `job_runs` rows: the shape is chosen from what
+    the database says the steps DID, not from whether any cards arrived."""
+    from alerts import digest
+    from core.jobs import job_run
+
+    day = TODAY
+    db.execute(
+        "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+    )
+    try:
+        with (
+            pytest.raises(RuntimeError),
+            job_run("scoring_pass", session_date=day, is_critical=False, triggered_by="test"),
+        ):
+            raise RuntimeError("SHADOW_ACCOUNT_VALUE is not set")
+
+        blocked = digest.incomplete_steps(day, digest.IDEA_STEPS)
+        assert [b["job_name"] for b in blocked] == ["scoring_pass"]
+        assert blocked[0]["status"] == "failed"
+
+        content = digest.build_digest([], [], as_of=day)
+        assert content.scoring_incomplete is True
+        subject, body = digest.render(content)
+        assert subject.startswith("SCORING INCOMPLETE")
+        assert "SHADOW_ACCOUNT_VALUE" in body
+        assert "working, not failing" not in body
+    finally:
+        db.execute(
+            "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+        )
+
+
+def test_a_successful_scoring_pass_leaves_the_digest_free_to_report_selectivity():
+    from alerts import digest
+    from core.jobs import job_run
+
+    day = TODAY
+    db.execute(
+        "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+    )
+    try:
+        with job_run(
+            "scoring_pass", session_date=day, is_critical=False, triggered_by="test"
+        ) as job:
+            job.add_rows(0)
+
+        assert digest.incomplete_steps(day, digest.IDEA_STEPS) == []
+        content = digest.build_digest([], [], as_of=day)
+        assert content.scoring_incomplete is False
+        _, body = digest.render(content)
+        assert "working, not failing" in body
+    finally:
+        db.execute(
+            "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+        )
+
+
+def test_a_retried_step_recovers_the_digest():
+    """The latest run per job wins, the same rule `day_complete` uses — a
+    failure followed by a successful re-run must not keep the digest blocked."""
+    from alerts import digest
+    from core.jobs import job_run
+
+    day = TODAY
+    db.execute(
+        "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+    )
+    try:
+        with (
+            pytest.raises(RuntimeError),
+            job_run("scoring_pass", session_date=day, is_critical=False, triggered_by="test"),
+        ):
+            raise RuntimeError("first attempt")
+        with job_run(
+            "scoring_pass", session_date=day, is_critical=False, triggered_by="test"
+        ) as job:
+            job.add_rows(1)
+
+        assert digest.incomplete_steps(day, digest.IDEA_STEPS) == []
+    finally:
+        db.execute(
+            "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
+        )

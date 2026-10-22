@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
+from alerts import digest
 from alerts.digest import DigestContent, render
+from core import config
 
 DAY = date(2026, 10, 21)
 
@@ -266,3 +270,138 @@ def test_the_body_always_ends_with_exactly_one_newline():
     for kw in ({}, {"cards": ["a"]}, {"stats": STATS}):
         _, body = render(content(**kw))
         assert body.endswith("\n") and not body.endswith("\n\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The shape that exists because the selectivity message lied (2026-10-22)
+# ══════════════════════════════════════════════════════════════════════════
+
+# Every phrase that claims the engine made a judgement. None of them may
+# appear on a night when nothing was judged.
+SELECTIVITY_LANGUAGE = (
+    "NOTHING TODAY",
+    "nothing today",
+    "working, not failing",
+    "selectivity",
+    "edge source",
+    "forced idea",
+    "No idea cleared its gates",
+    "RANKED BUT NOT ACTIONABLE",
+    "CLOSEST",
+)
+
+
+def blocked_content(**kw) -> digest.DigestContent:
+    base = {
+        "session_date": DAY,
+        "cards": [],
+        "refusals": [],
+        "candidates": [],
+        "stats": None,
+        "closed": [],
+        "open_calls": [],
+        "blocked": [
+            {
+                "job_name": "scoring_pass",
+                "status": "failed",
+                "error": "SettingsError: SHADOW_ACCOUNT_VALUE is not set\nstack...",
+            }
+        ],
+        "degraded": [],
+    }
+    base.update(kw)
+    return digest.DigestContent(**base)
+
+
+def test_a_failed_scoring_pass_can_never_render_as_selectivity():
+    """THE 2026-10-22 VM BUG. `scoring_pass` died (SHADOW_ACCOUNT_VALUE was
+    missing) and the digest went out saying "NOTHING TODAY — that is the engine
+    working, not failing". Nothing had been evaluated at all: the two shapes
+    were chosen on whether `cards` was empty, and a dead step produces an empty
+    list exactly like a quiet market does."""
+    subject, body = digest.render(blocked_content())
+
+    assert subject.startswith("SCORING INCOMPLETE")
+    assert body.startswith("SCORING INCOMPLETE: no ideas were evaluated tonight")
+    for phrase in SELECTIVITY_LANGUAGE:
+        assert phrase not in body, (
+            f"selectivity language leaked into an incomplete digest: {phrase}"
+        )
+
+
+def test_the_incomplete_digest_names_the_step_and_its_error():
+    """ "Something went wrong" sends the reader to the logs; naming the step
+    and the first line of its error usually ends the investigation."""
+    _, body = digest.render(blocked_content())
+    assert "scoring_pass: failed" in body
+    assert "SHADOW_ACCOUNT_VALUE is not set" in body
+    assert "job_runs" in body, "and says where the rest of the error lives"
+
+
+def test_a_step_that_never_ran_is_also_incomplete():
+    """A pipeline that stopped before scoring is not a quiet market either."""
+    content = blocked_content(
+        blocked=[{"job_name": "scoring_pass", "status": "never ran", "error": None}]
+    )
+    _, body = digest.render(content)
+    assert "scoring_pass: never ran" in body
+    assert "no error recorded" in body
+    for phrase in SELECTIVITY_LANGUAGE:
+        assert phrase not in body
+
+
+def test_cards_handed_in_after_a_failed_pass_are_discarded():
+    """After a failed pass the caller's lists are the empty defaults of a
+    result that was never produced — but if anything IS in them it is stale,
+    and reporting it would be worse than reporting nothing."""
+    content = blocked_content(cards=["AAPL: a card from a previous run"])
+    assert content.has_ideas is False
+    _, body = digest.render(content)
+    assert "AAPL" not in body
+
+
+def test_the_selectivity_report_refuses_to_be_built_in_that_state():
+    """Belt and braces: the text that reassures must be unreachable from the
+    state that would make it false, not merely unused by one branch."""
+    with pytest.raises(AssertionError, match="scoring did not complete"):
+        digest._selectivity_report(blocked_content(), config.scoring())
+
+
+def test_a_quiet_market_still_reports_selectivity():
+    """The fix must not turn every zero-plan day into an alarm: a completed
+    pass that surfaced nothing is the engine working, and that message is the
+    whole of D1."""
+    content = digest.DigestContent(
+        session_date=DAY,
+        cards=[],
+        refusals=[],
+        candidates=[],
+        stats=None,
+        closed=[],
+        open_calls=[],
+        blocked=[],
+    )
+    subject, body = digest.render(content)
+    assert "nothing today" in subject
+    assert "working, not failing" in body
+    assert "SCORING INCOMPLETE" not in body
+
+
+def test_a_failed_outcome_tracker_warns_without_leading():
+    """It degrades the digest without making the idea half dishonest, so it is
+    a note under the ideas rather than the headline."""
+    content = digest.DigestContent(
+        session_date=DAY,
+        cards=[],
+        refusals=[],
+        candidates=[],
+        stats=None,
+        closed=[],
+        open_calls=[],
+        blocked=[],
+        degraded=[{"job_name": "outcome_tracker", "status": "failed", "error": "boom"}],
+    )
+    _, body = digest.render(content)
+    assert "SCORING INCOMPLETE" not in body
+    assert "outcome tracking did not complete" in body
+    assert "may be stale" in body

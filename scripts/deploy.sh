@@ -102,6 +102,34 @@ else
   if "$PYTHON" -m db.init 2>&1 | tail -20 | sed 's/^/    /'; then ok; else fail "db.init"; fi
 fi
 
+# ── 3b. .env against .env.example ───────────────────────────────────────────
+# A SETTING ADDED IN CODE MUST NOT REACH PRODUCTION WITHOUT ITS VALUE. On
+# 2026-10-22 the VM ran a whole evening with SHADOW_ACCOUNT_VALUE missing:
+# `scoring_pass` died and the digest reported a quiet market.
+#
+# THE FILE IS THE CONTRACT, NOT THE AMBIENT ENVIRONMENT. `core/settings.py`
+# loads `.env` with `override=False`, so a real environment variable wins — and
+# cron runs with almost none of them. A value that exists only in an
+# interactive shell passes every check a human runs and is absent at 16:30, so
+# this checks the FILE and says explicitly when the environment is the only
+# thing holding a variable up.
+#
+# `# [OPTIONAL]` in .env.example exempts a variable from having to be SET. It
+# never exempts it from the placeholder check: a placeholder is refused by
+# settings at read time, which turns an optional degrade into a hard failure.
+step "checking .env against .env.example"
+if [[ ! -f "$REPO_ROOT/.env" ]]; then
+  fail "no .env in $REPO_ROOT — copy .env.example and fill it in"
+else
+  if ENV_REPORT="$("$PYTHON" scripts/env_contract.py)"; then
+    printf '%s\n' "$ENV_REPORT" | sed 's/^/    /'
+    ok
+  else
+    printf '%s\n' "$ENV_REPORT" | sed 's/^/      /'
+    fail ".env does not satisfy .env.example"
+  fi
+fi
+
 # ── 4. config ───────────────────────────────────────────────────────────────
 step "config validation (every cross-file invariant)"
 if "$PYTHON" -m core.config 2>&1 | tail -15 | sed 's/^/    /'; then ok; else fail "config is invalid"; fi
