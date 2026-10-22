@@ -300,3 +300,40 @@ def test_the_promotion_query_groups_per_recipe_and_regime():
         ("pullback_to_trend", "bear_volatile", 1),
         ("pullback_to_trend", "bull_calm", 1),
     ]
+
+
+# ── D45: the promotion query, against a real book ───────────────────────────
+
+
+def test_the_analytics_query_reads_cells_per_recipe_and_regime():
+    """The shape D40/D45 promotion decisions read, end to end: logged calls,
+    tracked outcomes, grouped per cell."""
+    from shadow_book.analytics import cells
+
+    log_idea(idea(recipe="pullback_to_trend"), as_of=CALLED, regime="bull_calm")
+    log_idea(idea(recipe="base_breakout"), as_of=CALLED, regime="bear_volatile")
+
+    add_bar(CALLED + timedelta(days=1), 102, 100.0, 101)
+    add_bar(CALLED + timedelta(days=2), 101, 90.0, 92)
+    track_open_calls(as_of=TODAY)
+
+    found = {
+        c.key: c for c in cells(as_of=TODAY) if c.recipe in ("pullback_to_trend", "base_breakout")
+    }
+    assert ("pullback_to_trend", "bull_calm", "shadow") in found
+    assert ("base_breakout", "bear_volatile", "shadow") in found
+
+    stopped = found[("pullback_to_trend", "bull_calm", "shadow")]
+    assert stopped.closed == 1
+    assert stopped.expectancy_r == pytest.approx(-1.0)
+    assert stopped.sufficient is False, "one closed idea is not evidence (D39(2))"
+
+
+def test_an_open_call_is_visible_as_open_and_absent_from_expectancy():
+    from shadow_book.analytics import cells
+
+    log_idea(idea(), as_of=CALLED, regime="bull_normal")
+    found = next(c for c in cells(as_of=TODAY) if c.regime == "bull_normal")
+    assert found.open_now == 1
+    assert found.closed == 0
+    assert found.expectancy_r is None

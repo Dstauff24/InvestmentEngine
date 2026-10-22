@@ -107,7 +107,16 @@ def _as_date(value: object) -> date | None:
 
 
 def _event_time(raw: object) -> str:
-    """FMP reports 'bmo' / 'amc' / '--' / None. Map to the schema CHECK values."""
+    """Map a release time to the schema's CHECK values.
+
+    **NO FMP ENDPOINT PUBLISHES ONE ANY MORE.** Verified 2026-10-22: neither
+    `/stable/earnings` nor `/stable/earnings-calendar` returns a `time` field,
+    so every stored earnings row is `unknown` and this returns `unknown` for
+    every real payload. Kept because the distinction is load-bearing — a
+    pre-open report is knowable on the report date and an after-close one is
+    not (see `features/catalyst.actual_is_knowable`) — so the day a source
+    appears, the mapping is already here and already tested.
+    """
     value = str(raw or "").strip().lower()
     return value if value in ("bmo", "amc", "dmt") else "unknown"
 
@@ -145,8 +154,18 @@ def parse_earnings(rows: list[dict], universe: set[str]) -> list[dict]:
         event_date = _as_date(row.get("date"))
         if not symbol or symbol not in universe or event_date is None:
             continue
-        eps_actual = as_float(row.get("eps"))
-        revenue_actual = as_float(row.get("revenue"))
+        # BOTH SPELLINGS. The calendar used to say `eps`/`revenue` and now says
+        # `epsActual`/`revenueActual` — verified 2026-10-22, the market-wide
+        # endpoint returns exactly the per-symbol endpoint's field names. Reading
+        # only the old ones stored NULL actuals from live data while the fixture
+        # (captured earlier) kept the tests green, which is the quietest way for
+        # a parser to stop working.
+        eps_actual = as_float(
+            row.get("eps") if row.get("eps") is not None else row.get("epsActual")
+        )
+        revenue_actual = as_float(
+            row.get("revenue") if row.get("revenue") is not None else row.get("revenueActual")
+        )
         out.append(
             {
                 **_blank_event(symbol, "earnings", event_date),

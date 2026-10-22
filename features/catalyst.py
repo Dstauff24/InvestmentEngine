@@ -199,10 +199,37 @@ class EarningsSurprise:
     convention. 8,858 of 9,396 stored earnings rows carry both numbers; the
     remainder abstain rather than being read as misses.
 
-    **Point-in-time:** the surprise is treated as knowable from the event date.
-    A report released after the close is strictly knowable only on the next
-    session, but the recipe requires a GAP, which is itself the next session's
-    first print, so no plan can act on it earlier than the market did.
+    **POINT-IN-TIME: AN ACTUAL IS NOT KNOWABLE ON THE REPORT DATE ITSELF.**
+    Neither FMP endpoint publishes a release time any more — verified
+    2026-10-22, both `/stable/earnings` and `/stable/earnings-calendar` return
+    `date` with no `time` field — so the engine cannot tell a pre-open report
+    from an after-close one. A report released after the close is public five
+    minutes after the bar that `gap_up_pct` is measured on, and crediting that
+    surprise to that bar would be reading a number published after the price it
+    is supposed to explain. So the rule is: **knowable from the session AFTER
+    the report date**, unless a release time says `bmo`, which no current source
+    does. The `bmo` branch is kept and tested so the day a source appears the
+    rule is already correct rather than needing to be rediscovered.
+
+    What this costs is real and worth naming: because `price_structure`
+    measures the gap on the LATEST bar only, the drift recipe can now fire only
+    on a gap that forms the session after the report — i.e. on after-close
+    reports. Pre-open reports gap on the report date itself, which this rule
+    refuses, so those setups are unreachable until a release time exists. That
+    is a capability loss chosen over a lookahead.
+
+    **ESTIMATE PROVENANCE.** `estimate_source` records WHERE the consensus came
+    from, because the two are not the same claim. `own_snapshot` is a
+    pre-report figure this engine stored itself (D7, from 2026-10-21) and is
+    point-in-time by construction. `vendor` is FMP's `epsEstimated` as served
+    today, and those rows are MUTABLE — AAPL's January-2025 quarter carried
+    `lastUpdated` of June 2026. Measured over 8,858 stored pairs the vendor
+    field behaves like a real pre-report consensus (77.4% beats, median
+    surprise +5.1%, only 3.4% exactly equal to the actual, which rules out
+    restatement TO the actual), but "behaves like" is not "is", and no
+    historical quarter can ever be verified. Recorded rather than assumed, the
+    same way `news_articles.sentiment_scorer` records which scorer produced a
+    tone.
     """
 
     reported_on: date | None
@@ -210,6 +237,10 @@ class EarningsSurprise:
     eps_estimate: float | None
     revenue_actual: float | None
     revenue_estimate: float | None
+    estimate_source: str = "vendor"
+    """`vendor` or `own_snapshot` — see the class docstring."""
+    withheld_report_on: date | None = None
+    """A report whose actual exists but is not yet knowable (see above)."""
 
     @property
     def eps_beat(self) -> bool | None:
@@ -238,6 +269,11 @@ class EarningsSurprise:
 
     @property
     def verdict(self) -> str:
+        if self.withheld_report_on is not None:
+            return (
+                f"unverified (reported {self.withheld_report_on}; no release time, so "
+                f"the actual is not knowable until the next session)"
+            )
         if self.eps_beat is None:
             return "unverified (no actual or estimate on record)"
         size = self.eps_surprise_pct
@@ -245,22 +281,63 @@ class EarningsSurprise:
         return f"{direction} by {size:+.1f}%" if size is not None else direction
 
 
-def last_earnings_surprise(events: list[dict], *, as_of: date) -> EarningsSurprise:
-    """The most recent REPORTED quarter on or before `as_of`."""
+UNVERIFIED = EarningsSurprise(None, None, None, None, None)
+
+
+def actual_is_knowable(event: dict, *, as_of: date) -> bool:
+    """Whether the reported actual was public before `as_of`'s close.
+
+    A report dated BEFORE `as_of` has had a full session to become public. On
+    the report date itself it depends on the release time, and only a confirmed
+    `bmo` is early enough — an after-close release lands minutes after the bar
+    the recipe measures. With no source publishing a time (verified
+    2026-10-22), `unknown` is treated as after-close, which is the pessimistic
+    reading and the only one that cannot invent a signal.
+    """
+    reported = _as_date(event.get("event_date"))
+    if reported < as_of:
+        return True
+    return reported == as_of and str(event.get("event_time") or "").lower() == "bmo"
+
+
+def last_earnings_surprise(
+    events: list[dict], *, as_of: date, own_estimate: float | None = None
+) -> EarningsSurprise:
+    """The most recent KNOWABLE reported quarter on or before `as_of`.
+
+    If the latest reported quarter is not yet knowable, this returns unverified
+    and names the date — it does NOT fall back to the quarter before. A recipe
+    asking "did they beat" means the report that just moved the price, and
+    answering with the previous quarter's surprise would be a different claim
+    wearing the same field.
+
+    `own_estimate` is this engine's own pre-report consensus when it has one
+    (D7 snapshots, from 2026-10-21). It REPLACES the vendor's figure and is
+    recorded as such, because only the stored one is point-in-time by
+    construction.
+    """
     reported = [
         e
         for e in events
         if e.get("event_type") == "earnings" and _as_date(e.get("event_date")) <= as_of
     ]
     if not reported:
-        return EarningsSurprise(None, None, None, None, None)
+        return UNVERIFIED
+
     latest = max(reported, key=lambda e: _as_date(e["event_date"]))
+    if not actual_is_knowable(latest, as_of=as_of):
+        return EarningsSurprise(
+            None, None, None, None, None, withheld_report_on=_as_date(latest["event_date"])
+        )
+
+    vendor = _float(latest.get("eps_estimate"))
     return EarningsSurprise(
         reported_on=_as_date(latest["event_date"]),
         eps_actual=_float(latest.get("eps_actual")),
-        eps_estimate=_float(latest.get("eps_estimate")),
+        eps_estimate=own_estimate if own_estimate is not None else vendor,
         revenue_actual=_float(latest.get("revenue_actual")),
         revenue_estimate=_float(latest.get("revenue_estimate")),
+        estimate_source="own_snapshot" if own_estimate is not None else "vendor",
     )
 
 
@@ -295,6 +372,7 @@ def compute(
     *,
     as_of: date,
     series_depth: EvidenceDepth | None = None,
+    own_estimate: float | None = None,
 ) -> CatalystFeatures:
     """Measure one symbol. Pure: no DB, no network."""
     next_div = _next_dividend_amount(events, as_of=as_of)
@@ -306,7 +384,7 @@ def compute(
         days_to_ex_dividend=ex_dividend_proximity(events, as_of=as_of),
         next_dividend_amount=next_div,
         insiders=insider_cluster(purchases or [], as_of=as_of, series_depth=series_depth),
-        surprise=last_earnings_surprise(events, as_of=as_of),
+        surprise=last_earnings_surprise(events, as_of=as_of, own_estimate=own_estimate),
     )
 
 
@@ -369,6 +447,33 @@ def load_insider_purchases(
         PURCHASES_SQL,
         (symbol, clock.session_close_utc(as_of), as_of - timedelta(days=rule_window)),
     )
+
+
+OWN_ESTIMATE_SQL = """
+    SELECT estimated_eps_avg
+    FROM   estimate_snapshots
+    WHERE  symbol = %s AND period_type = 'quarter'
+      AND  fiscal_period_end <= %s
+      AND  snapshot_date < %s
+    ORDER  BY fiscal_period_end DESC, snapshot_date DESC
+    LIMIT  1
+"""
+
+
+def own_pre_report_estimate(symbol: str, *, reported_on: date) -> float | None:
+    """This engine's own consensus for the quarter that `reported_on` reported.
+
+    The LATEST snapshot taken STRICTLY BEFORE the report date, for the latest
+    fiscal period that had ended by then. Point-in-time by construction — it is
+    a row this engine wrote on a date — which is the whole reason to prefer it
+    over the vendor's `epsEstimated`, whose historical rows are mutable.
+
+    Returns None for every report before 2026-10-21, because that is when the
+    series starts and no backfill can buy it (D7). The caller then falls back
+    to the vendor figure and records that it did.
+    """
+    row = db.fetch_one(OWN_ESTIMATE_SQL, (symbol, reported_on, reported_on))
+    return _float(row["estimated_eps_avg"]) if row else None
 
 
 def insider_series_depth(symbol: str, *, as_of: date) -> EvidenceDepth:

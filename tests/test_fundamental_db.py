@@ -199,3 +199,42 @@ def test_a_symbol_with_nothing_stored_abstains_everywhere():
     assert features.revenue_growth_yoy is None
     assert features.revision.depth.is_empty is True
     assert features.quarters_available == 0
+
+
+# ── D48: our own pre-report consensus ───────────────────────────────────────
+
+
+def test_our_own_pre_report_estimate_is_the_latest_snapshot_before_the_report():
+    """Point-in-time by construction: a row this engine wrote on a date.
+
+    The vendor's `epsEstimated` for a past quarter is mutable (one carried
+    `lastUpdated` sixteen months after the report), so it cannot be verified as
+    the consensus that stood before the print. This can.
+    """
+    from features.catalyst import own_pre_report_estimate
+
+    period = date(2026, 9, 30)
+    add_snapshot(date(2026, 10, 1), period, 1.00)
+    add_snapshot(date(2026, 10, 15), period, 1.10)
+    # Taken AFTER the report — must never be the one chosen.
+    add_snapshot(date(2026, 10, 25), period, 1.25)
+
+    assert own_pre_report_estimate(SYMBOL, reported_on=date(2026, 10, 20)) == pytest.approx(1.10)
+
+
+def test_a_report_before_the_snapshot_series_started_has_no_own_estimate():
+    """D7: the series begins 2026-10-21 and no backfill can buy it, so every
+    historical quarter falls back to the vendor figure — labelled as such."""
+    from features.catalyst import own_pre_report_estimate
+
+    add_snapshot(date(2026, 10, 21), date(2026, 12, 31), 2.00)
+    assert own_pre_report_estimate(SYMBOL, reported_on=date(2025, 1, 30)) is None
+
+
+def test_a_snapshot_for_a_period_that_had_not_ended_is_not_used():
+    """The estimate for NEXT quarter is not the consensus for the one being
+    reported."""
+    from features.catalyst import own_pre_report_estimate
+
+    add_snapshot(date(2026, 10, 15), date(2027, 3, 31), 3.00)
+    assert own_pre_report_estimate(SYMBOL, reported_on=date(2026, 10, 20)) is None

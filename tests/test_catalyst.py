@@ -310,3 +310,93 @@ def test_as_dict_flattens_the_nested_depth():
     out = features.as_dict()
     assert isinstance(out["insiders"]["depth"], dict)
     assert "observations" in out["insiders"]["depth"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D48: can the beat check see the actual before it was published?
+# ══════════════════════════════════════════════════════════════════════════
+
+REPORTED = date(2026, 10, 20)
+
+
+def earnings_row(**kw) -> dict:
+    base = {
+        "event_type": "earnings",
+        "event_date": REPORTED,
+        "event_time": "unknown",
+        "eps_actual": 1.20,
+        "eps_estimate": 1.00,
+        "revenue_actual": 1_100.0,
+        "revenue_estimate": 1_000.0,
+    }
+    base.update(kw)
+    return base
+
+
+def test_an_actual_is_not_knowable_on_the_report_date_without_a_release_time():
+    """THE LOOKAHEAD THIS CLOSES. No FMP endpoint publishes a release time any
+    more (verified 2026-10-22), so a report dated today may have been released
+    after the close — five minutes after the bar `gap_up_pct` is measured on.
+    Crediting that surprise to that bar reads a number published after the
+    price it is supposed to explain."""
+    surprise = cat.last_earnings_surprise([earnings_row()], as_of=REPORTED)
+
+    assert surprise.eps_beat is None
+    assert surprise.withheld_report_on == REPORTED
+    assert "not knowable until the next session" in surprise.verdict
+
+
+def test_the_same_actual_is_knowable_the_next_session():
+    surprise = cat.last_earnings_surprise([earnings_row()], as_of=REPORTED + timedelta(days=1))
+    assert surprise.eps_beat is True
+    assert surprise.withheld_report_on is None
+
+
+def test_a_confirmed_pre_open_report_is_knowable_on_the_report_date():
+    """Kept and tested although nothing populates `bmo` today: the distinction
+    is load-bearing, and the day a source appears the rule should already be
+    right rather than need rediscovering."""
+    surprise = cat.last_earnings_surprise([earnings_row(event_time="bmo")], as_of=REPORTED)
+    assert surprise.eps_beat is True
+
+
+def test_an_after_close_report_is_withheld_on_the_report_date():
+    surprise = cat.last_earnings_surprise([earnings_row(event_time="amc")], as_of=REPORTED)
+    assert surprise.eps_beat is None
+    assert surprise.withheld_report_on == REPORTED
+
+
+def test_a_withheld_report_does_not_fall_back_to_the_previous_quarter():
+    """ "Did they beat" means the report that just moved the price. Answering
+    with the quarter before would be a different claim wearing the same field."""
+    events = [
+        earnings_row(event_date=date(2026, 7, 21), eps_actual=0.50, eps_estimate=0.90),
+        earnings_row(),
+    ]
+    surprise = cat.last_earnings_surprise(events, as_of=REPORTED)
+    assert surprise.eps_beat is None
+    assert surprise.eps_actual is None, "not the July quarter's miss either"
+
+
+def test_our_own_snapshot_replaces_the_vendor_estimate_and_says_so():
+    """The vendor's historical rows are MUTABLE — one carried `lastUpdated`
+    sixteen months after the report — so only a snapshot this engine wrote on a
+    date is point-in-time by construction."""
+    surprise = cat.last_earnings_surprise(
+        [earnings_row()], as_of=REPORTED + timedelta(days=1), own_estimate=1.15
+    )
+    assert surprise.eps_estimate == pytest.approx(1.15)
+    assert surprise.estimate_source == "own_snapshot"
+    assert surprise.eps_surprise_pct == pytest.approx((1.20 - 1.15) / 1.15 * 100)
+
+
+def test_without_a_snapshot_the_vendor_figure_is_used_and_labelled():
+    surprise = cat.last_earnings_surprise([earnings_row()], as_of=REPORTED + timedelta(days=1))
+    assert surprise.eps_estimate == pytest.approx(1.00)
+    assert surprise.estimate_source == "vendor"
+
+
+def test_knowability_is_decided_per_event_not_per_symbol():
+    assert cat.actual_is_knowable(earnings_row(), as_of=REPORTED) is False
+    assert cat.actual_is_knowable(earnings_row(), as_of=REPORTED + timedelta(days=1)) is True
+    assert cat.actual_is_knowable(earnings_row(event_time="bmo"), as_of=REPORTED) is True

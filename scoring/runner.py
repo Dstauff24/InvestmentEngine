@@ -154,12 +154,20 @@ def score_symbol(
         fundamental_features.load_estimate_snapshots(symbol, as_of=as_of),
         as_of=as_of,
     )
+    events = catalyst_features.load_events(symbol, as_of=as_of)
     catalyst = catalyst_features.compute(
         symbol,
-        catalyst_features.load_events(symbol, as_of=as_of),
+        events,
         catalyst_features.load_insider_purchases(symbol, as_of=as_of),
         as_of=as_of,
         series_depth=catalyst_features.insider_series_depth(symbol, as_of=as_of),
+        # PREFER OUR OWN PRE-REPORT CONSENSUS. The vendor's `epsEstimated` rows
+        # are mutable (one carried `lastUpdated` sixteen months after the
+        # report), so a beat priced against them cannot be verified as
+        # point-in-time. A snapshot this engine wrote on a date can. None for
+        # every report before 2026-10-21, where the fallback is the vendor
+        # figure and `surprise.estimate_source` says so.
+        own_estimate=_own_estimate(symbol, events, as_of=as_of),
     )
     sentiment = sentiment_features.compute(
         symbol,
@@ -391,11 +399,13 @@ def build_ideas(run: UniverseRun, *, as_of: date) -> list[Idea | Rejection | str
 
         status = statuses.of(best.recipe)
         iv = db.fetch_one(IV_SQL, (item.symbol, as_of)) or {}
+        card_events = catalyst_features.load_events(item.symbol, as_of=as_of)
         catalyst = catalyst_features.compute(
             item.symbol,
-            catalyst_features.load_events(item.symbol, as_of=as_of),
+            card_events,
             [],
             as_of=as_of,
+            own_estimate=_own_estimate(item.symbol, card_events, as_of=as_of),
         )
         built = build_idea(
             item,
@@ -452,6 +462,24 @@ def top_candidates(run: UniverseRun, limit: int = 5) -> list[dict]:
             }
         )
     return out
+
+
+def _own_estimate(symbol: str, events: list[dict], *, as_of: date) -> float | None:
+    """Our own pre-report consensus for the quarter that last reported.
+
+    Looked up only once the report is KNOWABLE, so this cannot be the thing
+    that reveals an actual the release-time rule is withholding.
+    """
+    reported = [
+        e
+        for e in events
+        if e.get("event_type") == "earnings"
+        and catalyst_features.actual_is_knowable(e, as_of=as_of)
+    ]
+    if not reported:
+        return None
+    latest = max(reported, key=lambda e: e["event_date"])
+    return catalyst_features.own_pre_report_estimate(symbol, reported_on=latest["event_date"])
 
 
 def _float(value) -> float | None:
