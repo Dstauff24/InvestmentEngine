@@ -324,6 +324,7 @@ def earnings_row(**kw) -> dict:
         "event_type": "earnings",
         "event_date": REPORTED,
         "event_time": "unknown",
+        "alt_event_date": None,
         "eps_actual": 1.20,
         "eps_estimate": 1.00,
         "revenue_actual": 1_100.0,
@@ -400,3 +401,78 @@ def test_knowability_is_decided_per_event_not_per_symbol():
     assert cat.actual_is_knowable(earnings_row(), as_of=REPORTED) is False
     assert cat.actual_is_knowable(earnings_row(), as_of=REPORTED + timedelta(days=1)) is True
     assert cat.actual_is_knowable(earnings_row(event_time="bmo"), as_of=REPORTED) is True
+
+
+# ── D49 correction: T is the LATER of the two providers' dates ──────────────
+
+
+def test_the_effective_report_date_is_the_later_of_the_two():
+    """THE WINDOW ABSORBS A LATE DATE AND NOT AN EARLY ONE.
+
+    The reaction window assumes the actual is public by the close of T+1, which
+    holds when T is the real release date or later. If FMP dates a report a day
+    EARLY, the true release can fall after the close of T+1 and the engine
+    would read an actual that was not yet public.
+    """
+    later_elsewhere = earnings_row(event_date=REPORTED, alt_event_date=REPORTED + timedelta(days=1))
+    assert cat.effective_report(later_elsewhere)[0] == REPORTED + timedelta(days=1)
+
+    later_here = earnings_row(event_date=REPORTED, alt_event_date=REPORTED - timedelta(days=1))
+    assert cat.effective_report(later_here)[0] == REPORTED
+
+
+def test_a_disagreement_delays_knowability_by_a_day():
+    """The whole point of the correction: with FMP a day early, the actual is
+    not knowable at the close of FMP's T+1."""
+    row = earnings_row(event_date=REPORTED, alt_event_date=REPORTED + timedelta(days=1))
+
+    assert cat.actual_is_knowable(row, as_of=REPORTED + timedelta(days=1)) is False
+    assert cat.actual_is_knowable(row, as_of=REPORTED + timedelta(days=2)) is True
+
+    agreed = earnings_row(event_date=REPORTED)
+    assert cat.actual_is_knowable(agreed, as_of=REPORTED + timedelta(days=1)) is True
+
+
+def test_the_surprise_reports_the_effective_date_not_the_providers():
+    surprise = cat.last_earnings_surprise(
+        [earnings_row(alt_event_date=REPORTED + timedelta(days=1))],
+        as_of=REPORTED + timedelta(days=2),
+    )
+    assert surprise.reported_on == REPORTED + timedelta(days=1)
+    assert surprise.eps_beat is True
+
+
+def test_a_release_time_only_applies_to_the_date_that_published_it():
+    """Finnhub publishes the hour, so it describes `alt_event_date`. Using it
+    on a date Finnhub did not give us would attribute a fact to the wrong
+    session."""
+    # Finnhub is later: its hour describes the winning date, so it applies.
+    finnhub_later = earnings_row(
+        event_date=REPORTED, alt_event_date=REPORTED + timedelta(days=1), event_time="bmo"
+    )
+    assert cat.effective_report(finnhub_later) == (REPORTED + timedelta(days=1), "bmo")
+
+    # FMP is later: nobody published a time for THAT date.
+    finnhub_earlier = earnings_row(
+        event_date=REPORTED, alt_event_date=REPORTED - timedelta(days=1), event_time="bmo"
+    )
+    assert cat.effective_report(finnhub_earlier) == (REPORTED, "unknown")
+
+    # They agree: the hour belongs to the shared date.
+    agreed = earnings_row(event_date=REPORTED, alt_event_date=REPORTED, event_time="amc")
+    assert cat.effective_report(agreed) == (REPORTED, "amc")
+
+
+def test_with_no_second_opinion_the_providers_date_stands():
+    assert cat.effective_report(earnings_row()) == (REPORTED, "unknown")
+    assert cat.effective_report(earnings_row(event_time="bmo")) == (REPORTED, "bmo")
+
+
+def test_the_latest_report_is_chosen_on_the_effective_date():
+    """A disagreement can reorder two reports that are days apart."""
+    events = [
+        earnings_row(event_date=date(2026, 10, 19), alt_event_date=date(2026, 10, 22)),
+        earnings_row(event_date=date(2026, 10, 20), eps_actual=9.9),
+    ]
+    latest = cat.last_knowable_earnings(events, as_of=date(2026, 10, 23))
+    assert cat.effective_report(latest)[0] == date(2026, 10, 22)

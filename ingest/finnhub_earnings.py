@@ -39,6 +39,7 @@ from datetime import date, timedelta
 
 from core import clock, config, db
 from core.jobs import job_run
+from features.catalyst import ALT_DATE_TOLERANCE_DAYS
 from ingest.finnhub_client import FinnhubClient
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,24 @@ UPDATE = """
       AND  event_time IS DISTINCT FROM %(event_time)s
 """
 
+# A DISAGREEING date, recorded against the row it disagrees with. The effective
+# report date (D49) is the LATER of the two, so this is not bookkeeping: a
+# provider dating a report a day EARLY is the one case the reaction window
+# cannot absorb, and without the second opinion the engine cannot see it.
+UPDATE_ALT = """
+    UPDATE events
+    SET    alt_event_date = %(alt_event_date)s,
+           alt_source     = %(alt_source)s,
+           -- COALESCE, so a blank hour cannot erase an established one.
+           event_time     = COALESCE(%(event_time)s, event_time),
+           updated_at     = now()
+    WHERE  symbol = %(symbol)s
+      AND  event_type = 'earnings'
+      AND  event_date = %(event_date)s
+      AND  (alt_event_date IS DISTINCT FROM %(alt_event_date)s
+            OR event_time IS DISTINCT FROM %(event_time)s)
+"""
+
 
 @dataclass
 class StampResult:
@@ -79,6 +98,11 @@ class StampResult:
     in_universe: int = 0
     matched: int = 0
     changed: int = 0
+    near_matched: int = 0
+    """Dated within tolerance but NOT on the same day: a disagreement."""
+    later_in_finnhub: int = 0
+    """Of those, how many Finnhub dates LATER than FMP — the ones that move the
+    effective report date, and the only direction that can hide a lookahead."""
     unmatched: list[str] = field(default_factory=list)
     windows: int = 0
 
@@ -104,24 +128,31 @@ class StampResult:
         return (
             f"{self.rows_seen} calendar row(s) over {self.windows} window(s); "
             f"{self.with_hour} carry a time ({coverage}); {self.in_universe} in universe, "
-            f"{self.matched} matched a stored date ({match}), {self.changed} changed"
+            f"{self.matched} dated the same day ({match}), {self.near_matched} disagreed "
+            f"within tolerance ({self.later_in_finnhub} later in Finnhub), "
+            f"{self.changed} row(s) changed"
         )
 
 
 def parse_times(rows: list[dict], universe: set[str]) -> list[dict]:
-    """Finnhub calendar rows -> `events` update params, universe only.
+    """Finnhub calendar rows -> (symbol, date, time) triples, universe only.
 
-    A row with no usable `hour` is DROPPED rather than written as `unknown`:
-    the column already defaults to unknown, and writing it would overwrite a
-    time an earlier run had successfully established.
+    A row with no usable `hour` is KEPT with `event_time` unknown, because the
+    DATE is useful on its own now: a disagreement is what sets the effective
+    report date (D49), and Finnhub knows the date far more often than the hour
+    (measured: 100% of rows versus 15%).
     """
     out = []
     for row in rows:
         symbol = str(row.get("symbol") or "").upper()
         when = _as_date(row.get("date"))
-        hour = HOUR_MAP.get(str(row.get("hour") or "").strip().lower())
-        if not symbol or symbol not in universe or when is None or hour is None:
+        if not symbol or symbol not in universe or when is None:
             continue
+        hour = HOUR_MAP.get(str(row.get("hour") or "").strip().lower())
+        # `None`, not "unknown": the column already defaults to unknown, and a
+        # blank hour must never overwrite a time an earlier run established —
+        # Finnhub leaves it blank until a report is close, so the same row goes
+        # from blank to `amc` and must not go back.
         out.append({"symbol": symbol, "event_date": when, "event_time": hour})
     return out
 
@@ -173,16 +204,58 @@ def stamp_release_times(
     # row would make "no such row" and "the time was already right" the same
     # rowcount of zero, and those are different facts: the first is a provider
     # disagreement worth reporting and the second is a quiet re-run.
-    stored = {(row["symbol"], row["event_date"]) for row in db.fetch_all(STORED_SQL, (start, end))}
-    writable = [p for p in params if (p["symbol"], p["event_date"]) in stored]
-    result.matched = len(writable)
-    result.unmatched = [
-        f"{p['symbol']} {p['event_date']}"
-        for p in params
-        if (p["symbol"], p["event_date"]) not in stored
-    ]
-    result.changed = db.executemany(UPDATE, writable) if writable else 0
+    stored_rows = db.fetch_all(STORED_SQL, (start, end))
+    exact = {(row["symbol"], row["event_date"]) for row in stored_rows}
+    by_symbol: dict[str, list[date]] = {}
+    for row in stored_rows:
+        by_symbol.setdefault(row["symbol"], []).append(row["event_date"])
+
+    same_day: list[dict] = []
+    disagreeing: list[dict] = []
+    for item in params:
+        key = (item["symbol"], item["event_date"])
+        if key in exact:
+            # Only worth a write when the hour is actually known: the date
+            # already agrees, so there is nothing else to record.
+            if item["event_time"] is not None:
+                same_day.append(item)
+            continue
+        near = _nearest(by_symbol.get(item["symbol"], []), item["event_date"])
+        if near is None:
+            result.unmatched.append(f"{item['symbol']} {item['event_date']}")
+            continue
+        # SAME REPORT, DIFFERENT DATE. Recorded against the row it disagrees
+        # with so `effective_report` can take the later of the two (D49).
+        disagreeing.append(
+            {
+                "symbol": item["symbol"],
+                "event_date": near,
+                "alt_event_date": item["event_date"],
+                "alt_source": "finnhub",
+                "event_time": item["event_time"],
+            }
+        )
+        if item["event_date"] > near:
+            result.later_in_finnhub += 1
+
+    result.matched = sum(1 for item in params if (item["symbol"], item["event_date"]) in exact)
+    result.near_matched = len(disagreeing)
+    result.changed = (db.executemany(UPDATE, same_day) if same_day else 0) + (
+        db.executemany(UPDATE_ALT, disagreeing) if disagreeing else 0
+    )
     return result
+
+
+def _nearest(candidates: list[date], target: date) -> date | None:
+    """The stored date closest to `target` within tolerance, or None.
+
+    Tolerance is deliberately tight (three calendar days, enough for a Friday
+    vs Monday off-by-one). Quarterly reports are ~90 days apart, so this cannot
+    pair a Finnhub row with the wrong quarter — and a wide window would invent
+    a disagreement out of two providers' estimates for DIFFERENT reports.
+    """
+    near = [d for d in candidates if abs((d - target).days) <= ALT_DATE_TOLERANCE_DAYS]
+    return min(near, key=lambda d: (abs((d - target).days), d)) if near else None
 
 
 def run(*, days_back: int = DEFAULT_DAYS_BACK, as_of: date | None = None) -> int:
@@ -203,6 +276,8 @@ def run(*, days_back: int = DEFAULT_DAYS_BACK, as_of: date | None = None) -> int
             match_rate_pct=(
                 None if result.match_rate is None else round(result.match_rate * 100, 1)
             ),
+            near_matched=result.near_matched,
+            later_in_finnhub=result.later_in_finnhub,
             changed=result.changed,
             windows=result.windows,
             unmatched=len(result.unmatched),

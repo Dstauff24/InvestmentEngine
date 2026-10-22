@@ -430,6 +430,13 @@ CREATE TABLE IF NOT EXISTS events (
     event_date       DATE NOT NULL,
     -- 'bmo' before open, 'amc' after close, 'dmt' during market, 'unknown'
     event_time       TEXT CHECK (event_time IN ('bmo', 'amc', 'dmt', 'unknown')),
+    -- D49: another provider's date for the SAME report, when it disagrees. The
+    -- effective report date is the LATER of the two, because the reaction
+    -- window absorbs a date that is too late and an early one would let the
+    -- engine read an actual before it was published. Added by
+    -- db/migrations/014_events_alt_date.sql.
+    alt_event_date   DATE,
+    alt_source       TEXT,
     is_confirmed     BOOLEAN NOT NULL DEFAULT FALSE,
     title            TEXT,
 

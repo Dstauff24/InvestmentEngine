@@ -295,14 +295,48 @@ def last_knowable_earnings(events: list[dict], *, as_of: date) -> dict | None:
     answer rather than a reason to reach back a quarter.
     """
     reported = [
-        e
-        for e in events
-        if e.get("event_type") == "earnings" and _as_date(e.get("event_date")) <= as_of
+        e for e in events if e.get("event_type") == "earnings" and effective_report(e)[0] <= as_of
     ]
     if not reported:
         return None
-    latest = max(reported, key=lambda e: _as_date(e["event_date"]))
+    latest = max(reported, key=lambda e: effective_report(e)[0])
     return latest if actual_is_knowable(latest, as_of=as_of) else None
+
+
+# How far apart two providers may date the same report and still be talking
+# about it. A weekend off-by-one (Friday vs Monday) is three calendar days;
+# quarterly reports are ~90 apart, so this cannot conflate two quarters.
+ALT_DATE_TOLERANCE_DAYS = 3
+
+
+def effective_report(event: dict) -> tuple[date, str]:
+    """The date a report must be assumed to have landed on, and its release time.
+
+    **THE LATER OF THE DATES WE HOLD (D49).** The reaction window assumes the
+    actual is public by the close of T+1, which is true when T is the real
+    release date or later — and false when it is earlier. If FMP dates a report
+    a day early, the true release can fall after the close of T+1 and the
+    engine would read an actual that was not yet public. The window absorbs a
+    date that is too late (it measures a window starting after the news, which
+    is merely noisy) and cannot absorb one that is too early.
+
+    The release time travels with the date that WINS. Finnhub publishes the
+    hour, so it describes `alt_event_date`: when that is the later date the
+    time applies, and when FMP's own date is later nobody has published a time
+    for it and the answer is `unknown`. Using Finnhub's hour on a date Finnhub
+    did not give us would be attributing a fact to the wrong session.
+    """
+    primary = _as_date(event.get("event_date"))
+    alternate = event.get("alt_event_date")
+    stated = str(event.get("event_time") or "unknown").lower()
+    if alternate is None:
+        return primary, stated
+    alternate = _as_date(alternate)
+    if alternate > primary:
+        return alternate, stated
+    # FMP's date is the later one (or they agree): a time published against the
+    # earlier date says nothing about this one.
+    return primary, stated if alternate == primary else "unknown"
 
 
 def actual_is_knowable(event: dict, *, as_of: date) -> bool:
@@ -311,14 +345,17 @@ def actual_is_knowable(event: dict, *, as_of: date) -> bool:
     A report dated BEFORE `as_of` has had a full session to become public. On
     the report date itself it depends on the release time, and only a confirmed
     `bmo` is early enough — an after-close release lands minutes after the bar
-    the recipe measures. With no source publishing a time (verified
+    the recipe measures. With no FMP endpoint publishing a time (verified
     2026-10-22), `unknown` is treated as after-close, which is the pessimistic
     reading and the only one that cannot invent a signal.
+
+    "The report date" here is `effective_report`'s — the LATER of the dates two
+    providers gave us, never FMP's alone.
     """
-    reported = _as_date(event.get("event_date"))
+    reported, release_time = effective_report(event)
     if reported < as_of:
         return True
-    return reported == as_of and str(event.get("event_time") or "").lower() == "bmo"
+    return reported == as_of and release_time == "bmo"
 
 
 def last_earnings_surprise(
@@ -338,22 +375,20 @@ def last_earnings_surprise(
     construction.
     """
     reported = [
-        e
-        for e in events
-        if e.get("event_type") == "earnings" and _as_date(e.get("event_date")) <= as_of
+        e for e in events if e.get("event_type") == "earnings" and effective_report(e)[0] <= as_of
     ]
     if not reported:
         return UNVERIFIED
 
-    latest = max(reported, key=lambda e: _as_date(e["event_date"]))
+    latest = max(reported, key=lambda e: effective_report(e)[0])
     if not actual_is_knowable(latest, as_of=as_of):
         return EarningsSurprise(
-            None, None, None, None, None, withheld_report_on=_as_date(latest["event_date"])
+            None, None, None, None, None, withheld_report_on=effective_report(latest)[0]
         )
 
     vendor = _float(latest.get("eps_estimate"))
     return EarningsSurprise(
-        reported_on=_as_date(latest["event_date"]),
+        reported_on=effective_report(latest)[0],
         eps_actual=_float(latest.get("eps_actual")),
         eps_estimate=own_estimate if own_estimate is not None else vendor,
         revenue_actual=_float(latest.get("revenue_actual")),

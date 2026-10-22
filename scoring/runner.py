@@ -151,12 +151,15 @@ def score_symbol(
     # and the price move always describe the same quarter — and so no measure
     # can read a bar that closed before the news was public.
     report = catalyst_features.last_knowable_earnings(events, as_of=as_of)
+    # The EFFECTIVE date and time (D49): the later of the two providers' dates,
+    # with the release time only where it belongs to the winning date.
+    anchor = catalyst_features.effective_report(report) if report else (None, "unknown")
     technical = technical_features.compute(
         symbol,
         bars,
         sector_closes=sector_closes,
-        reported_on=report["event_date"] if report else None,
-        release_time=(report or {}).get("event_time") or "unknown",
+        reported_on=anchor[0],
+        release_time=anchor[1],
     )
 
     fundamental = fundamental_features.compute(

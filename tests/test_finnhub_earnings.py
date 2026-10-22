@@ -35,14 +35,16 @@ def test_finnhubs_vocabulary_maps_onto_the_schemas():
     assert parse_times([row(hour="dmh")], UNIVERSE)[0]["event_time"] == "dmt"
 
 
-def test_a_blank_hour_is_dropped_rather_than_written_as_unknown():
-    """THE COLUMN ALREADY DEFAULTS TO UNKNOWN. Writing it would overwrite a
-    time an earlier run had successfully established — Finnhub leaves `hour`
-    blank until a report is close, so the same row goes from blank to `amc`
-    and must not go back."""
-    assert parse_times([row(hour="")], UNIVERSE) == []
-    assert parse_times([row(hour=None)], UNIVERSE) == []
-    assert parse_times([row(hour="whenever")], UNIVERSE) == []
+def test_a_blank_hour_is_kept_as_none_because_the_date_is_useful_alone():
+    """The DATE sets the effective report date (D49) whether or not the hour is
+    known, and Finnhub knows the date far more often than the hour — 100% of
+    rows against 15%. `None` rather than "unknown" so a blank can never
+    overwrite a time an earlier run established."""
+    for blank in ("", None, "whenever"):
+        parsed = parse_times([row(hour=blank)], UNIVERSE)
+        assert len(parsed) == 1
+        assert parsed[0]["event_time"] is None
+        assert parsed[0]["event_date"] == date(2026, 10, 28)
 
 
 def test_symbols_outside_the_universe_are_dropped():
@@ -67,10 +69,24 @@ def test_the_result_separates_coverage_from_agreement():
     how often its date agrees with the date FMP gave us, and a systematic
     one-day disagreement (measured live: 56% match) shows up ONLY here.
     """
-    result = StampResult(rows_seen=1000, with_hour=150, in_universe=100, matched=56, changed=50)
+    result = StampResult(
+        rows_seen=1000,
+        with_hour=150,
+        in_universe=100,
+        matched=56,
+        near_matched=40,
+        later_in_finnhub=22,
+        changed=50,
+    )
     assert result.hour_coverage == pytest.approx(0.15)
     assert result.match_rate == pytest.approx(0.56)
-    assert "56 matched" in str(result)
+    assert "56 dated the same day" in str(result)
+    assert "40 disagreed" in str(result)
+    assert "22 later in Finnhub" in str(result), (
+        "the direction is the point: only a Finnhub date LATER than FMP's moves "
+        "the effective report date, and only an FMP date that is too early can "
+        "hide a lookahead"
+    )
 
 
 def test_an_empty_run_reports_no_coverage_rather_than_zero_percent():

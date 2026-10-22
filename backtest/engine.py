@@ -175,8 +175,8 @@ DIVIDENDS_SQL = """
 """
 
 EVENTS_SQL = """
-    SELECT symbol, event_type, event_date, eps_estimate, eps_actual,
-           revenue_estimate, revenue_actual, dividend_amount
+    SELECT symbol, event_type, event_date, event_time, alt_event_date, alt_source,
+           eps_estimate, eps_actual, revenue_estimate, revenue_actual, dividend_amount
     FROM   events
     WHERE  symbol = %s
     ORDER  BY event_date
@@ -297,6 +297,7 @@ def walk_symbol(
         # the data (no provider publishes one), that is the session after the
         # report — which is exactly the window the recipe judges.
         report = catalyst_features.last_knowable_earnings(visible, as_of=day)
+        anchor = catalyst_features.effective_report(report) if report else (None, "unknown")
         catalyst = catalyst_features.compute(
             history.symbol,
             visible,
@@ -317,8 +318,8 @@ def walk_symbol(
                 sector_closes=sector_slice,
                 cfg=sets[0].cfg.recipes.pullback_to_trend,
                 structure_cfg=sets[0].cfg.recipes.base_breakout,
-                reported_on=report["event_date"] if report else None,
-                release_time=(report or {}).get("event_time") or "unknown",
+                reported_on=anchor[0],
+                release_time=anchor[1],
             )
             del structure_key
             for param_set in sets:
