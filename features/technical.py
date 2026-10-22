@@ -547,6 +547,129 @@ def sector_composite(
 
 
 @dataclass(frozen=True)
+class EarningsReaction:
+    """The market's response to a report, measured WITHOUT a release time.
+
+    **WHY NOT JUST THE GAP.** A single-bar gap is only the reaction if you know
+    when the news came out. For a report dated T, a pre-open release gaps on T
+    and an after-close release gaps on T+1 — and no FMP endpoint publishes the
+    release time (verified 2026-10-22). Reading the gap on T would credit an
+    after-close surprise to a bar that closed before it existed; reading it on
+    T+1 would miss every pre-open report entirely.
+
+    So the reaction is measured over a WINDOW that contains the gap either way:
+    from the close BEFORE the report through the close of the session after it.
+    Measuring to the window's CLOSE is also what makes the "hold" real — a gap
+    that filled intraday is not a reaction that survived, and it reports as a
+    small number rather than needing a separate test.
+
+    When the release time IS known the window tightens to exactly the sessions
+    the news could have moved:
+
+      * `bmo` — out before T's open, so the reaction is complete at T's close
+        and a plan may enter at T+1. One session, exact reference.
+      * `amc` — out after T's close, so T's own bar is pre-news and close(T) is
+        the exact reference. The window ends at T+1 as in the agnostic case.
+      * `unknown` / `dmt` — the agnostic window: reference close(T-1), through
+        close(T+1), entry at T+2. One session of extra noise bought in
+        exchange for never acting on a number that was not public.
+
+    The provider date disagreement makes this more than a nicety: measured
+    2026-10-22, FMP and Finnhub date the same report ONE DAY apart for a large
+    fraction of symbols (ADI 11-23 vs 11-24, CRM 12-01 vs 12-02, CIEN 12-09 vs
+    12-10). The agnostic window spans that error; a single-bar gap would fall
+    on the wrong side of it.
+    """
+
+    reported_on: date
+    release_time: str
+    reference_close: float
+    """The last close BEFORE the news could have been public."""
+    end_session: date
+    """The session whose close completes the window."""
+    sessions: int
+    reaction_pct: float
+    reaction_points: float
+    window_low: float
+    """The lowest low inside the window — where the reaction is invalidated."""
+    complete: bool
+    """True only when `end_session` is the LAST bar available: the recipe may
+    judge a reaction exactly once, at the close that completes it."""
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"{self.reaction_pct:+.1f}% over {self.sessions} session(s) from "
+            f"{self.reference_close:.2f} (report {self.reported_on}, "
+            f"release {self.release_time})"
+        )
+
+
+# `dmt` (during market hours) behaves like an unknown time: the news lands with
+# the session half traded, so the reaction spans the rest of T and into T+1.
+AGNOSTIC_TIMES = frozenset({"unknown", "dmt", ""})
+
+
+def earnings_reaction(
+    bars: pd.DataFrame, *, reported_on: date, release_time: str = "unknown"
+) -> EarningsReaction | None:
+    """Measure the reaction window for one report. None when it cannot be.
+
+    None rather than zeros: before the window is in the data there is no
+    reaction to report, and a 0.0% reading would be indistinguishable from a
+    report the market ignored.
+    """
+    if bars is None or len(bars) < 3 or "session_date" not in bars:
+        return None
+    column = "adj_close" if "adj_close" in bars else "close"
+    low_column = "adj_low" if "adj_low" in bars else "low"
+    sessions = _to_dates(bars["session_date"])
+    closes = pd.to_numeric(bars[column], errors="coerce")
+    lows = pd.to_numeric(bars[low_column], errors="coerce")
+
+    # The first session on or after the report date: a provider can date a
+    # report on a weekend, and the reaction belongs to the next session.
+    matches = [i for i, day in enumerate(sessions) if day >= reported_on]
+    if not matches:
+        return None
+    t_index = matches[0]
+
+    time = (release_time or "unknown").lower()
+    if time == "bmo":
+        reference_index, end_index = t_index - 1, t_index
+    elif time == "amc":
+        reference_index, end_index = t_index, t_index + 1
+    elif time in AGNOSTIC_TIMES:
+        reference_index, end_index = t_index - 1, t_index + 1
+    else:
+        return None
+
+    if reference_index < 0 or end_index >= len(bars):
+        return None
+    reference = closes.iloc[reference_index]
+    end_close = closes.iloc[end_index]
+    if pd.isna(reference) or pd.isna(end_close) or reference == 0:
+        return None
+
+    window = slice(reference_index + 1, end_index + 1)
+    window_lows = lows.iloc[window].dropna()
+    if window_lows.empty:
+        return None
+
+    return EarningsReaction(
+        reported_on=reported_on,
+        release_time=time,
+        reference_close=float(reference),
+        end_session=sessions[end_index],
+        sessions=end_index - reference_index,
+        reaction_pct=float((end_close - reference) / reference * 100.0),
+        reaction_points=float(end_close - reference),
+        window_low=float(window_lows.min()),
+        complete=end_index == len(bars) - 1,
+    )
+
+
+@dataclass(frozen=True)
 class TechnicalFeatures:
     """Everything Pillar A reads for one symbol on one day."""
 
@@ -562,6 +685,8 @@ class TechnicalFeatures:
     rs_vs_sector: float | None
     structure: PriceStructure
     bars_available: int
+    reaction: EarningsReaction | None = None
+    """The post-earnings reaction window, when a knowable report anchors one."""
 
     def as_dict(self) -> dict:
         """Flat mapping, for logging and for the eventual `features` writer."""
@@ -569,6 +694,7 @@ class TechnicalFeatures:
         out["ma"] = asdict(self.ma)
         out["week52"] = asdict(self.week52)
         out["structure"] = asdict(self.structure)
+        out["reaction"] = asdict(self.reaction) if self.reaction else None
         return out
 
 
@@ -579,12 +705,20 @@ def compute(
     sector_closes: pd.Series | None = None,
     cfg: config.PullbackRecipe | None = None,
     structure_cfg: config.BreakoutRecipe | None = None,
+    reported_on: date | None = None,
+    release_time: str = "unknown",
 ) -> TechnicalFeatures:
     """Measure one symbol from one frame of bars. Pure: no DB, no network.
 
     Window lengths come from `config/scoring.yaml`'s pullback recipe, which is
     where D25 says numbers live — the MA triple and the RSI period are shared
     across every technical reading, not private to that recipe.
+
+    `reported_on` / `release_time` anchor the post-earnings reaction window.
+    They are passed IN rather than read from the database because this function
+    is pure, and because the caller already has the one report whose actual is
+    knowable — deciding that twice is how the beat and the price reaction end
+    up describing different quarters.
 
     `structure_cfg` exists for D43's sweep. `min_base_weeks` and
     `max_base_depth_pct` are read by the MEASUREMENT as well as by the gate, so
@@ -624,6 +758,14 @@ def compute(
             None if sector_closes is None else relative_strength_vs_sector(closes, sector_closes)
         ),
         bars_available=len(bars),
+        # Anchored on the last KNOWABLE report (see `catalyst
+        # .last_knowable_earnings`), so the reaction and the beat always
+        # describe the same quarter.
+        reaction=(
+            None
+            if reported_on is None
+            else earnings_reaction(bars, reported_on=reported_on, release_time=release_time)
+        ),
     )
 
 

@@ -35,7 +35,7 @@ from core import clock, config, db
 from core.budget import BudgetExhausted
 from core.jobs import job_run
 from ingest.fmp_client import FMPClient, FMPPlanError
-from ingest.runner import as_float, as_int, for_each_symbol
+from ingest.runner import as_float, as_int, for_each_symbol, require_value_coverage
 
 log = logging.getLogger(__name__)
 
@@ -116,16 +116,28 @@ def parse_estimates(
                 "symbol": symbol,
                 "period_type": period_type,
                 "fiscal_period_end": period_end,
-                "revenue_avg": as_float(row.get("estimatedRevenueAvg")),
-                "revenue_low": as_float(row.get("estimatedRevenueLow")),
-                "revenue_high": as_float(row.get("estimatedRevenueHigh")),
-                "eps_avg": as_float(row.get("estimatedEpsAvg")),
-                "eps_low": as_float(row.get("estimatedEpsLow")),
-                "eps_high": as_float(row.get("estimatedEpsHigh")),
-                "ebitda_avg": as_float(row.get("estimatedEbitdaAvg")),
-                "net_income_avg": as_float(row.get("estimatedNetIncomeAvg")),
-                "analysts_revenue": as_int(row.get("numberAnalystEstimatedRevenue")),
-                "analysts_eps": as_int(row.get("numberAnalystsEstimatedEps")),
+                # TWO SPELLINGS FOR EVERY FIELD, and the first one is the
+                # CURRENT one. FMP renamed `estimatedEpsAvg` to `epsAvg` (and
+                # the rest to match) and nothing failed: 2,598 snapshot rows
+                # were written on 2026-10-21 with every estimate column NULL,
+                # because a row that parses to None still INSERTs. The D7
+                # revision clock recorded nothing at all until
+                # `scripts/field_probe.py` compared the live shape to what this
+                # parser reads. The old names are kept as fallbacks, not out of
+                # nostalgia, but because a provider that renames once can
+                # rename back.
+                "revenue_avg": as_float(_first(row, "revenueAvg", "estimatedRevenueAvg")),
+                "revenue_low": as_float(_first(row, "revenueLow", "estimatedRevenueLow")),
+                "revenue_high": as_float(_first(row, "revenueHigh", "estimatedRevenueHigh")),
+                "eps_avg": as_float(_first(row, "epsAvg", "estimatedEpsAvg")),
+                "eps_low": as_float(_first(row, "epsLow", "estimatedEpsLow")),
+                "eps_high": as_float(_first(row, "epsHigh", "estimatedEpsHigh")),
+                "ebitda_avg": as_float(_first(row, "ebitdaAvg", "estimatedEbitdaAvg")),
+                "net_income_avg": as_float(_first(row, "netIncomeAvg", "estimatedNetIncomeAvg")),
+                "analysts_revenue": as_int(
+                    _first(row, "numAnalystsRevenue", "numberAnalystEstimatedRevenue")
+                ),
+                "analysts_eps": as_int(_first(row, "numAnalystsEps", "numberAnalystsEstimatedEps")),
             }
         )
     parsed.sort(key=lambda r: r["fiscal_period_end"])
@@ -151,7 +163,18 @@ def snapshot_symbol(
                 limit=limit,
             )
         )
-    return db.executemany(UPSERT, rows) if rows else 0
+    if not rows:
+        return 0
+    # A SNAPSHOT OF NOTHING IS NOT A SNAPSHOT. D7's revision clock cannot be
+    # bought back, so a run that parses rows with every estimate NULL must fail
+    # loudly rather than write hollow history — which is exactly what happened
+    # on 2026-10-21 when `estimatedEpsAvg` became `epsAvg`.
+    require_value_coverage(
+        rows,
+        fields=("eps_avg", "revenue_avg"),
+        label=f"analyst-estimates for {symbol}",
+    )
+    return db.executemany(UPSERT, rows)
 
 
 def plan_blocks_estimates(client: FMPClient) -> bool:
@@ -267,6 +290,15 @@ def run(client: FMPClient | None = None, *, symbols: list[str] | None = None) ->
             )
 
     return outcome.rows
+
+
+def _first(row: dict, *keys: str):
+    """First key present and non-None. Tolerates a provider rename."""
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -18,11 +18,21 @@ def evaluate(
     *,
     cfg=None,
 ) -> RecipeResult:
-    """A beat-and-raise that gapped up and is holding its gap.
+    """A beat-and-raise whose price reaction held through the window.
 
-    The trade: buy the hold above the gap day's low, stop below that low
-    (a fill invalidates the whole premise), target multiples of the gap itself
-    — the market's own statement about what the news was worth.
+    The trade: buy the hold above the reaction's low, stop below it (a fill
+    invalidates the whole premise), target multiples of the reaction itself —
+    the market's own statement about what the news was worth.
+
+    **THE REACTION IS A WINDOW, NOT A BAR, AND THAT IS A LOOKAHEAD FIX.** For a
+    report dated T, a pre-open release gaps on T and an after-close release
+    gaps on T+1, and no provider publishes the release time. Reading a single
+    bar would either credit an after-close surprise to a bar that closed before
+    it existed, or miss every pre-open report. So the reaction is measured from
+    the close before the report through the close of the session after it
+    (`features.technical.earnings_reaction`), judged once at the close that
+    completes that window, and the earliest entry is the session after it —
+    T+2, or T+1 when a release time confirms `bmo`.
 
     WHAT THIS RECIPE CANNOT YET CHECK, and says so rather than pretending:
     `require_raised_guidance` has no data source. Guidance text is in neither
@@ -33,7 +43,6 @@ def evaluate(
     scoring_cfg = cfg or config.scoring()
     recipe = scoring_cfg.recipes.post_earnings_drift
     geometry = scoring_cfg.geometry.post_earnings_drift
-    structure = technical.structure
 
     checks: dict[str, bool] = {}
     if not recipe.enabled:
@@ -68,42 +77,64 @@ def evaluate(
     if recipe.require_raised_guidance:
         checks["raised_guidance_UNVERIFIED"] = False
 
-    gap = structure.gap_up_pct
-    gapped = gap is not None and gap >= recipe.min_gap_up_pct
-    checks["gapped_up"] = gapped
-    if not gapped:
+    # ── the reaction, measured without needing a release time ───────────────
+    reaction = technical.reaction
+    if reaction is None or technical.close is None:
         return no_setup(
             NAME,
-            (
-                f"gap of {gap:.2f}% is under the {recipe.min_gap_up_pct:g}% minimum"
-                if gap is not None
-                else "no gap measurable"
-            ),
+            "no measurable reaction window — the report's actual is not knowable yet, "
+            "or the sessions around it are missing",
             checks,
         )
 
-    if structure.gap_day_low is None or technical.close is None:
-        return no_setup(NAME, "no gap-day low to stop beneath", checks)
+    # JUDGED EXACTLY ONCE, at the close that completes the window. A reaction
+    # re-judged on later sessions would re-enter the same idea for days, and
+    # the window's own close is what makes the hold part of the measurement
+    # rather than a separate guess.
+    checks["reaction_window_complete"] = reaction.complete
+    if not reaction.complete:
+        return no_setup(
+            NAME,
+            f"the reaction window ends {reaction.end_session} and is not the latest "
+            f"session — judged at the close that completes it, never before",
+            checks,
+        )
 
-    holding = technical.close > structure.gap_day_low
-    checks["holds_gap_low"] = holding
+    reacted = reaction.reaction_pct >= recipe.min_gap_up_pct
+    checks["reacted_up"] = reacted
+    if not reacted:
+        return no_setup(
+            NAME,
+            f"reaction {reaction.reaction_pct:+.2f}% over {reaction.sessions} session(s) "
+            f"is under the {recipe.min_gap_up_pct:g}% minimum — a move that filled is "
+            f"not a reaction that held",
+            checks,
+        )
+
+    # The residual hold test. The reaction is measured TO the window's close,
+    # so a filled gap already fails above; this only rejects a close sitting on
+    # the window's low, which is a rejection candle rather than a hold.
+    holding = technical.close > reaction.window_low
+    checks["holds_reaction_low"] = holding
     if recipe.require_holds_day_one_low and not holding:
         return no_setup(
             NAME,
-            f"closed {technical.close:.2f} below the gap-day low "
-            f"{structure.gap_day_low:.2f} — the gap is filling",
+            f"closed {technical.close:.2f} at the reaction low "
+            f"{reaction.window_low:.2f} — the move is being rejected",
             checks,
         )
 
-    if structure.prior_close is None:
-        return no_setup(NAME, "no prior close to measure the gap from", checks)
-    gap_points = technical.close - structure.prior_close
+    gap_points = reaction.reaction_points
     if gap_points <= 0:
-        return no_setup(NAME, "the gap has already closed in points", checks)
+        return no_setup(NAME, "the reaction is not positive in points", checks)
 
     plan, why = build_plan(
         entry_reference=technical.close,
-        structural_stop=structure.gap_day_low,
+        # The window's low, not the gap day's: for an after-close report the
+        # gap day IS the second session, and for an unknown time it could be
+        # either, so the lowest low inside the window is the level that
+        # invalidates the move whichever session carried it.
+        structural_stop=reaction.window_low,
         target_1=technical.close + gap_points * geometry.tp1_gap_multiple,
         target_2=technical.close + gap_points * geometry.tp2_gap_multiple,
         features=technical,
@@ -117,8 +148,8 @@ def evaluate(
         recipe=NAME,
         triggered=True,
         reason=(
-            f"gapped {gap:.1f}% {since} day(s) after earnings, {catalyst.surprise.verdict}, "
-            f"holding {structure.gap_day_low:.2f} (guidance UNVERIFIED)"
+            f"reacted {reaction.summary}, {catalyst.surprise.verdict}, holding above "
+            f"{reaction.window_low:.2f} (guidance UNVERIFIED)"
         ),
         plan=plan,
         checks=checks,

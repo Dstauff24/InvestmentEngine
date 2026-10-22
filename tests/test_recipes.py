@@ -15,7 +15,13 @@ from core import config
 from features.catalyst import CatalystFeatures, EarningsSurprise, InsiderCluster
 from features.evidence import EvidenceDepth
 from features.fundamental import FundamentalFeatures, RevisionMomentum
-from features.technical import MAStack, PriceStructure, TechnicalFeatures, WeekStructure
+from features.technical import (
+    EarningsReaction,
+    MAStack,
+    PriceStructure,
+    TechnicalFeatures,
+    WeekStructure,
+)
 from scoring.recipes import breakout, drift, evaluate_all, pullback
 from scoring.recipes.base import build_plan
 
@@ -378,22 +384,100 @@ def test_a_missing_sector_composite_refuses_rather_than_assuming():
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def reaction(**kw) -> EarningsReaction:
+    """A completed reaction window: 100.00 before the report, 105.00 after.
+
+    The agnostic shape — two sessions, reference close(T-1) — because no
+    provider publishes a release time, so that is what the engine actually
+    gets for nearly every report.
+    """
+    base = {
+        "reported_on": date(2026, 10, 19),
+        "release_time": "unknown",
+        "reference_close": 100.0,
+        "end_session": date(2026, 10, 21),
+        "sessions": 2,
+        "reaction_pct": 5.0,
+        "reaction_points": 5.0,
+        "window_low": 99.0,
+        "complete": True,
+    }
+    base.update(kw)
+    return EarningsReaction(**base)
+
+
 def drift_tech(**kw) -> TechnicalFeatures:
     structure = {"gap_up_pct": 4.0, "gap_day_low": 99.0, "prior_close": 100.0}
     structure.update(kw.pop("structure", {}))
-    base = {"close": 105.0, "structure": structure}
+    base = {
+        "close": 105.0,
+        "structure": structure,
+        "reaction": kw.pop("reaction", reaction()),
+    }
     base.update(kw)
     return tech(**base)
 
 
-def test_a_holding_gap_fires():
+def test_a_held_reaction_fires():
     result = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=4))
     assert result.triggered, result.reason
-    gap = 105.0 - 100.0
+    points = 5.0
     assert result.plan.target_2 == pytest.approx(
-        105.0 + gap * CFG.geometry.post_earnings_drift.tp2_gap_multiple
+        105.0 + points * CFG.geometry.post_earnings_drift.tp2_gap_multiple
     )
-    assert result.plan.stop < 99.0
+    assert result.plan.stop < 99.0, "stopped below the reaction's low"
+
+
+def test_an_incomplete_window_does_not_fire():
+    """ "Evaluate at the close that completes the window" — a reaction judged on
+    a later session would re-enter the same idea for days."""
+    result = drift.evaluate(
+        drift_tech(reaction=reaction(complete=False)), fund(), cata(days_since_earnings=4)
+    )
+    assert not result.triggered
+    assert "not the latest session" in result.reason
+
+
+def test_no_knowable_report_means_no_reaction_to_judge():
+    """With no release time, a report dated today has not necessarily been
+    released — so there is nothing to measure, rather than a zero."""
+    result = drift.evaluate(drift_tech(reaction=None), fund(), cata(days_since_earnings=0))
+    assert not result.triggered
+    assert "no measurable reaction window" in result.reason
+
+
+def test_a_reaction_that_filled_is_not_a_reaction_that_held():
+    """Measured to the window's CLOSE, so a gap given back reads as a small
+    number instead of needing a separate hold test."""
+    result = drift.evaluate(
+        drift_tech(reaction=reaction(reaction_pct=0.1, reaction_points=0.1)),
+        fund(),
+        cata(days_since_earnings=4),
+    )
+    assert not result.triggered
+    assert "filled is not a reaction that held" in result.reason
+
+
+def test_a_close_on_the_reaction_low_is_a_rejection():
+    result = drift.evaluate(
+        drift_tech(close=99.0, reaction=reaction(window_low=99.0)),
+        fund(),
+        cata(days_since_earnings=4),
+    )
+    assert not result.triggered
+    assert "being rejected" in result.reason
+
+
+def test_a_confirmed_pre_open_report_uses_a_one_session_window():
+    """The bmo tightening: reaction complete at T's close, so a plan may enter
+    at T+1 instead of T+2."""
+    result = drift.evaluate(
+        drift_tech(reaction=reaction(release_time="bmo", sessions=1)),
+        fund(),
+        cata(days_since_earnings=1),
+    )
+    assert result.triggered, result.reason
+    assert "release bmo" in result.reason
 
 
 def test_the_unverifiable_guidance_check_is_reported_as_failed_not_skipped():
@@ -412,22 +496,19 @@ def test_outside_the_drift_window_does_not_fire():
     assert "drift window" in result.reason
 
 
-def test_a_gap_below_the_minimum_does_not_fire():
+def test_the_single_bar_gap_is_no_longer_what_the_recipe_reads():
+    """`structure.gap_up_pct` measures the LATEST bar's gap, which is the
+    reaction only if you know the release time. The recipe reads the window
+    instead, and these two tests replaced the ones that gated on the bar:
+    `test_a_reaction_that_filled_is_not_a_reaction_that_held` and
+    `test_a_close_on_the_reaction_low_is_a_rejection`."""
     result = drift.evaluate(
-        drift_tech(structure={"gap_up_pct": 0.5}), fund(), cata(days_since_earnings=4)
-    )
-    assert not result.triggered
-    assert "under the" in result.reason
-
-
-def test_a_filling_gap_does_not_fire():
-    result = drift.evaluate(
-        drift_tech(close=98.0, structure={"gap_day_low": 99.0}),
+        drift_tech(structure={"gap_up_pct": 0.0, "gap_day_low": 50.0}),
         fund(),
         cata(days_since_earnings=4),
     )
-    assert not result.triggered
-    assert "filling" in result.reason
+    assert result.triggered, "the window, not the bar, decides"
+    assert result.plan.stop < 99.0, "and the window's low is the stop"
 
 
 def test_no_eps_growth_does_not_fire():

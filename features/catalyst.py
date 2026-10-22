@@ -284,6 +284,27 @@ class EarningsSurprise:
 UNVERIFIED = EarningsSurprise(None, None, None, None, None)
 
 
+def last_knowable_earnings(events: list[dict], *, as_of: date) -> dict | None:
+    """The most recent earnings event whose ACTUAL was public before `as_of`.
+
+    The anchor for everything the drift recipe reads about one report: the beat
+    comes from this row and so does the price-reaction window
+    (`features.technical.earnings_reaction`), so the two cannot end up
+    describing different quarters. Returns None when the latest report is not
+    yet knowable — the recipe then has nothing to judge, which is the correct
+    answer rather than a reason to reach back a quarter.
+    """
+    reported = [
+        e
+        for e in events
+        if e.get("event_type") == "earnings" and _as_date(e.get("event_date")) <= as_of
+    ]
+    if not reported:
+        return None
+    latest = max(reported, key=lambda e: _as_date(e["event_date"]))
+    return latest if actual_is_knowable(latest, as_of=as_of) else None
+
+
 def actual_is_knowable(event: dict, *, as_of: date) -> bool:
     """Whether the reported actual was public before `as_of`'s close.
 

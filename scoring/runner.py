@@ -146,7 +146,18 @@ def score_symbol(
 ) -> ScoredSymbol:
     """PHASE ONE for one symbol. Loads its features and maps them to pillars."""
     bars = technical_features.load_bars(symbol, as_of=as_of)
-    technical = technical_features.compute(symbol, bars, sector_closes=sector_closes)
+    events = catalyst_features.load_events(symbol, as_of=as_of)
+    # The reaction window is anchored on the last KNOWABLE report, so the beat
+    # and the price move always describe the same quarter — and so no measure
+    # can read a bar that closed before the news was public.
+    report = catalyst_features.last_knowable_earnings(events, as_of=as_of)
+    technical = technical_features.compute(
+        symbol,
+        bars,
+        sector_closes=sector_closes,
+        reported_on=report["event_date"] if report else None,
+        release_time=(report or {}).get("event_time") or "unknown",
+    )
 
     fundamental = fundamental_features.compute(
         symbol,
@@ -154,7 +165,6 @@ def score_symbol(
         fundamental_features.load_estimate_snapshots(symbol, as_of=as_of),
         as_of=as_of,
     )
-    events = catalyst_features.load_events(symbol, as_of=as_of)
     catalyst = catalyst_features.compute(
         symbol,
         events,

@@ -928,3 +928,102 @@ def test_the_legacy_spellings_are_still_tolerated():
     assert row["ev_to_ebitda"] == 24.8
     assert row["payout_ratio"] == 0.16
     assert row["dividend_per_share"] == 1.0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Provider field renames (found by scripts/field_probe.py, 2026-10-22)
+# ══════════════════════════════════════════════════════════════════════════
+
+ESTIMATES_CURRENT = [
+    {
+        "symbol": "AAPL",
+        "date": "2027-03-31",
+        "revenueAvg": 101_000_000_000,
+        "revenueLow": 98_000_000_000,
+        "revenueHigh": 104_000_000_000,
+        "epsAvg": 2.57,
+        "epsLow": 2.26751,
+        "epsHigh": 2.79962,
+        "ebitdaAvg": 34_000_000_000,
+        "netIncomeAvg": 27_000_000_000,
+        "numAnalystsEps": 6,
+        "numAnalystsRevenue": 5,
+    }
+]
+
+
+def test_the_current_estimate_field_names_parse():
+    """THE RENAME THAT RECORDED NOTHING. `estimatedEpsAvg` became `epsAvg` and
+    2,598 snapshot rows were written on 2026-10-21 with every estimate column
+    NULL — a row that parses to None still INSERTs, so the job reported
+    success and D7's revision clock recorded nothing."""
+    rows = parse_estimates(
+        ESTIMATES_CURRENT,
+        symbol="AAPL",
+        period_type="quarter",
+        snapshot_date=date(2026, 10, 22),
+        limit=4,
+    )
+    assert len(rows) == 1
+    assert rows[0]["eps_avg"] == pytest.approx(2.57)
+    assert rows[0]["revenue_avg"] == pytest.approx(101_000_000_000)
+    assert rows[0]["analysts_eps"] == 6
+    assert rows[0]["analysts_revenue"] == 5
+
+
+def test_the_previous_estimate_field_names_still_parse():
+    """A provider that renames once can rename back."""
+    rows = parse_estimates(
+        fx.ANALYST_ESTIMATES_QUARTER,
+        symbol="AAPL",
+        period_type="quarter",
+        snapshot_date=date(2026, 10, 22),
+        limit=4,
+    )
+    assert any(r["eps_avg"] is not None for r in rows)
+
+
+def test_a_snapshot_whose_estimates_are_all_null_fails_rather_than_storing():
+    """The row-count guard was not enough: these rows exist, and storing them
+    would write hollow history into a series no backfill can repair."""
+    from ingest.runner import EmptyColumns, require_value_coverage
+
+    hollow = [{"eps_avg": None, "revenue_avg": None}, {"eps_avg": None, "revenue_avg": None}]
+    with pytest.raises(EmptyColumns) as exc:
+        require_value_coverage(hollow, fields=("eps_avg", "revenue_avg"), label="estimates")
+    assert "field_probe" in str(exc.value), "the message says how to find the rename"
+
+
+def test_partial_coverage_is_allowed_because_a_forward_quarter_can_be_thin():
+    from ingest.runner import require_value_coverage
+
+    mixed = [{"eps_avg": 2.0}, {"eps_avg": None, "revenue_avg": None}]
+    assert require_value_coverage(
+        mixed, fields=("eps_avg", "revenue_avg"), label="estimates"
+    ) == pytest.approx(0.5)
+
+
+def test_an_empty_payload_is_not_a_coverage_failure():
+    """Nothing parsed is `for_each_symbol`'s problem, not this guard's."""
+    from ingest.runner import require_value_coverage
+
+    assert require_value_coverage([], fields=("eps_avg",), label="estimates") == 0.0
+
+
+def test_the_calendar_actual_rename_parses_both_spellings():
+    """The calendar now returns `epsActual`/`revenueActual` where it returned
+    `eps`/`revenue`; only a fixture was ever checked, so nothing failed."""
+    current = [
+        {
+            "symbol": "AAPL",
+            "date": "2026-10-15",
+            "epsActual": 2.03,
+            "epsEstimated": 1.98,
+            "revenueActual": 109_417_000_000,
+            "revenueEstimated": 108_000_000_000,
+        }
+    ]
+    rows = parse_earnings(current, {"AAPL"})
+    assert rows[0]["eps_actual"] == pytest.approx(2.03)
+    assert rows[0]["revenue_actual"] == pytest.approx(109_417_000_000)
+    assert rows[0]["is_confirmed"] is True

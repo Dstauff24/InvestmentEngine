@@ -93,3 +93,23 @@ class FinnhubClient:
         if not isinstance(payload, list):
             return []
         return [row for row in payload if isinstance(row, dict)]
+
+    def earnings_calendar(self, start: date, end: date) -> list[dict]:
+        """Earnings dates with an `hour` field — the RELEASE TIME.
+
+        The reason this endpoint is called at all: FMP dropped `time` from both
+        of its earnings endpoints (verified 2026-10-22), and without a release
+        time the engine cannot tell a pre-open report from an after-close one.
+        Finnhub publishes `hour` as `bmo` / `amc` / `dmh`, which is exactly the
+        missing fact — and knowing it lets `post_earnings_drift` judge a
+        pre-open report a day earlier than the release-time-agnostic rule can.
+
+        Market-wide over a date window, so one call covers the universe. The
+        response is `{"earningsCalendar": [...]}` rather than a bare array,
+        which is the opposite of `/company-news`.
+        """
+        payload = self.get("/calendar/earnings", **{"from": str(start), "to": str(end)})
+        rows = payload.get("earningsCalendar") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]

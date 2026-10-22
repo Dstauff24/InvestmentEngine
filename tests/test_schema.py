@@ -265,3 +265,51 @@ def test_a_comment_cannot_inject_a_table_or_view_name():
     # and the real scanners agree about the shipped schema
     assert "may" not in set(CREATE_VIEW.findall(SCHEMA_CODE))
     assert "ghost_table" not in set(CREATE_TABLE.findall(SCHEMA_CODE))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Module shape: nothing defined after the CLI guard
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_no_module_defines_anything_after_its_main_guard():
+    """TESTS GREEN, CLI BROKEN — and the difference is one line's position.
+
+    A `def` placed below `if __name__ == "__main__": sys.exit(main())` is
+    reachable when the module is IMPORTED (the whole body runs) and unreachable
+    when it is RUN (the guard calls main() first, and the def is never
+    executed). Found live on 2026-10-22: `_first` was appended to
+    `ingest/fmp_estimates.py` after the guard, every unit test passed, and
+    `python -m ingest.fmp_estimates` died with NameError on all 433 symbols.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(root.glob("*/*.py")):
+        if "test" in path.parts[-2] or path.parts[-2] in ("tests", "__pycache__"):
+            continue
+        tree = ast.parse(path.read_text())
+        guard_line = next(
+            (
+                node.lineno
+                for node in tree.body
+                if isinstance(node, ast.If) and ast.dump(node.test).find("__main__") != -1
+            ),
+            None,
+        )
+        if guard_line is None:
+            continue
+        late = [
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef | ast.ClassDef | ast.AsyncFunctionDef)
+            and node.lineno > guard_line
+        ]
+        if late:
+            offenders[str(path.relative_to(root))] = late
+
+    assert offenders == {}, (
+        f"defined after the `__main__` guard, so the CLI path cannot see them: {offenders}"
+    )

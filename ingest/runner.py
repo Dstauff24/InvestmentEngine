@@ -53,6 +53,43 @@ class TooManyFailures(RuntimeError):
     """The failure rate says the provider or the credentials are broken."""
 
 
+class EmptyColumns(RuntimeError):
+    """Rows parsed, but the fields that make them worth storing are all NULL."""
+
+
+def require_value_coverage(
+    rows: list[dict], *, fields: tuple[str, ...], label: str, minimum: float = 0.0
+) -> float:
+    """Fraction of rows carrying at least one of `fields`. Raises when it is 0.
+
+    **THE ROW-COUNT GUARD WAS NOT ENOUGH.** `for_each_symbol` refuses to report
+    "ok, 0 rows" when everything failed, because a job that writes nothing and
+    says it succeeded is how a broken pipeline looks healthy. This is the same
+    failure one level in: on 2026-10-21 the estimates job wrote 2,598 snapshot
+    rows and reported success, and every estimate column in them was NULL —
+    FMP had renamed `estimatedEpsAvg` to `epsAvg`, and a row that parses to
+    None still INSERTs. The D7 revision clock, which no backfill can ever buy
+    back, recorded nothing while the job logs said it was working.
+
+    So a writer whose rows are all hollow fails. `minimum` allows a job to
+    demand more than "at least one row has a value" where that is meaningful;
+    zero coverage is always an error, because it means the parser and the
+    payload no longer agree about anything.
+    """
+    if not rows:
+        return 0.0
+    covered = sum(1 for row in rows if any(row.get(f) is not None for f in fields))
+    coverage = covered / len(rows)
+    if coverage <= minimum:
+        raise EmptyColumns(
+            f"{label}: {len(rows)} row(s) parsed and {covered} carry any of "
+            f"{list(fields)} ({coverage * 100:.0f}%). The parser and the payload no "
+            f"longer agree — run `python scripts/field_probe.py` to see which field "
+            f"names moved."
+        )
+    return coverage
+
+
 def for_each_symbol(
     symbols: Sequence[str],
     handler: Callable[[str], int],

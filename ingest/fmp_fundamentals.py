@@ -211,7 +211,10 @@ def merge_statements(
                 "gross_margin": safe_ratio(row.get("grossProfit"), revenue),
                 "operating_margin": safe_ratio(row.get("operatingIncome"), revenue),
                 "net_margin": safe_ratio(row.get("netIncome"), revenue),
-                "roe": as_float(rat.get("returnOnEquity")),
+                # ROE MOVED from /stable/ratios to /stable/key-metrics, and
+                # nothing failed: 0 of 7,325 stored rows had it. Read from
+                # whichever payload carries it.
+                "roe": as_float(_first(met, "returnOnEquity") or _first(rat, "returnOnEquity")),
                 # `/stable/` renamed most of these; the second spelling in each
                 # `_first` is the /api/v3/ name they replaced. Kept because a
                 # silently-NULL column is the exact failure this caused once

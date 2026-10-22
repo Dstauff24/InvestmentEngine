@@ -321,9 +321,12 @@ RATIOS = [
     },
 ]
 
+# `returnOnEquity` lives HERE, not in `ratios` — verified live 2026-10-22 after
+# `scripts/field_probe.py` found 0 of 7,325 stored rows had it.
 KEY_METRICS = [
     {
         "date": "2026-06-27",
+        "returnOnEquity": 0.1472,
         "returnOnInvestedCapital": 0.55,  # was roic
         "evToEBITDA": 24.8,  # was enterpriseValueOverEBITDA
     },

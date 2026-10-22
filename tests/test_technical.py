@@ -503,3 +503,130 @@ def test_a_sector_below_the_member_floor_has_no_index():
         frame["adj_close"] = frame["close"]
         frames[name] = frame
     assert tech.sector_composite(frames, min_members=3).empty
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The earnings reaction window (D48/D49)
+# ══════════════════════════════════════════════════════════════════════════
+
+REPORT = date(2026, 10, 20)
+
+
+def reaction_bars(closes: list[float], lows: list[float] | None = None) -> pd.DataFrame:
+    """Five sessions: 10-16, 10-19, 10-20 (T), 10-21, 10-22."""
+    days = [date(2026, 10, 16), date(2026, 10, 19), REPORT, date(2026, 10, 21), date(2026, 10, 22)]
+    lows = lows or [c - 1.0 for c in closes]
+    return pd.DataFrame(
+        {
+            "session_date": days[: len(closes)],
+            "open": closes,
+            "high": [c + 0.5 for c in closes],
+            "low": lows,
+            "close": closes,
+            "volume": [1_000_000] * len(closes),
+        }
+    )
+
+
+def test_an_unknown_release_time_spans_the_close_before_through_the_day_after():
+    """THE LOOKAHEAD-FREE WINDOW. A pre-open report gaps on T and an
+    after-close one gaps on T+1; no provider publishes which, so the window
+    contains the gap either way."""
+    bars = reaction_bars([98.0, 100.0, 105.0, 106.0])
+    r = tech.earnings_reaction(bars, reported_on=REPORT, release_time="unknown")
+
+    assert r is not None
+    assert r.reference_close == pytest.approx(100.0), "close(T-1)"
+    assert r.end_session == date(2026, 10, 21), "close(T+1)"
+    assert r.sessions == 2
+    assert r.reaction_pct == pytest.approx(6.0)
+    assert r.reaction_points == pytest.approx(6.0)
+    assert r.complete is True
+
+
+def test_a_pre_open_report_completes_on_the_report_date_itself():
+    """`bmo`: the news was out before T's open, so T's close completes the
+    reaction and a plan may enter a day earlier."""
+    bars = reaction_bars([98.0, 100.0, 105.0])
+    r = tech.earnings_reaction(bars, reported_on=REPORT, release_time="bmo")
+
+    assert r.reference_close == pytest.approx(100.0)
+    assert r.end_session == REPORT
+    assert r.sessions == 1
+    assert r.reaction_pct == pytest.approx(5.0)
+    assert r.complete is True
+
+
+def test_an_after_close_report_uses_the_report_days_close_as_the_reference():
+    """`amc`: T's own bar is PRE-news, so close(T) is the exact reference and
+    including T's move would attribute it to a report that had not happened."""
+    bars = reaction_bars([98.0, 100.0, 101.0, 107.0])
+    r = tech.earnings_reaction(bars, reported_on=REPORT, release_time="amc")
+
+    assert r.reference_close == pytest.approx(101.0), "close(T), not close(T-1)"
+    assert r.end_session == date(2026, 10, 21)
+    assert r.sessions == 1
+    assert r.reaction_pct == pytest.approx((107.0 - 101.0) / 101.0 * 100)
+
+
+def test_during_market_hours_is_treated_like_an_unknown_time():
+    """The news lands with the session half traded, so the reaction runs into
+    the next one."""
+    bars = reaction_bars([98.0, 100.0, 105.0, 106.0])
+    assert tech.earnings_reaction(bars, reported_on=REPORT, release_time="dmt").sessions == 2
+
+
+def test_the_window_is_incomplete_until_its_last_session_is_the_latest_bar():
+    """What stops the recipe judging a reaction before it has finished, and
+    what stops it re-judging the same one for days afterwards."""
+    only_t = reaction_bars([98.0, 100.0, 105.0])
+    assert tech.earnings_reaction(only_t, reported_on=REPORT, release_time="unknown") is None
+
+    through_t1 = reaction_bars([98.0, 100.0, 105.0, 106.0])
+    assert tech.earnings_reaction(through_t1, reported_on=REPORT).complete is True
+
+    past_t1 = reaction_bars([98.0, 100.0, 105.0, 106.0, 107.0])
+    assert tech.earnings_reaction(past_t1, reported_on=REPORT).complete is False
+
+
+def test_the_window_low_is_the_lowest_low_inside_it_not_the_report_days():
+    """For an after-close report the gap day IS the second session, and with an
+    unknown time it could be either — so the lowest low in the window is the
+    level that invalidates the move whichever session carried it."""
+    bars = reaction_bars([98.0, 100.0, 105.0, 106.0], lows=[97.0, 99.0, 101.0, 100.5])
+    r = tech.earnings_reaction(bars, reported_on=REPORT)
+    assert r.window_low == pytest.approx(100.5)
+    assert r.window_low > 99.0, "the pre-report session's low is outside the window"
+
+
+def test_a_report_dated_on_a_weekend_anchors_on_the_next_session():
+    """Providers do date reports on days the market was shut."""
+    bars = reaction_bars([98.0, 100.0, 105.0, 106.0])
+    r = tech.earnings_reaction(bars, reported_on=date(2026, 10, 18), release_time="unknown")
+    assert r is not None
+    assert r.reported_on == date(2026, 10, 18)
+    # T is the 10-19 session, so the window runs close(10-16)..close(10-20).
+    assert r.reference_close == pytest.approx(98.0)
+    assert r.end_session == REPORT
+    assert r.complete is False, "the latest bar is 10-21, a session past the window"
+
+
+def test_a_reaction_with_no_session_before_the_report_is_none_not_zero():
+    """Nothing to measure the move against."""
+    bars = reaction_bars([105.0, 106.0, 107.0])
+    assert tech.earnings_reaction(bars, reported_on=date(2026, 10, 16)) is None
+
+
+def test_a_negative_reaction_is_measured_rather_than_hidden():
+    """The recipe rejects it; the FEATURE reports it. A module that returned
+    None for a drop would make "the market hated it" and "we could not see"
+    the same reading."""
+    bars = reaction_bars([98.0, 100.0, 94.0, 93.0])
+    r = tech.earnings_reaction(bars, reported_on=REPORT)
+    assert r.reaction_pct == pytest.approx(-7.0)
+
+
+def test_compute_only_measures_a_reaction_when_a_report_anchors_one():
+    bars = reaction_bars([98.0, 100.0, 105.0, 106.0])
+    assert tech.compute("T", bars).reaction is None
+    assert tech.compute("T", bars, reported_on=REPORT).reaction is not None

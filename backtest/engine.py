@@ -291,9 +291,15 @@ def walk_symbol(
 
         window = bars.iloc[max(0, index - LOOKBACK_BARS + 1) : index + 1]
         sector_slice = None if sector_index is None else sector_index.loc[:day]
+        visible = events_knowable(history.events, as_of=day)
+        # Anchor both the beat and the price-reaction window on the one report
+        # whose actual was public before this close. With no release time in
+        # the data (no provider publishes one), that is the session after the
+        # report — which is exactly the window the recipe judges.
+        report = catalyst_features.last_knowable_earnings(visible, as_of=day)
         catalyst = catalyst_features.compute(
             history.symbol,
-            events_knowable(history.events, as_of=day),
+            visible,
             [],
             as_of=day,
         )
@@ -311,6 +317,8 @@ def walk_symbol(
                 sector_closes=sector_slice,
                 cfg=sets[0].cfg.recipes.pullback_to_trend,
                 structure_cfg=sets[0].cfg.recipes.base_breakout,
+                reported_on=report["event_date"] if report else None,
+                release_time=(report or {}).get("event_time") or "unknown",
             )
             del structure_key
             for param_set in sets:
