@@ -226,17 +226,19 @@ class DriftRecipe(Base):
     beat_source: BeatSource = "growth_proxy"
     min_gap_up_pct: Annotated[float, Field(gt=0)]
     require_holds_day_one_low: bool
-    max_days_since_earnings: PositiveInt
+    # `max_days_since_earnings` was RETIRED by D49 (doc row 12 is a tombstone).
+    # It meant "the setup is still valid N days after the report", and D49
+    # judges each report exactly once, at the close that completes its reaction
+    # window — so the question the number answered no longer exists. It is not
+    # renamed into an entry deadline: that is a different question, the entry
+    # window is already bounded by `never_triggered` at `horizon_days[1]`, and
+    # giving an old number a new job would be a strategy change wearing a
+    # rename. See O14 for the entry-deadline proposal, which wants evidence.
     horizon_days: tuple[PositiveInt, PositiveInt]
 
     @model_validator(mode="after")
     def _coherent(self):
         _check_horizon(self.horizon_days, "post_earnings_drift")
-        if self.max_days_since_earnings > self.horizon_days[1]:
-            raise ValueError(
-                "post_earnings_drift.max_days_since_earnings exceeds the recipe's own "
-                "horizon; the entry window would outlive the setup"
-            )
         return self
 
 
@@ -1289,21 +1291,25 @@ def _cross_file_problems() -> list[str]:
     problems: list[str] = []
     s, u = scoring(), universe()
 
-    # The ingestion window must cover what a recipe reads back. Found live on
-    # 2026-10-21: `events.backward_days` was 7 while
-    # `post_earnings_drift.max_days_since_earnings` was 10, and because
-    # earnings are QUARTERLY a 7-day window held a symbol's last report for 7
-    # of every ~92 days. The events table held zero past earnings and the
-    # recipe refused on all 433 symbols with "no past earnings date on record"
-    # — a recipe that cannot fire, for a reason no single file could show.
-    if u.events.backward_days <= s.recipes.post_earnings_drift.max_days_since_earnings:
+    # The ingestion window must cover what a consumer reads back. Found live on
+    # 2026-10-21: `events.backward_days` was 7, and because earnings are
+    # QUARTERLY a 7-day window held a symbol's last report for 7 of every ~92
+    # days. The events table held zero past earnings and the drift recipe
+    # refused on all 433 symbols with "no past earnings date on record" — a
+    # recipe that could not fire, for a reason no single file could show.
+    #
+    # RE-ANCHORED by D49. The drift recipe no longer reads "days since the last
+    # report" (it judges the reaction window once), but Pillar C still does:
+    # `mapping.catalyst.drift_window_days` is how long after a report the
+    # catalyst keeps scoring, so that is now the window the ingest must cover.
+    if u.events.backward_days <= s.mapping.catalyst.drift_window_days:
         problems.append(
             f"universe.events.backward_days ({u.events.backward_days}) must exceed "
-            f"scoring.recipes.post_earnings_drift.max_days_since_earnings "
-            f"({s.recipes.post_earnings_drift.max_days_since_earnings}): the drift "
-            f"recipe reads a past earnings date that the ingestion window would "
-            f"never have stored, so it could never fire. Earnings are quarterly, so "
-            f"this wants ~100 days, not just more than the recipe's window."
+            f"scoring.mapping.catalyst.drift_window_days "
+            f"({s.mapping.catalyst.drift_window_days}): Pillar C scores a past "
+            f"earnings date that the ingestion window would never have stored. "
+            f"Earnings are quarterly, so this wants ~100 days, not just more than "
+            f"the scoring window."
         )
 
     # Sentiment's baseline cannot exceed what the news ingest stores.

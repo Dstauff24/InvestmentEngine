@@ -490,10 +490,46 @@ def test_the_unverifiable_guidance_check_is_reported_as_failed_not_skipped():
     assert "UNVERIFIED" in result.reason
 
 
-def test_outside_the_drift_window_does_not_fire():
-    result = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=60))
-    assert not result.triggered
-    assert "drift window" in result.reason
+def test_the_days_since_earnings_gate_is_gone_and_the_window_is_the_gate():
+    """D49 retired `max_days_since_earnings`: the recipe judges each report ONCE,
+    at the close that completes its reaction window, so "is the report recent"
+    is answered by `reaction.complete` rather than by a number.
+
+    A stale report cannot produce a complete window — its end session is in the
+    past — so the old gate had nothing left to refuse. This pins that the
+    recipe no longer consults the day count at all.
+    """
+    stale = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=60))
+    assert stale.triggered, "the day count is no longer consulted"
+    assert "recent_earnings" not in stale.checks
+
+    incomplete = drift.evaluate(
+        drift_tech(reaction=reaction(complete=False)), fund(), cata(days_since_earnings=1)
+    )
+    assert not incomplete.triggered
+    assert "not the latest session" in incomplete.reason
+
+
+def test_a_window_spanning_a_trading_halt_is_refused_by_the_measurement():
+    """The sanity bound that replaced the retired gate, and it lives in the
+    FEATURE because it is about data integrity, not strategy."""
+    import pandas as pd
+
+    from features.technical import MAX_WINDOW_SPAN_DAYS, earnings_reaction
+
+    days = [date(2026, 10, 19), date(2026, 10, 20), date(2026, 11, 10)]
+    bars = pd.DataFrame(
+        {
+            "session_date": days,
+            "open": [100.0, 100.0, 120.0],
+            "high": [101.0, 101.0, 121.0],
+            "low": [99.0, 99.0, 119.0],
+            "close": [100.0, 100.0, 120.0],
+            "volume": [1_000_000] * 3,
+        }
+    )
+    assert (days[-1] - date(2026, 10, 20)).days > MAX_WINDOW_SPAN_DAYS
+    assert earnings_reaction(bars, reported_on=date(2026, 10, 20)) is None
 
 
 def test_the_single_bar_gap_is_no_longer_what_the_recipe_reads():

@@ -609,6 +609,15 @@ class EarningsReaction:
 # the session half traded, so the reaction spans the rest of T and into T+1.
 AGNOSTIC_TIMES = frozenset({"unknown", "dmt", ""})
 
+# How far the window may stretch from the report date before it stops being a
+# reaction. T+1 is normally one to four calendar days away; a long weekend plus
+# a holiday reaches five or six. Beyond that the symbol did not trade — a halt,
+# a suspension, a gap in the series — and the "reaction" would be a week of
+# unrelated news measured against a stale reference. A HARD SANITY BOUND, not a
+# strategy knob: it replaces the `max_days_since_earnings` gate D49 retired,
+# which incidentally caught this case for the wrong reason.
+MAX_WINDOW_SPAN_DAYS = 8
+
 
 def earnings_reaction(
     bars: pd.DataFrame, *, reported_on: date, release_time: str = "unknown"
@@ -649,6 +658,12 @@ def earnings_reaction(
     reference = closes.iloc[reference_index]
     end_close = closes.iloc[end_index]
     if pd.isna(reference) or pd.isna(end_close) or reference == 0:
+        return None
+
+    if (sessions[end_index] - reported_on).days > MAX_WINDOW_SPAN_DAYS:
+        # The symbol did not trade through the window. Measuring a reaction
+        # across a halt would compare a post-resumption price to a reference
+        # from before a week of unrelated news.
         return None
 
     window = slice(reference_index + 1, end_index + 1)

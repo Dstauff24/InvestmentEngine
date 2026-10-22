@@ -340,7 +340,10 @@ recipes:
     # on real outcomes.
     min_gap_up_pct: 0.57               # [OPEN] #11
     require_holds_day_one_low: true
-    # Adjusted 5 -> 10 on Sep 1: day-1-low confirmation takes sessions, and
-    # the day-5-to-8 gap retest is the cleanest entry.
-    max_days_since_earnings: 10        # [OPEN] #12
+    # `max_days_since_earnings` RETIRED by D49 (doc row 12 is a tombstone).
+    # It meant "the setup is still valid N days after the report". D49 judges
+    # each report exactly once, at the close that completes its reaction
+    # window, so the question is gone — the gate is now `reaction.complete`,
+    # which no number parameterises. Deliberately NOT renamed into an entry
+    # deadline: see O14.
     horizon_days: [5, 45]              # [OPEN] #13 — drift runs for weeks

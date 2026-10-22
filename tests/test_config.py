@@ -442,7 +442,8 @@ def test_d25_approved_open_values():
     assert u.liquidity.min_price == 5.00
     assert r.exits.swing.max_holding_days == 45
     # The three Sep 1 adjustments (O9).
-    assert s.recipes.post_earnings_drift.max_days_since_earnings == 10
+    # `max_days_since_earnings` was 10 until D49 RETIRED it; see
+    # `test_the_retired_drift_window_parameter_is_gone`.
     assert r.options.assignment_extrinsic_buffer == 1.25
     assert u.maintenance.deactivate_after_absent_days == 5
 
@@ -662,13 +663,20 @@ def test_an_expanding_range_is_not_a_base(tmp_path):
     )
 
 
-def test_an_entry_window_outliving_its_own_horizon_is_rejected(tmp_path):
-    expect_error(
-        tmp_path,
-        "scoring.yaml",
-        mutate("scoring.yaml", ["recipes", "post_earnings_drift", "max_days_since_earnings"], 60),
-        "entry window would outlive",
-    )
+def test_the_retired_drift_window_parameter_is_gone(tmp_path):
+    """D49 RETIRED `max_days_since_earnings`, and a retired parameter must be
+    REJECTED rather than ignored.
+
+    `extra="forbid"` on the config models is what makes this a hard error: a
+    config still carrying the old key would otherwise load silently while the
+    recipe no longer reads it, which is the quietest possible way for an
+    operator to believe a gate is in force when it is not.
+    """
+    assert "max_days_since_earnings" not in cfg.DriftRecipe.model_fields
+
+    revived = copy.deepcopy(raw("scoring.yaml"))
+    revived["recipes"]["post_earnings_drift"]["max_days_since_earnings"] = 10
+    expect_error(tmp_path, "scoring.yaml", revived, "unknown key")
 
 
 def test_tier_b_risk_above_tier_a_is_rejected(tmp_path):
@@ -992,8 +1000,22 @@ def documented_parameters() -> dict[int, str]:
     }
 
 
-def test_the_doc_lists_exactly_80_parameters():
-    assert len(documented_parameters()) == 80
+def retired_parameters() -> set[int]:
+    """Row numbers whose parameter is GONE, kept as tombstones.
+
+    The number is never reused and never renumbered: `[OPEN] #N` is cited by
+    number in CLAUDE.md and the decision log, so renumbering would make every
+    historical reference wrong. A tombstone names the parameter in plain text
+    rather than backticks, which is what keeps it out of
+    `documented_parameters`.
+    """
+    doc = OPEN_PARAMS_DOC.read_text()
+    return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
+
+
+def test_the_doc_lists_exactly_79_live_parameters_and_one_tombstone():
+    assert len(documented_parameters()) == 79
+    assert retired_parameters() == {12}
 
 
 def test_every_tagged_value_is_documented():
@@ -1011,16 +1033,22 @@ def test_each_tag_points_at_the_parameter_the_doc_names():
     assert mismatched == {}, f"[OPEN] #N tagged on the wrong parameter: {mismatched}"
 
 
-def test_the_tag_numbering_is_contiguous():
-    """A gap means a row was deleted from one place and not the other."""
-    numbers = sorted(tagged_parameters())
+def test_the_tag_numbering_is_contiguous_across_live_and_retired_rows():
+    """A gap means a row was deleted from one place and not the other.
+
+    Tombstones count: a retired parameter keeps its number, so contiguity is
+    checked over tagged rows PLUS retired ones. That is what lets a row be
+    removed without renumbering the 68 below it.
+    """
+    numbers = sorted(set(tagged_parameters()) | retired_parameters())
     assert numbers == list(range(1, len(numbers) + 1))
 
 
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 80
+    assert len(tagged_parameters()) == 79
+    assert len(tagged_parameters()) + len(retired_parameters()) == 80
 
 
 # ══════════════════════════════════════════════════════════════════════════

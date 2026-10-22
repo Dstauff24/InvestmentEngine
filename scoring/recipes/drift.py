@@ -48,20 +48,11 @@ def evaluate(
     if not recipe.enabled:
         return no_setup(NAME, "recipe disabled in config")
 
-    since = catalyst.days_since_earnings
-    recent = since is not None and since <= recipe.max_days_since_earnings
-    checks["recent_earnings"] = recent
-    if not recent:
-        return no_setup(
-            NAME,
-            (
-                f"last earnings {since} day(s) ago, past the "
-                f"{recipe.max_days_since_earnings}-day drift window"
-            )
-            if since is not None
-            else "no past earnings date on record",
-            checks,
-        )
+    # NO "DAYS SINCE EARNINGS" GATE. D49 judges each report exactly once, at
+    # the close that completes its reaction window, so "is the report still
+    # recent" is answered by `reaction.complete` below and not by a number.
+    # `max_days_since_earnings` was retired rather than renamed (see O14).
+    checks["has_knowable_report"] = catalyst.surprise.reported_on is not None
 
     if recipe.require_eps_beat or recipe.require_revenue_beat:
         failed = (

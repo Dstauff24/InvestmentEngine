@@ -107,7 +107,9 @@ events:
   # Live on 2026-10-21 the events table held ZERO past earnings and the recipe
   # was structurally dead: 120 of 120 symbols refused with "no past earnings
   # date on record". A cross-config invariant now requires this to exceed
-  # `post_earnings_drift.max_days_since_earnings`.
+  # `mapping.catalyst.drift_window_days` — re-anchored by D49, which retired
+  # `post_earnings_drift.max_days_since_earnings`; Pillar C is now the consumer
+  # that reads a past earnings date back.
   backward_days: 100           # [OPEN] #30
 
 # ── News scope (D5) ─────────────────────────────────────────────────────────
