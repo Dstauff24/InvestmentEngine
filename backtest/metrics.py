@@ -188,10 +188,18 @@ def render_report(result) -> str:
     """The deliverable: what each recipe is worth, and on what evidence."""
     lines: list[str] = []
     promotion = config.scoring().promotion.status
+    variants = sorted({getattr(t, "param_set", "baseline") for t in result.trades})
+    # EVERY HEADLINE TABLE DESCRIBES ONE CONFIGURATION. With `--variant` the
+    # run holds two populations over the same walk, and pooling them into the
+    # per-recipe, D12-eligible, regime and outcome tables would describe a
+    # strategy nobody runs — each trade counted once under each configuration
+    # that produced it. The comparison gets its own section instead.
+    reference = [t for t in result.trades if _is_baseline(t, variants)]
     lines.append("=" * 118)
     lines.append(
         f"BACKTEST — {result.start} to {result.end}, {result.symbols} symbol(s), "
         f"{len(result.trades)} simulated trade(s)"
+        + ("" if len(variants) < 2 else f" across {len(variants)} configuration(s)")
     )
     lines.append("=" * 118)
     lines.append("")
@@ -200,8 +208,7 @@ def render_report(result) -> str:
         lines.append("  " + "   ".join(f"{k} {v}" for k, v in result.regimes.items()))
         lines.append("")
 
-    variants = sorted({getattr(t, "param_set", "baseline") for t in result.trades})
-    recipes = by_recipe([t for t in result.trades if _is_baseline(t, variants)])
+    recipes = by_recipe(reference)
     lines.append("PER RECIPE" + ("" if len(variants) < 2 else f"  [{variants[0]}]"))
     lines.append(HEADER)
     lines.append("-" * 118)
@@ -225,7 +232,7 @@ def render_report(result) -> str:
 
     gates = config.risk().min_risk_reward
     for tier, minimum in (("A", gates.tier_a), ("B", gates.tier_b)):
-        subset = eligible(result.trades, min_rr=minimum)
+        subset = eligible(reference, min_rr=minimum)
         lines.append(f"PER RECIPE — ONLY PLANS D12 WOULD ACCEPT (Tier {tier}: R:R >= {minimum:g})")
         lines.append(HEADER)
         lines.append("-" * 118)
@@ -238,7 +245,7 @@ def render_report(result) -> str:
     lines.append("PER RECIPE x REGIME")
     lines.append(HEADER)
     lines.append("-" * 118)
-    for item in by_recipe_and_regime(result.trades).values():
+    for item in by_recipe_and_regime(reference).values():
         lines.append(_row(item))
     lines.append("")
 
@@ -397,8 +404,22 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="re-render a written backtest")
     parser.add_argument("csv", help="a CSV written by `backtest.engine --out`")
+    parser.add_argument(
+        "--only",
+        metavar="PARAM_SET",
+        help="render ONE configuration's own tables (default: the first, which is "
+        "the baseline). A multi-variant run has a full report per configuration, "
+        "and the D12, regime and outcome tables are only meaningful inside one.",
+    )
     args = parser.parse_args(argv)
-    print(render_report(load_csv(args.csv)))
+    run = load_csv(args.csv)
+    if args.only:
+        kept = [t for t in run.trades if t.param_set == args.only]
+        if not kept:
+            names = sorted({t.param_set for t in run.trades})
+            raise SystemExit(f"no trades for {args.only!r}; this file has {names}")
+        run.trades = kept
+    print(render_report(run))
     return 0
 
 

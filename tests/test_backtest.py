@@ -722,3 +722,27 @@ def test_a_written_run_can_be_re_read_and_re_rendered(tmp_path):
     assert recipes["pullback_to_trend"].expectancy_r == pytest.approx(0.4)
     assert recipes["post_earnings_drift"].filled == 0, "an empty entry is unfilled, not zero"
     assert len(metrics.eligible(run.trades, min_rr=2.0)) == 1
+
+
+def test_a_multi_variant_run_does_not_pool_its_configurations():
+    """Each headline table describes ONE configuration.
+
+    With `--variant` the walk produces two populations over the same dates, and
+    pooling them would count every trade once per configuration that produced
+    it — describing a strategy nobody runs. The comparison belongs in its own
+    section, which is also the only place the two should ever appear together.
+    """
+    from backtest.engine import BacktestResult
+
+    base = sim(1.0)
+    trades = [
+        SimTrade(**{**base.__dict__, "param_set": "baseline", "risk_reward": 4.0}),
+        SimTrade(**{**base.__dict__, "param_set": "beat_source=verified", "risk_reward": 4.0}),
+    ]
+    text = metrics.render_report(BacktestResult(trades=trades, start=CALLED, end=CALLED, symbols=1))
+
+    headline = text.split("PER RECIPE  [baseline]")[1].split("VARIANTS")[0]
+    row = next(line for line in headline.splitlines() if line.startswith("r "))
+    assert row.split()[1] == "1", f"the headline must count one configuration: {row!r}"
+    assert "VARIANTS — the same walk, one configuration changed" in text
+    assert "beat_source=verified / r" in text
