@@ -309,3 +309,70 @@ def test_the_alert_types_used_are_valid_schema_values(alert_type):
     """They must satisfy the alerts table CHECK constraint."""
     schema = (Path(__file__).resolve().parent.parent / "db" / "schema.sql").read_text()
     assert f"'{alert_type}'" in schema
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# deploy.sh
+# ══════════════════════════════════════════════════════════════════════════
+
+DEPLOY = SCRIPTS / "deploy.sh"
+
+
+def test_the_deploy_makes_no_provider_calls():
+    """**A DEPLOY THAT INGESTED WOULD MERGE TWO QUESTIONS.** "Did the deploy
+    work" and "did tonight's data arrive" have different answers and different
+    fixes, so nothing here may touch a provider — which under D27 means the
+    consent flag must be absent, not merely unset."""
+    lines = [line for line in DEPLOY.read_text().splitlines() if not line.lstrip().startswith("#")]
+    granted = [line for line in lines if "ALLOW_LIVE_CALLS" in line]
+    assert granted == [], f"deploy.sh must not grant network consent: {granted}"
+    for module in ("ingest.universe", "ingest.schwab_prices", "ingest.fmp_history"):
+        runs = [line for line in lines if module in line]
+        assert runs == [], f"deploy.sh must not run {module}: {runs}"
+
+
+def test_it_runs_the_orchestrators_own_preflight_rather_than_a_second_opinion():
+    """A separate set of checks would drift from the ones that actually gate
+    the 16:30 run."""
+    text = DEPLOY.read_text()
+    assert "jobs.daily_close --dry-run" in text
+
+
+def test_the_order_is_pull_then_schema_then_config_then_preflight():
+    """Each step is meaningless before the one above it: validating config
+    against stale code, or reading a schema a migration has not applied yet."""
+    text = DEPLOY.read_text()
+    positions = [
+        text.index("git pull --ff-only"),
+        text.index("-m db.init"),
+        text.index("-m core.config"),
+        text.index("jobs.daily_close --dry-run"),
+    ]
+    assert positions == sorted(positions)
+
+
+def test_it_refuses_to_deploy_over_a_dirty_tree():
+    """On a server a local edit is either an unpushed hotfix or a mistake, and
+    both want a human rather than a silent overwrite."""
+    text = DEPLOY.read_text()
+    assert "git status --porcelain" in text
+    assert "working tree is dirty" in text
+
+
+def test_it_exits_with_the_error_count_so_cron_can_branch():
+    text = DEPLOY.read_text()
+    assert 'exit "$ERRORS"' in text
+
+
+def test_a_preflight_skip_is_not_counted_as_an_error():
+    """ "Schwab is not provisioned" is a known state; failing on it would train
+    the operator to ignore the alert that matters."""
+    text = DEPLOY.read_text()
+    assert "skips above are known states" in text
+
+
+def test_it_prefers_the_virtualenv_but_still_runs_without_one():
+    """The VM has a .venv; a Codespace rehearsal does not."""
+    text = DEPLOY.read_text()
+    assert ".venv/bin/python" in text
+    assert "command -v python3" in text

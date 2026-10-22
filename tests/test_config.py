@@ -434,7 +434,11 @@ def test_d25_approved_open_values():
     assert s.composite.conflict_below == 30
     assert s.composite.capped_at == 69
     assert s.recipes.base_breakout.min_base_weeks == 4
-    assert s.recipes.post_earnings_drift.min_gap_up_pct == 2.0
+    # D25 approved 2.0% on Sep 1; **D46 superseded it with 0.57%** on Oct 22
+    # from the D43 sweep — 231 signals at +0.26R against 96 at +0.16R, more
+    # trades AND better ones. Asserted here because an [OPEN] value a decision
+    # has since MOVED must not drift back silently either.
+    assert s.recipes.post_earnings_drift.min_gap_up_pct == 0.57
     assert u.liquidity.min_price == 5.00
     assert r.exits.swing.max_holding_days == 45
     # The three Sep 1 adjustments (O9).

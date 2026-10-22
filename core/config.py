@@ -209,11 +209,21 @@ class BreakoutRecipe(Base):
         return self
 
 
+BeatSource = Literal["growth_proxy", "verified"]
+
+
 class DriftRecipe(Base):
     enabled: bool
     require_eps_beat: bool
     require_revenue_beat: bool
     require_raised_guidance: bool
+    # HOW a beat is established (O12). `growth_proxy` reads year-over-year EPS
+    # growth, which is what the recipe had to use while the stored earnings
+    # rows carried no actuals; `verified` reads the reported actual against the
+    # consensus estimate, which is what "beat" actually means. Not an [OPEN]
+    # number — a mode, pinned by a named test and moved only by a decision,
+    # with the two backtested side by side first.
+    beat_source: BeatSource = "growth_proxy"
     min_gap_up_pct: Annotated[float, Field(gt=0)]
     require_holds_day_one_low: bool
     max_days_since_earnings: PositiveInt

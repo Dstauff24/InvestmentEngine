@@ -186,6 +186,85 @@ def insider_cluster(
 
 
 @dataclass(frozen=True)
+class EarningsSurprise:
+    """The last REPORTED quarter's beat, as a fact rather than as a proxy (O12).
+
+    `post_earnings_drift` gates on "did they beat", and until the radar moved
+    to per-symbol earnings (D47) the stored rows carried no actuals, so the
+    recipe used year-over-year EPS GROWTH instead. Those are different claims:
+    a company can grow 20% year on year and still miss the quarter, and the
+    drift premise is about the surprise, not the trend.
+
+    **`None` is "we cannot verify", never "no beat"** — the standing `features/`
+    convention. 8,858 of 9,396 stored earnings rows carry both numbers; the
+    remainder abstain rather than being read as misses.
+
+    **Point-in-time:** the surprise is treated as knowable from the event date.
+    A report released after the close is strictly knowable only on the next
+    session, but the recipe requires a GAP, which is itself the next session's
+    first print, so no plan can act on it earlier than the market did.
+    """
+
+    reported_on: date | None
+    eps_actual: float | None
+    eps_estimate: float | None
+    revenue_actual: float | None
+    revenue_estimate: float | None
+
+    @property
+    def eps_beat(self) -> bool | None:
+        if self.eps_actual is None or self.eps_estimate is None:
+            return None
+        return self.eps_actual > self.eps_estimate
+
+    @property
+    def revenue_beat(self) -> bool | None:
+        if self.revenue_actual is None or self.revenue_estimate is None:
+            return None
+        return self.revenue_actual > self.revenue_estimate
+
+    @property
+    def eps_surprise_pct(self) -> float | None:
+        """Beat size against the estimate's MAGNITUDE.
+
+        Divided by `abs(estimate)` so a company expected to lose 0.10 and
+        reporting 0.05 scores a POSITIVE surprise. Dividing by the signed
+        estimate would flip the sign on every loss-making name, which is a
+        large share of exactly the universe where surprises are biggest.
+        """
+        if self.eps_actual is None or not self.eps_estimate:
+            return None
+        return (self.eps_actual - self.eps_estimate) / abs(self.eps_estimate) * 100.0
+
+    @property
+    def verdict(self) -> str:
+        if self.eps_beat is None:
+            return "unverified (no actual or estimate on record)"
+        size = self.eps_surprise_pct
+        direction = "beat" if self.eps_beat else "missed"
+        return f"{direction} by {size:+.1f}%" if size is not None else direction
+
+
+def last_earnings_surprise(events: list[dict], *, as_of: date) -> EarningsSurprise:
+    """The most recent REPORTED quarter on or before `as_of`."""
+    reported = [
+        e
+        for e in events
+        if e.get("event_type") == "earnings" and _as_date(e.get("event_date")) <= as_of
+    ]
+    if not reported:
+        return EarningsSurprise(None, None, None, None, None)
+    latest = max(reported, key=lambda e: _as_date(e["event_date"]))
+    return EarningsSurprise(
+        reported_on=_as_date(latest["event_date"]),
+        eps_actual=_float(latest.get("eps_actual")),
+        eps_estimate=_float(latest.get("eps_estimate")),
+        revenue_actual=_float(latest.get("revenue_actual")),
+        revenue_estimate=_float(latest.get("revenue_estimate")),
+    )
+
+
+@dataclass(frozen=True)
 class CatalystFeatures:
     symbol: str
     as_of: date
@@ -194,6 +273,7 @@ class CatalystFeatures:
     days_to_ex_dividend: int | None
     next_dividend_amount: float | None
     insiders: InsiderCluster
+    surprise: EarningsSurprise
     # Short interest is NOT available from any provider this engine implements
     # (neither the Schwab Trader API nor the FMP /stable/ endpoints the client
     # calls expose it). Carried as an explicit None rather than omitted, so the
@@ -226,6 +306,7 @@ def compute(
         days_to_ex_dividend=ex_dividend_proximity(events, as_of=as_of),
         next_dividend_amount=next_div,
         insiders=insider_cluster(purchases or [], as_of=as_of, series_depth=series_depth),
+        surprise=last_earnings_surprise(events, as_of=as_of),
     )
 
 
@@ -234,7 +315,7 @@ def compute(
 
 EVENTS_SQL = """
     SELECT symbol, event_type, event_date, is_confirmed, dividend_amount,
-           eps_estimate, eps_actual
+           eps_estimate, eps_actual, revenue_estimate, revenue_actual
     FROM   events
     WHERE  symbol = %s AND event_date BETWEEN %s AND %s
     ORDER  BY event_date
@@ -312,6 +393,11 @@ def _next_dividend_amount(events: list[dict], *, as_of: date) -> float | None:
         if event.get("dividend_amount") is not None:
             return float(event["dividend_amount"])
     return None
+
+
+def _float(value: object) -> float | None:
+    """A stored NUMERIC as a float, or None. Never 0.0 for a missing value."""
+    return None if value is None else float(value)
 
 
 def _as_date(value: object) -> date:

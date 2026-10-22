@@ -599,6 +599,45 @@ def _as_date(value) -> date:
     return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
 
 
+def _param_sets(variants: list[str] | None) -> list[ParamSet]:
+    """The baseline, plus one set per `--variant path=value`.
+
+    Walked TOGETHER rather than in separate runs, because the features are the
+    expensive part: a gate-only override shares them, so comparing two
+    configurations over four years costs barely more than measuring one. It
+    also removes the question of whether the two runs saw the same data.
+    """
+    from backtest.sweep import with_override
+
+    sets = [ParamSet.baseline()]
+    for item in variants or []:
+        path, _, raw = item.partition("=")
+        if not raw:
+            raise SystemExit(f"--variant needs PATH=VALUE, got {item!r}")
+        sets.append(
+            ParamSet(
+                name=f"{path.rsplit('.', 1)[-1]}={raw}",
+                cfg=with_override(config.scoring(), path.strip(), _coerce(raw.strip())),
+            )
+        )
+    return sets
+
+
+def _coerce(raw: str):
+    """YAML-ish scalar parsing, so `--variant x=2.5` is a float not a string."""
+    lowered = raw.lower()
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     from backtest.metrics import render_report
 
@@ -610,6 +649,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sample", type=int, help="first N symbols of the universe")
     parser.add_argument("--no-sectors", action="store_true", help="skip sector indices (faster)")
     parser.add_argument("--workers", type=int, default=1, help="processes to split symbols across")
+    parser.add_argument(
+        "--variant",
+        action="append",
+        metavar="PATH=VALUE",
+        help="a second configuration to walk ALONGSIDE the baseline, e.g. "
+        "recipes.post_earnings_drift.beat_source=verified. Repeatable. Gate-only "
+        "overrides share the baseline's features, so the comparison is nearly free.",
+    )
     parser.add_argument("--out", help="write every trade to this CSV")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
@@ -622,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
     if symbols is None and args.sample:
         symbols = db.active_symbols()[: args.sample]
     result = run(
+        param_sets=_param_sets(args.variant),
         symbols=symbols,
         start=date.fromisoformat(args.start) if args.start else None,
         end=date.fromisoformat(args.end) if args.end else None,

@@ -12,7 +12,7 @@ from datetime import date
 import pytest
 
 from core import config
-from features.catalyst import CatalystFeatures, InsiderCluster
+from features.catalyst import CatalystFeatures, EarningsSurprise, InsiderCluster
 from features.evidence import EvidenceDepth
 from features.fundamental import FundamentalFeatures, RevisionMomentum
 from features.technical import MAStack, PriceStructure, TechnicalFeatures, WeekStructure
@@ -81,6 +81,10 @@ def cata(**kw) -> CatalystFeatures:
         "days_to_ex_dividend": 40,
         "next_dividend_amount": None,
         "insiders": insiders,
+        # O12: the last reported quarter\'s beat, as a fact. The default is
+        # the honest one — unverified, which the recipe refuses rather than
+        # reads as a miss.
+        "surprise": EarningsSurprise(None, None, None, None, None),
     }
     base.update(kw)
     return CatalystFeatures(**base)
@@ -296,8 +300,34 @@ def breakout_tech(**kw) -> TechnicalFeatures:
     return tech(**base)
 
 
-def test_a_confirmed_breakout_fires():
+# `base_breakout` ships DISABLED (O13: its contraction statistic is centred on
+# 1.00 by construction, so no legal threshold admits a usable population). The
+# recipe is dormant, not deleted — these tests exercise the logic that will be
+# re-enabled once `_detect_base` is redesigned, so they pass a config with the
+# flag back on. `test_the_shipped_config_keeps_base_breakout_dormant` pins the
+# shipped value, which is the thing that must not drift silently.
+ENABLED_CFG = config.ScoringConfig.model_validate(
+    {
+        **CFG.model_dump(),
+        "recipes": {
+            **CFG.recipes.model_dump(),
+            "base_breakout": {**CFG.recipes.base_breakout.model_dump(), "enabled": True},
+        },
+    }
+)
+
+
+def test_the_shipped_config_keeps_base_breakout_dormant():
+    """O13. Switched off by decision, so the logs say "disabled" rather than
+    "fired zero times" — which look identical and are different facts."""
+    assert config.scoring().recipes.base_breakout.enabled is False
     result = breakout.evaluate(breakout_tech())
+    assert result.triggered is False
+    assert "disabled" in result.reason
+
+
+def test_a_confirmed_breakout_fires():
+    result = breakout.evaluate(breakout_tech(), cfg=ENABLED_CFG)
     assert result.triggered, result.reason
     depth = 100.0 - 85.0
     assert result.plan.target_1 == pytest.approx(
@@ -306,39 +336,39 @@ def test_a_confirmed_breakout_fires():
 
 
 def test_a_base_too_short_does_not_fire():
-    result = breakout.evaluate(breakout_tech(structure={"base_weeks": 2.0}))
+    result = breakout.evaluate(breakout_tech(structure={"base_weeks": 2.0}), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "week minimum" in result.reason
 
 
 def test_a_base_too_deep_does_not_fire():
     """A deep base is a downtrend in a base's clothing."""
-    result = breakout.evaluate(breakout_tech(structure={"base_depth_pct": 60.0}))
+    result = breakout.evaluate(breakout_tech(structure={"base_depth_pct": 60.0}), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "deep" in result.reason
 
 
 def test_price_below_the_trigger_does_not_fire():
-    result = breakout.evaluate(breakout_tech(close=99.0))
+    result = breakout.evaluate(breakout_tech(close=99.0), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "has not broken out" in result.reason
 
 
 def test_an_unconfirmed_breakout_does_not_fire():
     """The unconfirmed break is the one that fails."""
-    result = breakout.evaluate(breakout_tech(relative_volume=1.0))
+    result = breakout.evaluate(breakout_tech(relative_volume=1.0), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "volume" in result.reason
 
 
 def test_a_sector_laggard_does_not_fire():
-    result = breakout.evaluate(breakout_tech(rs_vs_sector=-8.0))
+    result = breakout.evaluate(breakout_tech(rs_vs_sector=-8.0), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "lags its sector" in result.reason
 
 
 def test_a_missing_sector_composite_refuses_rather_than_assuming():
-    result = breakout.evaluate(breakout_tech(rs_vs_sector=None))
+    result = breakout.evaluate(breakout_tech(rs_vs_sector=None), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "no sector composite" in result.reason
 
@@ -435,12 +465,127 @@ def test_a_base_still_at_full_width_does_not_fire():
     """The config asks for range contraction and the first version of this
     recipe silently ignored the parameter — a base that is TIGHTENING is the
     one that breaks cleanly, while a base at full width is still a range."""
-    result = breakout.evaluate(breakout_tech(structure={"base_contraction": 1.1}))
+    result = breakout.evaluate(breakout_tech(structure={"base_contraction": 1.1}), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "still at full width" in result.reason
 
 
 def test_an_unmeasurable_contraction_refuses_rather_than_assuming():
-    result = breakout.evaluate(breakout_tech(structure={"base_contraction": None}))
+    result = breakout.evaluate(breakout_tech(structure={"base_contraction": None}), cfg=ENABLED_CFG)
     assert not result.triggered
     assert "unknown" in result.reason
+
+
+# ── O12: the verified beat ──────────────────────────────────────────────────
+
+VERIFIED_CFG = config.ScoringConfig.model_validate(
+    {
+        **CFG.model_dump(),
+        "recipes": {
+            **CFG.recipes.model_dump(),
+            "post_earnings_drift": {
+                **CFG.recipes.post_earnings_drift.model_dump(),
+                "beat_source": "verified",
+            },
+        },
+    }
+)
+
+
+def beat(**kw) -> CatalystFeatures:
+    """A drift-window catalyst carrying a reported quarter."""
+    surprise = EarningsSurprise(
+        reported_on=date(2026, 10, 18),
+        eps_actual=kw.pop("eps_actual", 1.20),
+        eps_estimate=kw.pop("eps_estimate", 1.00),
+        revenue_actual=kw.pop("revenue_actual", 1_100.0),
+        revenue_estimate=kw.pop("revenue_estimate", 1_000.0),
+    )
+    return cata(days_since_earnings=kw.pop("days_since_earnings", 4), surprise=surprise, **kw)
+
+
+def test_the_shipped_config_still_uses_the_growth_proxy():
+    """O12 is a comparison, not a switch flipped on the way past. The mode
+    moves on a decision once both have been backtested."""
+    assert config.scoring().recipes.post_earnings_drift.beat_source == "growth_proxy"
+
+
+def test_a_verified_beat_fires():
+    result = drift.evaluate(drift_tech(), fund(), beat(), cfg=VERIFIED_CFG)
+    assert result.triggered, result.reason
+    assert result.checks["eps_beat_verified"] is True
+    assert "beat by +20.0%" in result.reason
+
+
+def test_a_verified_miss_does_not_fire_even_when_growth_is_positive():
+    """THE WHOLE POINT OF O12. The proxy passes this — year-over-year growth is
+    positive — while the quarter actually missed, which is the opposite of the
+    surprise the drift premise rests on."""
+    missed = beat(eps_actual=0.90, eps_estimate=1.00)
+
+    assert drift.evaluate(drift_tech(), fund(), missed, cfg=VERIFIED_CFG).triggered is False
+    assert drift.evaluate(drift_tech(), fund(), missed).triggered is True, "the proxy passes it"
+
+
+def test_an_unverifiable_beat_refuses_rather_than_passing():
+    """`None` is "we cannot establish it", never "no beat" — the same asymmetry
+    `pullback_to_trend` applies to an unknown earnings date."""
+    result = drift.evaluate(drift_tech(), fund(), beat(eps_actual=None), cfg=VERIFIED_CFG)
+    assert result.triggered is False
+    assert "cannot be verified" in result.reason
+
+
+def test_a_missing_revenue_actual_is_not_read_as_an_eps_miss():
+    """Folding the two together would turn a data gap into a verdict about
+    earnings — revenue actuals are missing more often than EPS."""
+    result = drift.evaluate(drift_tech(), fund(), beat(revenue_actual=None), cfg=VERIFIED_CFG)
+    assert result.triggered is False
+    assert result.checks["eps_beat_verified"] is True, "EPS was verified and did beat"
+    assert "revenue" in result.reason
+
+
+def test_a_loss_making_company_beating_a_negative_estimate_scores_positive():
+    """Dividing by the signed estimate would flip the sign on every loss-maker,
+    which is a large share of exactly the universe where surprises are big."""
+    surprise = EarningsSurprise(date(2026, 10, 18), -0.05, -0.10, 100.0, 90.0)
+    assert surprise.eps_beat is True
+    assert surprise.eps_surprise_pct == pytest.approx(50.0)
+
+
+def test_a_symbol_with_no_reported_quarter_has_an_unverified_surprise():
+    from features.catalyst import last_earnings_surprise
+
+    surprise = last_earnings_surprise([], as_of=date(2026, 10, 21))
+    assert surprise.eps_beat is None
+    assert surprise.reported_on is None
+    assert "unverified" in surprise.verdict
+
+
+def test_the_surprise_comes_from_the_most_recent_REPORTED_quarter():
+    """Not the next scheduled one — a forward row carries an estimate and no
+    actual, and reading it would make every pre-announcement date unverifiable."""
+    from features.catalyst import last_earnings_surprise
+
+    events = [
+        {
+            "event_type": "earnings",
+            "event_date": date(2026, 7, 20),
+            "eps_actual": 1.0,
+            "eps_estimate": 0.9,
+        },
+        {
+            "event_type": "earnings",
+            "event_date": date(2026, 10, 18),
+            "eps_actual": 1.2,
+            "eps_estimate": 1.1,
+        },
+        {
+            "event_type": "earnings",
+            "event_date": date(2027, 1, 20),
+            "eps_actual": None,
+            "eps_estimate": 1.3,
+        },
+    ]
+    surprise = last_earnings_surprise(events, as_of=date(2026, 10, 21))
+    assert surprise.reported_on == date(2026, 10, 18)
+    assert surprise.eps_beat is True

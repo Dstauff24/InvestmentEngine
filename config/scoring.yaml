@@ -302,7 +302,15 @@ recipes:
     horizon_days: [2, 15]              # framework swing horizon
 
   base_breakout:
-    enabled: true
+    # DORMANT, by decision rather than by accident (O13). `base_contraction` is
+    # measured as the ratio of mean daily range over the last fifth of the base
+    # to that of the whole base — a statistic centred on 1.00 by construction
+    # (measured: p10 0.81, median 1.00, p90 1.23 over 8,236 observations), so
+    # the 0.6 gate below asks for something that barely occurs and no legal
+    # value admits a usable population. Switched off so the logs say "disabled"
+    # instead of "fired zero times", which look identical and are not the same
+    # fact. Re-enable only after `_detect_base` is redesigned and re-swept.
+    enabled: false
     min_base_weeks: 4                  # [OPEN] #6 — "multi-week base" undefined
     max_base_depth_pct: 25             # [OPEN] #7
     range_contraction_ratio: 0.6       # [OPEN] #8 — recent ATR vs base-period ATR
@@ -315,8 +323,22 @@ recipes:
     enabled: true
     require_eps_beat: true             # recipe 3
     require_revenue_beat: true
+    # O12. `growth_proxy` is what the recipe has always done — year-over-year
+    # EPS growth standing in for a beat, because the stored earnings rows
+    # carried no actuals until D47 moved the radar to the per-symbol endpoint.
+    # `verified` compares the reported actual to the consensus estimate, which
+    # is what a beat IS: a company can grow 20% year on year and still miss.
+    # Both are backtested side by side before this moves (no number here, so no
+    # [OPEN] tag — a named test pins it instead).
+    beat_source: growth_proxy
     require_raised_guidance: true
-    min_gap_up_pct: 2.0                # [OPEN] #11
+    # D46: adopted at the D43 sweep's measured p75. The shipped 2.0% gave 96
+    # signals at +0.16R; 0.57% gives 231 at +0.26R on 227 closed — more trades
+    # AND better ones, which says a very large gap is exhaustion rather than
+    # information. Still [OPEN]: it is a percentile of a 60-symbol, 3-year
+    # distribution, not a number a decision fixes, and D39 governs it from here
+    # on real outcomes.
+    min_gap_up_pct: 0.57               # [OPEN] #11
     require_holds_day_one_low: true
     # Adjusted 5 -> 10 on Sep 1: day-1-low confirmation takes sessions, and
     # the day-5-to-8 gap retest is the cleanest entry.

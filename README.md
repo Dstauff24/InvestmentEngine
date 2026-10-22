@@ -362,6 +362,95 @@ The orchestrator refuses to mark a day complete if a critical snapshot job faile
 
 ---
 
+## Deploying to the VM
+
+```bash
+./scripts/deploy.sh            # pull, install, migrate, validate, preflight
+./scripts/deploy.sh --check    # validate and preflight only, change nothing
+./scripts/deploy.sh --no-pull  # deploy what is already checked out
+```
+
+Runs **on the engine host**, as the app user, from the repo root. It is the
+counterpart to `scripts/sync_token.sh`: that pushes a credential to the VM, this
+is what the VM runs to catch up with GitHub.
+
+**It makes no provider calls and writes no market data.** There is no
+`ALLOW_LIVE_CALLS` anywhere in it (D27), and a test pins that, because a deploy
+that quietly ingested would merge two questions — "did the deploy work" and "did
+tonight's data arrive" — that have different answers and different fixes. The
+exit code is the number of hard errors, so cron or a human can branch on it; a
+preflight SKIP (Schwab unprovisioned, EDGAR contact unset) is a known state, not
+an error.
+
+The step order is load-bearing: pull before anything else, dependencies before
+migrations, `db.init` before config validation (a cross-file invariant may read
+the schema), and the orchestrator's **own** `--dry-run` preflight last, so the
+report is what tonight's run will see rather than a second opinion about it.
+
+### One-time VM catch-up (step 10 prerequisites)
+
+The VM database has never run any of this. **Do it in exactly this order** — each
+step is wrong or impossible without the one above it — on a day when the FMP
+budget is fresh, since the whole sequence costs roughly 1,750 calls on top of a
+normal evening.
+
+```bash
+# 0. On the LAPTOP first, if the Schwab token is older than ~6 days:
+#    python scripts/schwab_auth.py && ./scripts/sync_token.sh
+
+# On the VM, as the app user, from the repo root:
+cd /home/engine/InvestmentEngine
+
+# 1. Code and schema. Brings migrations 012 (benchmarks) and 013 (regime) in.
+./scripts/deploy.sh                                     # expect DEPLOY OK
+
+# 2. .env gains the EDGAR contact address, if it has not already:
+#    SEC_EDGAR_USER_AGENT="InvestmentEngine/1.0 (you@example.com)"
+grep -q SEC_EDGAR_USER_AGENT .env || echo 'add SEC_EDGAR_USER_AGENT to .env'
+
+# 3. Corporate actions, FULL history. ~866 calls (2 per symbol).
+#    FIRST, because every later step depends on the action log: the price
+#    backfill's basis repair reads it, and read-time adjustment (D24) is wrong
+#    for every bar older than the earliest action on record — silently.
+ALLOW_LIVE_CALLS=1 .venv/bin/python -m ingest.fmp_events --backfill-actions
+
+# 4. Five years of RAW bars + ten years of earnings dates. ~434 + 433 calls.
+#    Bars come from the non-split-adjusted endpoint (the `full` one is
+#    split-adjusted, which would double-adjust at read time); earnings come per
+#    symbol because the market-wide calendar truncates at 4,000 rows in silence
+#    (D47). SPY is included automatically as a benchmark (D45 regimes need it).
+ALLOW_LIVE_CALLS=1 .venv/bin/python -m ingest.fmp_history --years 5
+
+# 5. Repair any session a provider restated across a split. ~1 call per
+#    affected symbol; prints the before/after price step for each.
+#    Schwab's candles are split-adjusted, so the VM's own collected history has
+#    the same defect the dev database had.
+ALLOW_LIVE_CALLS=1 .venv/bin/python -m ingest.fmp_history --repair-split-basis
+
+# 6. PROVE IT. A raw series steps by the split ratio at an ex-date; an adjusted
+#    one does not. Must print "price basis ok"; if it does not, re-run step 5.
+.venv/bin/python -m jobs.price_basis_check
+
+# 7. Re-run the deploy summary and confirm the new state.
+./scripts/deploy.sh --check
+```
+
+What the summary should show afterwards: `prices_daily` reaching back ~5 years
+(~536,000 bars for 434 symbols), `corporate_actions` in the tens of thousands
+back to the 1930s, `earnings dates` with a `min` in the past rather than the
+future, and `1 benchmark(s)` beside the 433 symbols. The D7 clocks (`iv_daily`,
+`estimate_snapshots`) are **not** affected by any of this and still start on the
+day the VM first ran — no backfill can buy them.
+
+Then, optionally, the backtest on the VM's own data (no network, no consent):
+
+```bash
+.venv/bin/python -m backtest.engine --years 4 --workers 2 --out data/backtest.csv
+.venv/bin/python -m backtest.metrics data/backtest.csv    # re-render, no re-walk
+```
+
+---
+
 ## Cron (post-close, trading days)
 
 `crontab -e` as the app user. The host clock is Eastern (§2), so these times are ET.

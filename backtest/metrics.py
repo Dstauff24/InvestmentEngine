@@ -200,13 +200,28 @@ def render_report(result) -> str:
         lines.append("  " + "   ".join(f"{k} {v}" for k, v in result.regimes.items()))
         lines.append("")
 
-    recipes = by_recipe(result.trades)
-    lines.append("PER RECIPE")
+    variants = sorted({getattr(t, "param_set", "baseline") for t in result.trades})
+    recipes = by_recipe([t for t in result.trades if _is_baseline(t, variants)])
+    lines.append("PER RECIPE" + ("" if len(variants) < 2 else f"  [{variants[0]}]"))
     lines.append(HEADER)
     lines.append("-" * 118)
     for item in recipes.values():
         lines.append(_row(item))
     lines.append("")
+
+    if len(variants) > 1:
+        # SIDE BY SIDE, from one walk. Two separate runs would leave open
+        # whether they saw the same data; one walk with two configurations
+        # cannot.
+        lines.append("VARIANTS — the same walk, one configuration changed")
+        lines.append(HEADER)
+        lines.append("-" * 118)
+        for name in variants:
+            subset = [t for t in result.trades if getattr(t, "param_set", "baseline") == name]
+            for recipe, item in by_recipe(subset).items():
+                item.label = f"{name} / {recipe}"
+                lines.append(_row(item))
+        lines.append("")
 
     gates = config.risk().min_risk_reward
     for tier, minimum in (("A", gates.tier_a), ("B", gates.tier_b)):
@@ -254,6 +269,16 @@ def render_report(result) -> str:
     return "\n".join(lines)
 
 
+def _is_baseline(trade, variants: list[str]) -> bool:
+    """Whether a trade belongs to the run's reference configuration.
+
+    With one configuration every trade does; with several, the headline tables
+    describe the BASELINE and the comparison gets its own section — averaging
+    two configurations into one row would describe a strategy nobody runs.
+    """
+    return getattr(trade, "param_set", "baseline") == variants[0]
+
+
 def _verdict(item: Expectancy) -> str:
     """What D39(2)/D40 permit on this evidence, stated as a rule not a hope."""
     if item.closed < MIN_SAMPLE:
@@ -287,6 +312,7 @@ class CsvTrade:
     cut above possible without re-walking four years.
     """
 
+    param_set: str
     recipe: str
     regime: str
     outcome: str
@@ -328,6 +354,7 @@ def load_csv(path) -> CsvRun:
             symbols.add(row["symbol"])
             rows.append(
                 CsvTrade(
+                    param_set=row.get("param_set") or "baseline",
                     recipe=row["recipe"],
                     regime=row["regime"],
                     outcome=row["outcome"],

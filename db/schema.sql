@@ -592,6 +592,18 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     status_at_call          TEXT CHECK (status_at_call IS NULL
                                         OR status_at_call IN ('shadow', 'paper', 'live')),
 
+    -- D45: the MARKET REGIME when the call was made. The step 10 backtest put
+    -- post_earnings_drift at +1.12R in bear_volatile against -0.08R in
+    -- bull_calm, so the ladder is evaluated per recipe x regime and D39(2)'s
+    -- 30-idea floor applies to each cell. Stamped at call time, never derived
+    -- later: the benchmark series gets revised (a late print, a split
+    -- backfill, a repaired basis), and a recomputed regime would move old
+    -- calls between cells underneath a promotion decision already made.
+    -- Nullable because the benchmark needs 200 sessions before a regime
+    -- exists; `unknown` is stored rather than guessed. Added by
+    -- db/migrations/013_shadow_book_regime.sql.
+    regime_at_call          TEXT,
+
     -- D41: WHICH pillars scored, and how many. The composite is computed over
     -- scoring pillars with weights renormalized, so 72 from four pillars and
     -- 72 from two are different claims and the number alone cannot say which.
@@ -668,6 +680,9 @@ CREATE INDEX IF NOT EXISTS ix_shadow_book_open
 -- Expectancy is always read per recipe AND per status (D40).
 CREATE INDEX IF NOT EXISTS ix_shadow_book_status_recipe
     ON shadow_book (recipe, status_at_call, called_on DESC);
+-- D45's promotion query: closed ideas per recipe x regime.
+CREATE INDEX IF NOT EXISTS ix_shadow_book_recipe_regime
+    ON shadow_book (recipe, regime_at_call, outcome);
 -- D39 calibration groups by how many pillars a composite rested on (D41).
 CREATE INDEX IF NOT EXISTS ix_shadow_book_pillars
     ON shadow_book (pillars_scored, recipe, called_on DESC);

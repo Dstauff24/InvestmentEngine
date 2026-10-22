@@ -20,7 +20,7 @@ Sensitivity: High = changes which ideas surface or how they are sized. Medium = 
 | 8 | `recipes.base_breakout.range_contraction_ratio` | `0.6` | "range contraction" | Recent ATR vs base-period ATR. Loader rejects ≥1. | Medium |
 | 9 | `recipes.base_breakout.breakout_buffer_pct` | `0.5` | "on the break" | Confirmation distance past the base high. | Medium |
 | 10 | `recipes.base_breakout.horizon_days` | `[5, 30]` | Swing horizon given for recipe 1 only | Shadow Book timeout-labelling window for this recipe. | Medium |
-| 11 | `recipes.post_earnings_drift.min_gap_up_pct` | `2.0` | "gap-up that holds day-1 low" | What counts as a gap. Likely tightening to 3.0 if noisy. | Medium |
+| 11 | `recipes.post_earnings_drift.min_gap_up_pct` | `0.57` | "gap-up that holds day-1 low"; value set by **D46** (was `2.0`, D25 Sep 1) | What counts as a gap. **Moved on measured evidence, not taste**: the D43 sweep gave 231 signals at +0.26R against the old 2.0%'s 96 at +0.16R — more trades AND better ones, so the old floor was excluding the population that pays. The pre-sweep note here guessed it would TIGHTEN to 3.0 if noisy; the data said the opposite, which is the whole argument for D43. Tag kept: 0.57 is the p75 of a 60-symbol, 3-year distribution, and D39 governs it from here on real outcomes. | Medium |
 | 12 | `recipes.post_earnings_drift.max_days_since_earnings` | `10` | Drift is documented over weeks | Entry window after the print. Adjusted 5→10 on Sep 1: day-1-low confirmation takes sessions, and the day-5-to-8 gap retest is the cleanest entry. | Medium |
 | 13 | `recipes.post_earnings_drift.horizon_days` | `[5, 45]` | Same anomaly, no exact horizon | Outcome-labelling window. | Medium |
 

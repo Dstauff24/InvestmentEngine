@@ -96,10 +96,11 @@ def add_bar(day: date, high: float, low: float, close: float) -> None:
 
 
 def test_a_logged_call_carries_everything_the_decision_needs():
-    idea_id = log_idea(idea(), sentiment_scorer="lexicon/1", as_of=CALLED)
+    idea_id = log_idea(idea(), sentiment_scorer="lexicon/1", as_of=CALLED, regime="bull_calm")
     row = db.fetch_one("SELECT * FROM shadow_book WHERE id = %s", (idea_id,))
 
     assert row["status_at_call"] == "shadow", "D40"
+    assert row["regime_at_call"] == "bull_calm", "D45"
     assert row["scored_pillars"] == "A,B" and row["pillars_scored"] == 2, "D41"
     assert row["sentiment_scorer"] == "lexicon/1"
     assert row["gates_in_force"]["tier_a_min_composite"] == 70.0
@@ -240,3 +241,62 @@ def test_a_dividend_lowers_the_stop_in_the_database():
     row = db.fetch_one("SELECT * FROM shadow_book WHERE symbol = %s", (SYMBOL,))
     assert row["outcome"] == "open", "94.6 is above the dividend-adjusted 94.5"
     assert float(row["current_stop"]) == pytest.approx(94.5)
+
+
+# ── D45: the regime travels with the call ───────────────────────────────────
+
+
+def test_the_regime_is_stamped_at_call_time_and_never_recomputed():
+    """D45. The benchmark series gets revised — a late print, a split backfill,
+    a repaired basis — so a regime derived at read time would move an old call
+    between cells underneath a promotion decision already made."""
+    idea_id = log_idea(idea(), as_of=CALLED, regime="bear_volatile")
+
+    stored = db.fetch_one("SELECT regime_at_call FROM shadow_book WHERE id = %s", (idea_id,))[
+        "regime_at_call"
+    ]
+    assert stored == "bear_volatile"
+
+    # Whatever happens to the benchmark afterwards, the stamp stands.
+    assert (
+        db.fetch_one("SELECT regime_at_call FROM shadow_book WHERE id = %s", (idea_id,))[
+            "regime_at_call"
+        ]
+        == "bear_volatile"
+    )
+
+
+def test_a_call_with_no_benchmark_history_is_unknown_rather_than_guessed():
+    """`ie_test` holds no SPY series at all, which is exactly the shape of a
+    fresh deployment's first 200 sessions."""
+    from shadow_book.logger import regime_at
+
+    assert regime_at(CALLED) == "unknown"
+
+
+def test_the_promotion_query_groups_per_recipe_and_regime():
+    """D45 evaluates the ladder per recipe x REGIME, so the 30-idea floor
+    applies per cell. This is the shape that query needs."""
+    log_idea(idea(recipe="pullback_to_trend"), as_of=CALLED, regime="bull_calm")
+    log_idea(idea(recipe="base_breakout"), as_of=CALLED, regime="bull_calm")
+    log_idea(
+        idea(recipe="pullback_to_trend"),
+        as_of=CALLED + timedelta(days=1),
+        regime="bear_volatile",
+    )
+
+    rows = db.fetch_all(
+        """
+        SELECT recipe, regime_at_call, count(*) AS n
+        FROM   shadow_book
+        WHERE  symbol = %s
+        GROUP  BY recipe, regime_at_call
+        ORDER  BY recipe, regime_at_call
+        """,
+        (SYMBOL,),
+    )
+    assert [(r["recipe"], r["regime_at_call"], r["n"]) for r in rows] == [
+        ("base_breakout", "bull_calm", 1),
+        ("pullback_to_trend", "bear_volatile", 1),
+        ("pullback_to_trend", "bull_calm", 1),
+    ]

@@ -55,19 +55,13 @@ def evaluate(
         )
 
     if recipe.require_eps_beat or recipe.require_revenue_beat:
-        # Growth is the proxy the stored data supports; the beat/miss flags
-        # themselves live on `events` rows that the calendars do not reliably
-        # populate with actuals until days after the print.
-        beat = fundamental.eps_growth_yoy is not None and fundamental.eps_growth_yoy > 0
-        checks["eps_growing"] = beat
-        if not beat:
-            return no_setup(
-                NAME,
-                "no positive EPS growth to drift on"
-                if fundamental.eps_growth_yoy is not None
-                else "no EPS history — the beat cannot be verified",
-                checks,
-            )
+        failed = (
+            _verified_beat(recipe, catalyst, checks)
+            if recipe.beat_source == "verified"
+            else _growth_proxy_beat(fundamental, checks)
+        )
+        if failed is not None:
+            return no_setup(NAME, failed, checks)
 
     # Stated but unverifiable. Recorded as a FAILED check, because an
     # unverified condition is not a satisfied one, and the reason names it.
@@ -123,9 +117,58 @@ def evaluate(
         recipe=NAME,
         triggered=True,
         reason=(
-            f"gapped {gap:.1f}% {since} day(s) after earnings and holding "
-            f"{structure.gap_day_low:.2f} (guidance UNVERIFIED)"
+            f"gapped {gap:.1f}% {since} day(s) after earnings, {catalyst.surprise.verdict}, "
+            f"holding {structure.gap_day_low:.2f} (guidance UNVERIFIED)"
         ),
         plan=plan,
         checks=checks,
     )
+
+
+def _growth_proxy_beat(fundamental: FundamentalFeatures, checks: dict) -> str | None:
+    """Year-over-year EPS growth as a stand-in for a beat. Returns the refusal.
+
+    What the recipe had to do while the stored earnings rows carried no
+    actuals. It answers a DIFFERENT question — growth is about the trend, a
+    beat is about the surprise — and a company can grow 20% year on year while
+    missing the quarter the drift premise rests on.
+    """
+    growing = fundamental.eps_growth_yoy is not None and fundamental.eps_growth_yoy > 0
+    checks["eps_growing"] = growing
+    if growing:
+        return None
+    return (
+        "no positive EPS growth to drift on"
+        if fundamental.eps_growth_yoy is not None
+        else "no EPS history — the beat cannot be verified"
+    )
+
+
+def _verified_beat(recipe, catalyst: CatalystFeatures, checks: dict) -> str | None:
+    """The reported actual against the consensus estimate (O12).
+
+    **UNVERIFIABLE IS A REFUSAL, NOT A PASS.** A missing actual or estimate
+    means the beat cannot be established, and the standing `features/`
+    convention makes that `None` rather than False — the same asymmetry
+    `pullback_to_trend` already applies to an unknown earnings date, where
+    D19's rules cannot be satisfied by ignorance.
+    """
+    surprise = catalyst.surprise
+    if recipe.require_eps_beat:
+        beat = surprise.eps_beat
+        checks["eps_beat_verified"] = bool(beat)
+        if beat is None:
+            return "no reported EPS actual or estimate on record — the beat cannot be verified"
+        if not beat:
+            return f"EPS {surprise.verdict} — no surprise to drift on"
+
+    if recipe.require_revenue_beat:
+        # Reported separately: revenue actuals are missing more often than EPS,
+        # and folding them together would turn a data gap into an EPS miss.
+        revenue = surprise.revenue_beat
+        checks["revenue_beat_verified"] = bool(revenue)
+        if revenue is None:
+            return "no reported revenue actual or estimate on record"
+        if not revenue:
+            return "revenue missed the estimate"
+    return None

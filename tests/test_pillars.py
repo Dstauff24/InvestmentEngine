@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 
 from core import config
-from features.catalyst import CatalystFeatures, InsiderCluster
+from features.catalyst import CatalystFeatures, EarningsSurprise, InsiderCluster
 from features.evidence import EMPTY, EvidenceDepth
 from features.fundamental import FundamentalFeatures, RevisionMomentum
 from features.sentiment import SentimentFeatures, ToneWindow
@@ -130,6 +130,10 @@ def cata(**kw) -> CatalystFeatures:
         "days_to_ex_dividend": 40,
         "next_dividend_amount": 0.25,
         "insiders": insiders,
+        # O12: the last reported quarter\'s beat, as a fact. The default is
+        # the honest one — unverified, which the recipe refuses rather than
+        # reads as a miss.
+        "surprise": EarningsSurprise(None, None, None, None, None),
     }
     base.update(kw)
     return CatalystFeatures(**base)
