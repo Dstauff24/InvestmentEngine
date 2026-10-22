@@ -45,6 +45,7 @@ from core.budget import BudgetExhausted, DayBudget
 from core.jobs import clear_stale_runs, day_is_complete, failed_critical_jobs, job_run
 from ingest import (
     edgar_insiders,
+    finnhub_earnings,
     finnhub_news,
     fmp_estimates,
     fmp_events,
@@ -166,6 +167,16 @@ def build_plan() -> list[Step]:
             lambda: fmp_fundamentals.run(),
             depends_on=("fmp_events",),
             description="quarterly financials + ratios, stale symbols only",
+        ),
+        Step(
+            "finnhub_earnings_times",
+            lambda: finnhub_earnings.run(),
+            # AFTER the events job, which is what writes the earnings rows this
+            # stamps one column of. Non-critical: without a release time the
+            # drift recipe falls back to the release-time-agnostic window,
+            # which is a day slower rather than wrong.
+            depends_on=("fmp_events",),
+            description="earnings release times (bmo/amc) from Finnhub (D49)",
         ),
         Step(
             "price_basis_check",
