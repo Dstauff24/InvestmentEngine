@@ -328,9 +328,14 @@ recipes:
     # carried no actuals until D47 moved the radar to the per-symbol endpoint.
     # `verified` compares the reported actual to the consensus estimate, which
     # is what a beat IS: a company can grow 20% year on year and still miss.
-    # Both are backtested side by side before this moves (no number here, so no
-    # [OPEN] tag — a named test pins it instead).
-    beat_source: growth_proxy
+    # ADOPTED `verified` by D48 on 2026-10-22, against the certifying run
+    # `242301c` / scoring-config hash `18319ad9d328`: the verified check won
+    # every pre-registered cut (all plans +0.27R vs +0.16R, R:R>=2 +0.43 vs
+    # +0.29, R:R>=3 +0.68 vs +0.34) and is MORE permissive, because many
+    # companies beat a quarter while year-over-year growth is negative and the
+    # proxy refused all of those. No number here, so no [OPEN] tag — a named
+    # test pins it instead.
+    beat_source: verified
     require_raised_guidance: true
     # D46: adopted at the D43 sweep's measured p75. The shipped 2.0% gave 96
     # signals at +0.16R; 0.57% gives 231 at +0.26R on 227 closed — more trades

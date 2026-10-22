@@ -406,6 +406,17 @@ def reaction(**kw) -> EarningsReaction:
     return EarningsReaction(**base)
 
 
+def drift_cata(**kw) -> CatalystFeatures:
+    """A catalyst with a VERIFIED beat, which is what the shipped mode needs.
+
+    Before D48 the bare fixture could leave the surprise unverified and the
+    recipe still fired on the growth proxy; now an unverifiable beat is a
+    refusal, so the default has to carry one.
+    """
+    kw.setdefault("days_since_earnings", 4)
+    return beat(**kw)
+
+
 def drift_tech(**kw) -> TechnicalFeatures:
     structure = {"gap_up_pct": 4.0, "gap_day_low": 99.0, "prior_close": 100.0}
     structure.update(kw.pop("structure", {}))
@@ -419,7 +430,7 @@ def drift_tech(**kw) -> TechnicalFeatures:
 
 
 def test_a_held_reaction_fires():
-    result = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=4))
+    result = drift.evaluate(drift_tech(), fund(), drift_cata())
     assert result.triggered, result.reason
     points = 5.0
     assert result.plan.target_2 == pytest.approx(
@@ -431,9 +442,7 @@ def test_a_held_reaction_fires():
 def test_an_incomplete_window_does_not_fire():
     """ "Evaluate at the close that completes the window" — a reaction judged on
     a later session would re-enter the same idea for days."""
-    result = drift.evaluate(
-        drift_tech(reaction=reaction(complete=False)), fund(), cata(days_since_earnings=4)
-    )
+    result = drift.evaluate(drift_tech(reaction=reaction(complete=False)), fund(), drift_cata())
     assert not result.triggered
     assert "not the latest session" in result.reason
 
@@ -441,7 +450,7 @@ def test_an_incomplete_window_does_not_fire():
 def test_no_knowable_report_means_no_reaction_to_judge():
     """With no release time, a report dated today has not necessarily been
     released — so there is nothing to measure, rather than a zero."""
-    result = drift.evaluate(drift_tech(reaction=None), fund(), cata(days_since_earnings=0))
+    result = drift.evaluate(drift_tech(reaction=None), fund(), drift_cata(days_since_earnings=0))
     assert not result.triggered
     assert "no measurable reaction window" in result.reason
 
@@ -452,7 +461,7 @@ def test_a_reaction_that_filled_is_not_a_reaction_that_held():
     result = drift.evaluate(
         drift_tech(reaction=reaction(reaction_pct=0.1, reaction_points=0.1)),
         fund(),
-        cata(days_since_earnings=4),
+        drift_cata(),
     )
     assert not result.triggered
     assert "filled is not a reaction that held" in result.reason
@@ -462,7 +471,7 @@ def test_a_close_on_the_reaction_low_is_a_rejection():
     result = drift.evaluate(
         drift_tech(close=99.0, reaction=reaction(window_low=99.0)),
         fund(),
-        cata(days_since_earnings=4),
+        drift_cata(),
     )
     assert not result.triggered
     assert "being rejected" in result.reason
@@ -474,7 +483,7 @@ def test_a_confirmed_pre_open_report_uses_a_one_session_window():
     result = drift.evaluate(
         drift_tech(reaction=reaction(release_time="bmo", sessions=1)),
         fund(),
-        cata(days_since_earnings=1),
+        drift_cata(days_since_earnings=1),
     )
     assert result.triggered, result.reason
     assert "release bmo" in result.reason
@@ -484,7 +493,7 @@ def test_the_unverifiable_guidance_check_is_reported_as_failed_not_skipped():
     """`require_raised_guidance` has no data source. An unverified condition is
     not a satisfied one, and a recipe that quietly skips one of its three
     stated conditions is a different recipe."""
-    result = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=4))
+    result = drift.evaluate(drift_tech(), fund(), drift_cata())
     assert "raised_guidance_UNVERIFIED" in result.checks
     assert result.checks["raised_guidance_UNVERIFIED"] is False
     assert "UNVERIFIED" in result.reason
@@ -499,12 +508,12 @@ def test_the_days_since_earnings_gate_is_gone_and_the_window_is_the_gate():
     past — so the old gate had nothing left to refuse. This pins that the
     recipe no longer consults the day count at all.
     """
-    stale = drift.evaluate(drift_tech(), fund(), cata(days_since_earnings=60))
+    stale = drift.evaluate(drift_tech(), fund(), drift_cata(days_since_earnings=60))
     assert stale.triggered, "the day count is no longer consulted"
     assert "recent_earnings" not in stale.checks
 
     incomplete = drift.evaluate(
-        drift_tech(reaction=reaction(complete=False)), fund(), cata(days_since_earnings=1)
+        drift_tech(reaction=reaction(complete=False)), fund(), drift_cata(days_since_earnings=1)
     )
     assert not incomplete.triggered
     assert "not the latest session" in incomplete.reason
@@ -541,16 +550,22 @@ def test_the_single_bar_gap_is_no_longer_what_the_recipe_reads():
     result = drift.evaluate(
         drift_tech(structure={"gap_up_pct": 0.0, "gap_day_low": 50.0}),
         fund(),
-        cata(days_since_earnings=4),
+        drift_cata(),
     )
     assert result.triggered, "the window, not the bar, decides"
     assert result.plan.stop < 99.0, "and the window's low is the stop"
 
 
-def test_no_eps_growth_does_not_fire():
-    result = drift.evaluate(drift_tech(), fund(eps_growth_yoy=-5.0), cata(days_since_earnings=4))
-    assert not result.triggered
-    assert "EPS growth" in result.reason
+def test_no_eps_growth_does_not_fire_under_the_proxy():
+    """And FIRES under the shipped `verified` mode, which is the population D48
+    unlocked: a company can beat the quarter while year-over-year growth is
+    negative, and the proxy refused every one of those."""
+    refused = drift.evaluate(drift_tech(), fund(eps_growth_yoy=-5.0), drift_cata(), cfg=PROXY_CFG)
+    assert not refused.triggered
+    assert "EPS growth" in refused.reason
+
+    fires = drift.evaluate(drift_tech(), fund(eps_growth_yoy=-5.0), drift_cata())
+    assert fires.triggered, "a verified beat does not care what last year did"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -595,18 +610,27 @@ def test_an_unmeasurable_contraction_refuses_rather_than_assuming():
 
 # ── O12: the verified beat ──────────────────────────────────────────────────
 
-VERIFIED_CFG = config.ScoringConfig.model_validate(
-    {
-        **CFG.model_dump(),
-        "recipes": {
-            **CFG.recipes.model_dump(),
-            "post_earnings_drift": {
-                **CFG.recipes.post_earnings_drift.model_dump(),
-                "beat_source": "verified",
+
+def _with_beat_source(mode: str) -> config.ScoringConfig:
+    return config.ScoringConfig.model_validate(
+        {
+            **CFG.model_dump(),
+            "recipes": {
+                **CFG.recipes.model_dump(),
+                "post_earnings_drift": {
+                    **CFG.recipes.post_earnings_drift.model_dump(),
+                    "beat_source": mode,
+                },
             },
-        },
-    }
-)
+        }
+    )
+
+
+# `verified` is the SHIPPED mode from D48, so it is what the bare `drift.evaluate`
+# calls below exercise. The proxy keeps its own config because it is still a
+# supported mode and the two answer different questions.
+VERIFIED_CFG = _with_beat_source("verified")
+PROXY_CFG = _with_beat_source("growth_proxy")
 
 
 def beat(**kw) -> CatalystFeatures:
@@ -621,10 +645,13 @@ def beat(**kw) -> CatalystFeatures:
     return cata(days_since_earnings=kw.pop("days_since_earnings", 4), surprise=surprise, **kw)
 
 
-def test_the_shipped_config_still_uses_the_growth_proxy():
-    """O12 is a comparison, not a switch flipped on the way past. The mode
-    moves on a decision once both have been backtested."""
-    assert config.scoring().recipes.post_earnings_drift.beat_source == "growth_proxy"
+def test_the_shipped_config_uses_the_verified_beat():
+    """ADOPTED by D48 against the certifying run `242301c` / scoring-config
+    hash `18319ad9d328`, on pre-registered criteria: the verified check won all
+    three cuts (all plans +0.27R vs +0.16R, R:R>=2 +0.43 vs +0.29, R:R>=3 +0.68
+    vs +0.34 on 211 closed). The mode moved on a decision, not on the way
+    past."""
+    assert config.scoring().recipes.post_earnings_drift.beat_source == "verified"
 
 
 def test_a_verified_beat_fires():
@@ -641,7 +668,9 @@ def test_a_verified_miss_does_not_fire_even_when_growth_is_positive():
     missed = beat(eps_actual=0.90, eps_estimate=1.00)
 
     assert drift.evaluate(drift_tech(), fund(), missed, cfg=VERIFIED_CFG).triggered is False
-    assert drift.evaluate(drift_tech(), fund(), missed).triggered is True, "the proxy passes it"
+    assert drift.evaluate(drift_tech(), fund(), missed, cfg=PROXY_CFG).triggered is True, (
+        "the proxy passes it — which is the whole reason D48 moved off it"
+    )
 
 
 def test_an_unverifiable_beat_refuses_rather_than_passing():
