@@ -68,6 +68,12 @@ pinned by tests so they cannot drift into a plausible-looking guess.
 
 ## ✅ DECISIONS
 
+**Convention from Oct 22, 2026: an adoption cites its evidence.** Any entry that adopts a value, a
+mode or a threshold on backtest evidence names the **commit and effective-config hash** of the run
+that produced it. A number without them is not checkable; with them, anyone can check out that
+commit, load that config and reproduce it. A run from a dirty tree is stamped non-baseline by
+`backtest/provenance.py` and cannot be cited at all.
+
 | # | Date | Decision |
 |---|------|----------|
 | D1 | Aug 30 | **Brain before beauty.** Validate the scoring/confluence engine before any UI. |
