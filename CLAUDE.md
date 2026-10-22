@@ -3,7 +3,7 @@
 ## What this is
 A personal investment decision-support engine for a Schwab brokerage account (swings, long holds, options). It ingests quant + qual data, scores tickers through a 4-pillar confluence model, surfaces complete trade plans (entry/stop/TP1/TP2/R:R/size) in two tiers, tracks every idea in a Shadow Book, and sends a daily email digest. **The human makes every final decision.** Phase 1 = the brain, no UI.
 
-**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D39).
+**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D49, open items O1–O14).
 
 ## Non-negotiable process rule (D30)
 **Commit and push to GitHub at the end of every working session, and after every completed step. No exceptions.** The repo on GitHub is the system of record; a Codespace is disposable. Never report a step complete without naming the commit that was pushed.
@@ -110,19 +110,22 @@ db/              schema.sql, init.py, migrations/
 ingest/          fmp_client.py, universe.py, fmp_fundamentals.py, fmp_estimates.py, fmp_events.py,
                  fmp_history.py (one-time deep backfill + split-basis repair),
                  edgar_client.py, edgar_insiders.py,
-                 finnhub_client.py, finnhub_news.py, schwab_client.py, schwab_prices.py, schwab_chains.py, runner.py
+                 finnhub_client.py, finnhub_news.py, finnhub_earnings.py (release times, D49),
+                 schwab_client.py, schwab_prices.py, schwab_chains.py, runner.py
 features/        adjustment.py, iv.py, evidence.py, technical.py, fundamental.py, catalyst.py, sentiment.py
 scoring/         pillars.py, composite.py, runner.py, recipes/{base,pullback,breakout,drift}.py
 decision/        idea_builder.py, tiering.py, risk_manager.py
-shadow_book/     logger.py, outcome_tracker.py, (later: analytics.py)
+shadow_book/     logger.py, outcome_tracker.py, analytics.py (expectancy per recipe x regime)
 alerts/          notify.py (the facade), mailer.py, telegram.py, store.py, digest.py
 jobs/            daily_close.py, scoring_pass.py, price_basis_check.py, snapshot jobs
 backtest/        costs.py, resolve.py (calls the Shadow Book's tracker), regime.py, engine.py,
-                 metrics.py, sweep.py (D43)
-scripts/         fmp_probe.py, schwab_auth.py, sync_token.sh, deploy.sh, backup_db.sh,
+                 metrics.py, sweep.py (D43), provenance.py (commit + config hash + dirty flag)
+scripts/         fmp_probe.py (endpoint reachability), field_probe.py (live field names vs
+                 what parsers read), schwab_auth.py, sync_token.sh, deploy.sh, backup_db.sh,
                  token_expiry_check.py, telegram_test.py
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)
-docs/            engine-decisions-and-todo.md (canonical log), open-parameters.md, REBUILD_KICKOFF.md
+docs/            engine-decisions-and-todo.md (canonical log, D1-D49 + O1-O14),
+                 open-parameters.md (79 live rows + 1 tombstone), REBUILD_KICKOFF.md
 ```
 
 ## Schema conventions (all previously verified against live PG16 + Timescale 2.29)

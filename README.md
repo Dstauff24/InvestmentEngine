@@ -320,6 +320,7 @@ over-4096-character split; `--no-record` leaves the `alerts` table untouched.
 Three commands, in this order, before the first backtest on a fresh database:
 
 ```bash
+ALLOW_LIVE_CALLS=1 python scripts/field_probe.py                    # field names still match?
 ALLOW_LIVE_CALLS=1 python -m ingest.fmp_events --backfill-actions   # ~866 calls
 ALLOW_LIVE_CALLS=1 python -m ingest.fmp_history --years 5           # ~434 + 433
 python -m jobs.price_basis_check                                    # verify D24
@@ -345,9 +346,20 @@ restated sessions.
 
 ```bash
 python -m backtest.engine --years 4 --workers 2 --out data/backtest.csv
+python -m backtest.engine --variant recipes.post_earnings_drift.beat_source=verified \
+    --out data/compare.csv                      # two configurations, ONE walk
+python -m backtest.metrics data/backtest.csv    # re-render without re-walking
+python -m backtest.metrics data/compare.csv --only beat_source=verified
 python -m backtest.sweep --measure-only          # the live distributions (D43)
 python -m backtest.sweep --sample 60 --years 3   # sweep the existence gates
+python -m shadow_book.analytics                  # expectancy per recipe x regime
 ```
+
+**A dirty tree refuses to run.** Every output records the commit, a hash of the
+effective config and a dirty flag, on every CSV row and in the report header;
+`--allow-dirty` runs anyway and stamps the result NON-BASELINE, which may never
+be cited as evidence. A decision that adopts a value names the commit and
+config hash of the run that justified it.
 
 No network and no consent flag: both read stored data only. The engine walks
 every session forward, enters on the NEXT bar, charges friction, and resolves
