@@ -47,6 +47,8 @@ from datetime import date, timedelta
 import pandas as pd
 
 from backtest.costs import CostModel
+from backtest.provenance import Provenance
+from backtest.provenance import current as provenance_current
 from backtest.regime import RegimeSeries, load_benchmark, regime_series
 from backtest.resolve import resolve_plan
 from core import clock, config, db
@@ -103,6 +105,18 @@ class ParamSet:
             breakout.max_base_depth_pct,
         )
 
+    @property
+    def config_hash(self) -> str:
+        """A hash of THIS set's effective scoring config.
+
+        Per param set, not per run: a sweep walks several configurations at
+        once, and a comparison whose arms cannot be told apart by hash is a
+        comparison nobody can reproduce.
+        """
+        from backtest.provenance import config_hash
+
+        return config_hash(self.cfg)
+
     @classmethod
     def baseline(cls, cfg=None) -> ParamSet:
         return cls(name="baseline", cfg=cfg or config.scoring())
@@ -136,6 +150,12 @@ class SimTrade:
     mae: float | None
     hit_target_1: bool
     hit_target_2: bool
+    # PROVENANCE, on every row. A CSV gets copied, concatenated and mailed
+    # around; a stamp that lives in a side file is a stamp that gets separated
+    # from the thing it describes.
+    commit: str = "unknown"
+    config_hash: str = "unknown"
+    dirty: bool = True
 
     @property
     def filled(self) -> bool:
@@ -260,6 +280,7 @@ def walk_symbol(
     param_sets: list[ParamSet],
     regimes: RegimeSeries,
     costs: CostModel,
+    provenance: Provenance,
     sector_index: pd.Series | None = None,
     start: date | None = None,
     end: date | None = None,
@@ -337,6 +358,7 @@ def walk_symbol(
                         called_on=day,
                         costs=costs,
                         regime=regimes.tag(day),
+                        provenance=provenance,
                     )
                     if trade is None:
                         continue
@@ -356,6 +378,7 @@ def _simulate(
     called_on: date,
     costs: CostModel,
     regime: str,
+    provenance: Provenance,
 ) -> SimTrade | None:
     fill = resolve_plan(
         symbol=history.symbol,
@@ -373,6 +396,9 @@ def _simulate(
         return None
     return SimTrade(
         param_set=param_set.name,
+        commit=provenance.commit,
+        config_hash=param_set.config_hash,
+        dirty=provenance.dirty,
         symbol=history.symbol,
         sector=history.sector,
         recipe=recipe,
@@ -458,6 +484,7 @@ class BacktestResult:
     skipped_symbols: list[str] = field(default_factory=list)
     regimes: dict[str, int] = field(default_factory=dict)
     param_sets: list[str] = field(default_factory=list)
+    provenance: Provenance | None = None
 
     def frame(self) -> pd.DataFrame:
         return pd.DataFrame([asdict(t) for t in self.trades])
@@ -480,6 +507,7 @@ def run(
     as_of: date | None = None,
     with_sectors: bool = True,
     workers: int = 1,
+    allow_dirty: bool = False,
 ) -> BacktestResult:
     """The whole walk-forward.
 
@@ -494,6 +522,11 @@ def run(
     universe = symbols if symbols is not None else db.active_symbols()
     sets = param_sets or [ParamSet.baseline()]
     model = costs or CostModel.from_config()
+    # BEFORE ANY WORK. Three runs were invalidated by edits landing mid-walk;
+    # a dirty tree now refuses to start rather than producing numbers that
+    # describe code which no longer exists.
+    stamp = provenance_current(allow_dirty=allow_dirty)
+    log.info("provenance: %s%s", stamp.label, "" if stamp.baseline else "  [NON-BASELINE]")
 
     regimes = regime_series(load_benchmark(as_of=today))
     sectors = {
@@ -515,6 +548,7 @@ def run(
         end=end,
         regimes=regimes.histogram(),
         param_sets=[s.name for s in sets],
+        provenance=stamp,
     )
     jobs = [
         _Job(
@@ -527,6 +561,7 @@ def run(
             start=start,
             end=end,
             as_of=today,
+            provenance=stamp,
         )
         for symbol in universe
     ]
@@ -578,6 +613,7 @@ class _Job:
     start: date
     end: date
     as_of: date
+    provenance: Provenance
 
 
 def _walk_job(job: _Job) -> tuple[str, list[SimTrade], bool]:
@@ -589,6 +625,7 @@ def _walk_job(job: _Job) -> tuple[str, list[SimTrade], bool]:
         param_sets=job.param_sets,
         regimes=job.regimes,
         costs=job.costs,
+        provenance=job.provenance,
         sector_index=job.sector_index,
         start=job.start,
         end=job.end,
@@ -659,6 +696,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-sectors", action="store_true", help="skip sector indices (faster)")
     parser.add_argument("--workers", type=int, default=1, help="processes to split symbols across")
     parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="run with uncommitted changes; stamps every output NON-BASELINE",
+    )
+    parser.add_argument(
         "--variant",
         action="append",
         metavar="PATH=VALUE",
@@ -685,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         years=args.years,
         with_sectors=not args.no_sectors,
         workers=args.workers,
+        allow_dirty=args.allow_dirty,
     )
     print(render_report(result))
     if args.out:

@@ -294,6 +294,7 @@ def run(
     workers: int = 1,
     as_of: date | None = None,
     distributions: Distributions | None = None,
+    allow_dirty: bool = False,
 ) -> tuple[Distributions, dict[str, dict[str, Expectancy]]]:
     """Measure, build the axes, walk every parameter set, group the results."""
     today = as_of or clock.session_date()
@@ -312,6 +313,7 @@ def run(
         param_sets=sets,
         as_of=today,
         workers=workers,
+        allow_dirty=allow_dirty,
     )
 
     by_set: dict[str, dict[str, Expectancy]] = {}
@@ -358,6 +360,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--symbols", nargs="*")
     parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="sweep with uncommitted changes; stamps every output NON-BASELINE",
+    )
+    parser.add_argument(
         "--measure-only", action="store_true", help="print the distributions and stop"
     )
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -377,7 +384,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     measured, by_set = run(
-        symbols=args.symbols, sample=args.sample, years=args.years, workers=args.workers
+        symbols=args.symbols,
+        sample=args.sample,
+        years=args.years,
+        workers=args.workers,
+        allow_dirty=args.allow_dirty,
     )
     print(render(measured, by_set))
     return 0

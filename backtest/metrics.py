@@ -202,6 +202,7 @@ def render_report(result) -> str:
         + ("" if len(variants) < 2 else f" across {len(variants)} configuration(s)")
     )
     lines.append("=" * 118)
+    lines.extend(_provenance_block(result, variants))
     lines.append("")
     if result.regimes:
         lines.append("Regime sessions (D17's trend test, SPY realised-vol terciles):")
@@ -276,6 +277,56 @@ def render_report(result) -> str:
     return "\n".join(lines)
 
 
+def _provenance_block(result, variants: list[str]) -> list[str]:
+    """What code and config produced these numbers, and whether they agree.
+
+    **A COMPARISON ACROSS DIFFERENT CODE IS NOT A COMPARISON.** Two runs whose
+    commits differ answer two questions, and the difference between them is
+    partly the code. The header says so loudly rather than leaving a reader to
+    assume one walk produced everything.
+    """
+    lines: list[str] = []
+    stamp = getattr(result, "provenance", None)
+    if stamp is not None and hasattr(stamp, "header"):
+        lines.extend(stamp.header())
+
+    commits = sorted({getattr(t, "commit", "unknown") for t in result.trades})
+    hashes = sorted({getattr(t, "config_hash", "unknown") for t in result.trades})
+    dirty_rows = sum(1 for t in result.trades if getattr(t, "dirty", False))
+
+    if stamp is None and result.trades:
+        lines.append(f"code      {', '.join(commits)}")
+    if len(commits) > 1:
+        lines.append("")
+        lines.append(
+            f"!! MIXED CODE: these rows come from {len(commits)} different commits "
+            f"({', '.join(commits)}). The difference between them is partly the code, "
+            f"not the configuration — this is not a comparison."
+        )
+    if dirty_rows and stamp is None:
+        lines.append(
+            f"!! NON-BASELINE: {dirty_rows} row(s) were produced from a dirty tree and "
+            f"cannot be reproduced."
+        )
+    if len(variants) > 1:
+        by_variant = {}
+        for trade in result.trades:
+            by_variant.setdefault(getattr(trade, "param_set", "baseline"), set()).add(
+                getattr(trade, "config_hash", "unknown")
+            )
+        lines.append("")
+        lines.append("configurations compared (effective-config hash):")
+        for name in variants:
+            lines.append(f"  {name:<40} {', '.join(sorted(by_variant.get(name, {'?'})))}")
+        if len(hashes) < len(variants):
+            lines.append(
+                "  !! two arms share a hash — the override did not change the effective "
+                "config, so this comparison is measuring noise."
+            )
+    lines.append("")
+    return lines
+
+
 def _is_baseline(trade, variants: list[str]) -> bool:
     """Whether a trade belongs to the run's reference configuration.
 
@@ -320,6 +371,9 @@ class CsvTrade:
     """
 
     param_set: str
+    commit: str
+    config_hash: str
+    dirty: bool
     recipe: str
     regime: str
     outcome: str
@@ -348,6 +402,7 @@ class CsvRun:
     end: str
     symbols: int
     regimes: dict[str, int] = field(default_factory=dict)
+    provenance: object = None
 
 
 def load_csv(path) -> CsvRun:
@@ -362,6 +417,9 @@ def load_csv(path) -> CsvRun:
             rows.append(
                 CsvTrade(
                     param_set=row.get("param_set") or "baseline",
+                    commit=row.get("commit") or "unknown",
+                    config_hash=row.get("config_hash") or "unknown",
+                    dirty=str(row.get("dirty") or "1") == "1",
                     recipe=row["recipe"],
                     regime=row["regime"],
                     outcome=row["outcome"],

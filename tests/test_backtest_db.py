@@ -166,7 +166,9 @@ def test_history_loads_the_adjusted_series_the_live_engine_reads():
 def test_a_symbol_with_a_short_series_is_reported_as_skipped():
     for i in range(30):
         add_bar(START + timedelta(days=i), 100.0)
-    result = run_backtest(symbols=[SYMBOL], as_of=AS_OF, years=2, with_sectors=False)
+    result = run_backtest(
+        symbols=[SYMBOL], as_of=AS_OF, years=2, with_sectors=False, allow_dirty=True
+    )
     assert result.skipped_symbols == [SYMBOL]
     assert result.trades == []
     assert result.symbols == 0
@@ -177,7 +179,9 @@ def test_the_whole_walk_runs_on_a_seeded_symbol_and_records_regimes():
     even when the seeded symbol produces no setup."""
     for i in range(400):
         add_bar(START + timedelta(days=i), 100.0 + i * 0.1)
-    result = run_backtest(symbols=[SYMBOL], as_of=AS_OF, years=3, with_sectors=False)
+    result = run_backtest(
+        symbols=[SYMBOL], as_of=AS_OF, years=3, with_sectors=False, allow_dirty=True
+    )
     assert result.symbols == 1
     assert result.start is not None and result.end == AS_OF
     assert isinstance(result.regimes, dict)

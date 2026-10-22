@@ -16,7 +16,7 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from backtest import metrics, sweep
+from backtest import metrics, provenance, sweep
 from backtest.costs import CostModel
 from backtest.engine import (
     ParamSet,
@@ -336,6 +336,7 @@ def test_a_symbol_without_enough_history_is_skipped_not_measured():
             param_sets=[ParamSet.baseline()],
             regimes=RegimeSeries(tags={}, benchmark="SPY", ma_length=200),
             costs=CostModel.free(),
+            provenance=provenance.current(allow_dirty=True),
         )
         == []
     )
@@ -746,3 +747,117 @@ def test_a_multi_variant_run_does_not_pool_its_configurations():
     assert row.split()[1] == "1", f"the headline must count one configuration: {row!r}"
     assert "VARIANTS — the same walk, one configuration changed" in text
     assert "beat_source=verified / r" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Provenance: freeze before launch, enforced
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_dirty_tree_refuses_to_start(monkeypatch):
+    """THE RULE THAT WAS A HABIT. Three runs in one afternoon were invalidated
+    by edits landing mid-walk, and only remembering caught it."""
+    monkeypatch.setattr(
+        provenance, "_git", lambda *a: "abc1234\n" if a[0] == "rev-parse" else " M engine.py\n"
+    )
+    with pytest.raises(provenance.DirtyTree) as exc:
+        provenance.current()
+    assert "engine.py" in str(exc.value)
+    assert "--allow-dirty" in str(exc.value), "the message says how to proceed anyway"
+
+
+def test_allow_dirty_runs_but_stamps_the_output_non_baseline(monkeypatch):
+    monkeypatch.setattr(
+        provenance, "_git", lambda *a: "abc1234\n" if a[0] == "rev-parse" else " M engine.py\n"
+    )
+    stamp = provenance.current(allow_dirty=True)
+    assert stamp.dirty is True
+    assert stamp.baseline is False
+    assert any("NON-BASELINE" in line for line in stamp.header())
+    assert stamp.as_row()["dirty"] == "1"
+
+
+def test_a_clean_tree_is_a_baseline(monkeypatch):
+    monkeypatch.setattr(provenance, "_git", lambda *a: "abc1234\n" if a[0] == "rev-parse" else "")
+    stamp = provenance.current()
+    assert stamp.baseline is True
+    assert stamp.commit == "abc1234"
+    assert not any("NON-BASELINE" in line for line in stamp.header())
+
+
+def test_an_unreadable_repository_counts_as_dirty(monkeypatch):
+    """The rule is "prove the tree is clean", and an unanswerable question is
+    not a yes — a tarball deploy must not silently produce baselines."""
+    monkeypatch.setattr(provenance, "_git", lambda *a: None)
+    with pytest.raises(provenance.DirtyTree):
+        provenance.current()
+    stamp = provenance.current(allow_dirty=True)
+    assert stamp.commit == provenance.UNKNOWN
+    assert stamp.baseline is False
+
+
+def test_the_status_parse_keeps_the_whole_path(monkeypatch):
+    """`--porcelain` puts status in the first two columns and the first is
+    usually a space, so stripping the output eats one character of the FIRST
+    line only — which printed `acktest/engine.py` once and would have sent
+    somebody looking for a file that does not exist."""
+    monkeypatch.setattr(
+        provenance,
+        "_git",
+        lambda *a: "abc1234\n" if a[0] == "rev-parse" else " M backtest/engine.py\n?? new.py\n",
+    )
+    stamp = provenance.current(allow_dirty=True)
+    assert stamp.dirty_files == ("backtest/engine.py", "new.py")
+
+
+def test_the_config_hash_follows_the_effective_values_not_the_file(monkeypatch):
+    """A comment change must not move the hash; a value change must."""
+    baseline = ParamSet.baseline()
+    altered = ParamSet(
+        "x", sweep.with_override(baseline.cfg, "recipes.pullback_to_trend.rsi_max", 55.0)
+    )
+    assert baseline.config_hash != altered.config_hash
+    assert baseline.config_hash == ParamSet.baseline().config_hash
+
+
+def test_every_trade_carries_the_stamp_and_it_survives_a_csv_round_trip(tmp_path):
+    csv = tmp_path / "trades.csv"
+    csv.write_text(
+        "param_set,commit,config_hash,dirty,symbol,sector,recipe,called_on,regime,"
+        "risk_reward,outcome,entry,gross_r,net_r,days_held\n"
+        "baseline,abc1234,deadbeef0000,0,AAPL,Tech,pullback_to_trend,2024-03-01,bull_calm,"
+        "4.0,target_2,100.0,2.0,1.9,7\n"
+    )
+    run = metrics.load_csv(csv)
+    assert run.trades[0].commit == "abc1234"
+    assert run.trades[0].config_hash == "deadbeef0000"
+    assert run.trades[0].dirty is False
+
+
+def test_a_report_over_two_commits_says_so_loudly():
+    """A COMPARISON ACROSS DIFFERENT CODE IS NOT A COMPARISON: the difference
+    between the arms is partly the code."""
+    from backtest.engine import BacktestResult
+
+    base = sim(1.0)
+    trades = [
+        SimTrade(**{**base.__dict__, "commit": "aaa1111"}),
+        SimTrade(**{**base.__dict__, "commit": "bbb2222", "param_set": "variant"}),
+    ]
+    text = metrics.render_report(BacktestResult(trades=trades, start=CALLED, end=CALLED, symbols=1))
+    assert "MIXED CODE" in text
+    assert "aaa1111" in text and "bbb2222" in text
+
+
+def test_two_arms_sharing_a_config_hash_is_reported_as_measuring_noise():
+    """If an override did not change the effective config, the two arms are the
+    same strategy twice and any difference between them is sampling."""
+    from backtest.engine import BacktestResult
+
+    base = sim(1.0)
+    trades = [
+        SimTrade(**{**base.__dict__, "config_hash": "same000"}),
+        SimTrade(**{**base.__dict__, "config_hash": "same000", "param_set": "variant"}),
+    ]
+    text = metrics.render_report(BacktestResult(trades=trades, start=CALLED, end=CALLED, symbols=1))
+    assert "two arms share a hash" in text
