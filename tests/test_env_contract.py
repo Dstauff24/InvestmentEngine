@@ -118,6 +118,24 @@ def test_the_shipped_example_marks_the_email_channel_optional(contract):
         )
 
 
+def test_the_shipped_example_marks_the_token_sync_settings_optional():
+    """A second deploy failure in the same family (f9a2339 on the VM).
+
+    `scripts/sync_token.sh` runs on the machine that did the browser auth and
+    describes where to PUSH the token; `ENGINE_PATH` is that machine's note of
+    where the VM keeps the repo and means nothing on the VM itself. The three
+    are one setting in three parts, so they are marked TOGETHER — two optional
+    and one required is how the VM's deploy failed on the member that was
+    missed."""
+    documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
+    for name in ("ENGINE_HOST", "ENGINE_PATH", "ENGINE_SSH_KEY"):
+        assert name in documented, f"{name} is not documented in .env.example"
+        assert "[OPTIONAL]" in documented[name][1], (
+            f"{name} is marked required, but only sync_token.sh reads it and that "
+            f"runs on the laptop — the VM's deploy would fail on a setting it never uses"
+        )
+
+
 def test_a_value_only_in_the_shell_fails_and_says_cron_will_not_see_it(contract):
     """THE TRAP THIS CHECK EXISTS FOR. `core/settings.py` loads .env with
     override=False, so a real environment variable wins — and cron runs with
