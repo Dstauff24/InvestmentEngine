@@ -988,7 +988,58 @@ def test_a_thin_population_does_not_qualify_however_good_it_looks():
         )
     )
     assert chosen.chosen is None
-    assert "no plateau" in chosen.reason
+    assert chosen.kind == sweep.NO_PLATEAU
+    assert "could not be judged" in chosen.reason, "the thin part of the axis is named"
+
+
+def test_a_thin_axis_refuses_for_SAMPLE_not_for_lack_of_edge():
+    """THE TWO REFUSALS ARE DIFFERENT FACTS. `base_breakout` is rare, so a
+    narrow universe leaves most candidates under the floor — and "we did not
+    look hard enough" must not read as "we looked and there is nothing there".
+    The recipe stays disabled either way; the next step is a wider universe in
+    one case and a different gate in the other."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, +0.40, 3),
+            (0.10, +0.30, 7),
+            (0.20, +0.50, 11),
+            (0.30, +0.20, 9),
+            (0.40, +0.10, 4),
+            (0.50, +0.05, 6),
+        )
+    )
+    assert chosen.chosen is None
+    assert chosen.kind == sweep.INSUFFICIENT_SAMPLE
+    assert "40 closed across the whole axis" in chosen.reason
+    assert "widen the universe or the window" in chosen.reason
+
+
+def test_every_refusal_reports_the_closed_count_per_candidate():
+    """ "Insufficient sample" is a claim the reader should be able to check, so
+    the counts travel with the refusal rather than living in a log."""
+    chosen = sweep.plateau_choice(
+        _points((0.05, +0.4, 3), (0.10, +0.3, 7), (0.20, +0.5, 11), (0.30, 0.2, 9), (0.40, 0.1, 4))
+    )
+    assert chosen.counts == ((0.05, 3), (0.10, 7), (0.20, 11), (0.30, 9), (0.40, 4))
+    assert "closed: 0.05->3, 0.1->7" in str(chosen)
+
+
+def test_a_well_sampled_axis_with_no_edge_is_not_called_thin():
+    """The mirror: plenty of trades, signs do not line up. That IS a verdict on
+    the gate."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, -0.10, 80),
+            (0.10, -0.20, 90),
+            (0.20, +0.30, 95),
+            (0.30, -0.15, 90),
+            (0.40, -0.05, 85),
+            (0.50, -0.30, 80),
+        )
+    )
+    assert chosen.kind == sweep.NO_PLATEAU
+    assert "lone spike" in chosen.reason
+    assert "could not be judged" not in chosen.reason
 
 
 def test_no_plateau_means_no_value_is_picked():
@@ -1041,7 +1092,26 @@ def test_equal_width_plateaus_are_broken_by_their_weakest_member():
 def test_too_few_candidates_cannot_answer_the_question():
     chosen = sweep.plateau_choice(_points((0.1, +0.2, 40), (0.25, +0.3, 50), (0.5, +0.1, 60)))
     assert chosen.chosen is None
+    assert chosen.kind == sweep.AXIS_TOO_SHORT
     assert "under the 5" in chosen.reason
+
+
+def test_one_axis_can_be_swept_alone():
+    """A sweep of ONE axis over the whole universe beats six over a tenth of it
+    when the question is about one gate — and a thin sample is the one failure
+    D50 cannot tell apart from a bad gate."""
+    axes = [
+        sweep.Axis(
+            path="recipes.base_breakout.max_squeeze_percentile", values=(0.1,), rationale=""
+        ),
+        sweep.Axis(path="recipes.pullback_to_trend.rsi_max", values=(50.0,), rationale=""),
+    ]
+    assert [a.name for a in sweep.only(axes, ["max_squeeze_percentile"])] == [
+        "max_squeeze_percentile"
+    ]
+    assert len(sweep.only(axes, None)) == 2
+    with pytest.raises(SystemExit, match="no such axis"):
+        sweep.only(axes, ["nonexistent_gate"])
 
 
 def test_an_unpinned_window_refuses_to_print_a_selection():

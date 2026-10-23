@@ -191,17 +191,40 @@ class Point:
         )
 
 
+# The kinds of answer D50's rule can give. A REFUSAL MUST NAME ITS KIND,
+# because the recipe stays disabled either way and the next step is different:
+# INSUFFICIENT_SAMPLE says measure more (a wider universe, a longer window) and
+# NO_PLATEAU says the gate has no stable setting worth shipping. Collapsing
+# them would make "we did not look hard enough" indistinguishable from "we
+# looked and there is nothing there".
+CHOSEN = "CHOSEN"
+INSUFFICIENT_SAMPLE = "INSUFFICIENT SAMPLE"
+NO_PLATEAU = "NO PLATEAU"
+AXIS_TOO_SHORT = "AXIS TOO SHORT"
+
+
 @dataclass(frozen=True)
 class Plateau:
-    """What D50's rule returns: a value, or a refusal, and why either way."""
+    """What D50's rule returns: a value, or a refusal that names its kind."""
 
     chosen: float | None
     reason: str
+    kind: str = CHOSEN
     members: tuple[float, ...] = ()
+    counts: tuple[tuple[float, int], ...] = ()
+    """(value, closed) per candidate — printed on every refusal, because
+    "insufficient sample" is a claim the reader should be able to check."""
+
+    @property
+    def refused(self) -> bool:
+        return self.chosen is None
 
     def __str__(self) -> str:
-        head = "no value" if self.chosen is None else f"{self.chosen:g}"
-        return f"{head} — {self.reason}"
+        head = f"{self.kind}" if self.refused else f"{self.chosen:g}"
+        tail = ""
+        if self.refused and self.counts:
+            tail = "  closed: " + ", ".join(f"{v:g}->{n}" for v, n in self.counts)
+        return f"{head} — {self.reason}{tail}"
 
 
 def metrics_min_sample() -> int:
@@ -227,11 +250,32 @@ def plateau_choice(points: list[Point]) -> Plateau:
       * still tied -> the lower value.
     """
     ordered = sorted(points, key=lambda p: p.value)
+    counts = tuple((p.value, p.closed) for p in ordered)
     if len(ordered) < MIN_AXIS_VALUES:
         return Plateau(
             None,
             f"only {len(ordered)} value(s) on the axis, under the {MIN_AXIS_VALUES} a "
             f"plateau needs to be distinguishable from a spike",
+            kind=AXIS_TOO_SHORT,
+            counts=counts,
+        )
+
+    # STAGE ONE: could the rule have found a plateau anywhere? It needs three
+    # CONSECUTIVE candidates whose populations D39(2) will look at. Without
+    # them the axis is unjudged rather than judged and rejected — the recipe is
+    # rare, not bad, and the answer is to measure more.
+    floor = metrics_min_sample()
+    judgeable = _longest_run(ordered, lambda p: p.closed >= floor)
+    if judgeable < 3:
+        total = sum(p.closed for p in ordered)
+        return Plateau(
+            None,
+            f"the longest run of candidates with >= {floor} closed trades is "
+            f"{judgeable}, so no three adjacent values can be compared at all "
+            f"({total} closed across the whole axis). Not a verdict on the gate: "
+            f"widen the universe or the window",
+            kind=INSUFFICIENT_SAMPLE,
+            counts=counts,
         )
 
     runs: list[list[Point]] = []
@@ -250,10 +294,19 @@ def plateau_choice(points: list[Point]) -> Plateau:
     if not usable:
         best = max((len(r) for r in runs), default=0)
         spike = " (a lone spike, which D50 disqualifies)" if best in (1, 2) else ""
+        thin = sum(1 for p in ordered if p.closed < floor)
+        note = (
+            f"; {thin} candidate(s) were under the {floor}-trade floor and could not be "
+            f"judged, so part of the axis is unmeasured rather than rejected"
+            if thin
+            else ""
+        )
         return Plateau(
             None,
-            f"no plateau: the longest run of qualifying values is {best}{spike}, and "
-            f"the centre of a plateau must have a qualifying neighbour on each side",
+            f"the longest run of qualifying values is {best}{spike}, and the centre of "
+            f"a plateau must have a qualifying neighbour on each side{note}",
+            kind=NO_PLATEAU,
+            counts=counts,
         )
 
     def rank(run: list[Point]) -> tuple:
@@ -266,9 +319,20 @@ def plateau_choice(points: list[Point]) -> Plateau:
         middle.value,
         f"centre of a {len(chosen_run)}-wide plateau "
         f"({', '.join(f'{p.value:g}' for p in chosen_run)}), weakest member "
-        f"{min(p.expectancy_r or 0.0 for p in chosen_run):+.2f}R",
-        tuple(p.value for p in chosen_run),
+        f"{min(p.expectancy_r or 0.0 for p in chosen_run):+.2f}R, "
+        f"{min(p.closed for p in chosen_run)}+ closed each",
+        kind=CHOSEN,
+        members=tuple(p.value for p in chosen_run),
+        counts=tuple((p.value, p.closed) for p in ordered),
     )
+
+
+def _longest_run(points: list[Point], predicate) -> int:
+    best = current = 0
+    for point in points:
+        current = current + 1 if predicate(point) else 0
+        best = max(best, current)
+    return best
 
 
 @dataclass(frozen=True)
@@ -283,6 +347,21 @@ class Axis:
     @property
     def name(self) -> str:
         return self.path.rsplit(".", 1)[-1]
+
+
+def only(axes: list[Axis], names: list[str] | None) -> list[Axis]:
+    """Keep the named axes. A sweep of ONE axis over the whole universe beats a
+    sweep of six over a tenth of it when the question is about one gate: the
+    structural axes each cost their own feature pass, and a thin sample is the
+    one failure D50 cannot tell apart from a bad gate."""
+    if not names:
+        return axes
+    wanted = set(names)
+    kept = [a for a in axes if a.name in wanted or a.path in wanted]
+    missing = wanted - {a.name for a in kept} - {a.path for a in kept}
+    if missing:
+        raise SystemExit(f"--axis: no such axis {sorted(missing)}; have {[a.name for a in axes]}")
+    return kept
 
 
 def axes_from(distributions: Distributions, *, cfg=None) -> list[Axis]:
@@ -460,6 +539,7 @@ def run(
     distributions: Distributions | None = None,
     allow_dirty: bool = False,
     overrides: list[str] | None = None,
+    axis_names: list[str] | None = None,
 ) -> tuple[Distributions, dict[str, dict[str, Expectancy]], list[Axis]]:
     """Measure, build the axes, walk every parameter set, group the results.
 
@@ -481,7 +561,7 @@ def run(
     measured = distributions or measure(
         symbols=universe, as_of=end or today, years=measure_years, sample=None
     )
-    axes = axes_from(measured, cfg=baseline)
+    axes = only(axes_from(measured, cfg=baseline), axis_names)
     sets = param_sets_for(axes, cfg=baseline)
     log.info("sweeping %d configuration(s) over %d symbol(s)", len(sets), len(universe))
 
@@ -617,6 +697,14 @@ def main(argv: list[str] | None = None) -> int:
         "--measure-only", action="store_true", help="print the distributions and stop"
     )
     parser.add_argument(
+        "--axis",
+        dest="axis_names",
+        action="append",
+        help="sweep only this axis (repeatable), e.g. max_squeeze_percentile — lets the "
+        "run afford the FULL universe, which is what keeps a thin sample from looking "
+        "like a bad gate",
+    )
+    parser.add_argument(
         "--with",
         dest="overrides",
         action="append",
@@ -635,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
         measured = measure(symbols=args.symbols, years=args.years, sample=args.sample)
         print(measured)
         print()
-        for axis in axes_from(measured, cfg=baseline_with(args.overrides)):
+        for axis in only(axes_from(measured, cfg=baseline_with(args.overrides)), args.axis_names):
             kind = "structural" if axis.structural else "gate-only"
             print(f"{axis.name:<28} {list(axis.values)}  [{kind}] — {axis.rationale}")
         return 0
@@ -651,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         workers=args.workers,
         allow_dirty=args.allow_dirty,
         overrides=args.overrides,
+        axis_names=args.axis_names,
     )
     print(
         render(
