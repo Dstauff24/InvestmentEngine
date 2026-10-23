@@ -68,6 +68,9 @@ def tech(**kw) -> TechnicalFeatures:
         "atr": 2.0,
         "atr_pct": 2.0,
         "relative_volume": 0.7,
+        # Coiled by default (O13): volatility in the quietest 15% of its own
+        # year, which is what `base_breakout` asks for.
+        "squeeze_percentile": 0.15,
         "week52": week,
         "rs_vs_sector": 5.0,
         "structure": structure,
@@ -298,7 +301,6 @@ def breakout_tech(**kw) -> TechnicalFeatures:
         "base_low": 85.0,
         "base_depth_pct": 15.0,
         "base_weeks": 8.0,
-        "base_contraction": 0.5,
     }
     structure.update(kw.pop("structure", {}))
     base = {"close": 104.0, "relative_volume": 2.0, "structure": structure}
@@ -306,12 +308,13 @@ def breakout_tech(**kw) -> TechnicalFeatures:
     return tech(**base)
 
 
-# `base_breakout` ships DISABLED (O13: its contraction statistic is centred on
-# 1.00 by construction, so no legal threshold admits a usable population). The
-# recipe is dormant, not deleted — these tests exercise the logic that will be
-# re-enabled once `_detect_base` is redesigned, so they pass a config with the
-# flag back on. `test_the_shipped_config_keeps_base_breakout_dormant` pins the
-# shipped value, which is the thing that must not drift silently.
+# `base_breakout` still ships DISABLED. O13's three defects are fixed — the
+# mixed price basis, the base window that included the break bar, and the
+# contraction statistic centred on 1.00 — but "fixed" is not "earns its place":
+# the flag moves on the sweep and a certifying run, not on the repair. These
+# tests exercise the logic with the flag back on;
+# `test_the_shipped_config_keeps_base_breakout_dormant` pins the shipped value,
+# which is the thing that must not drift silently.
 ENABLED_CFG = config.ScoringConfig.model_validate(
     {
         **CFG.model_dump(),
@@ -593,19 +596,42 @@ def test_recipes_take_features_not_scores():
     assert "pillars" not in inspect.signature(breakout.evaluate).parameters
 
 
-def test_a_base_still_at_full_width_does_not_fire():
-    """The config asks for range contraction and the first version of this
-    recipe silently ignored the parameter — a base that is TIGHTENING is the
-    one that breaks cleanly, while a base at full width is still a range."""
-    result = breakout.evaluate(breakout_tech(structure={"base_contraction": 1.1}), cfg=ENABLED_CFG)
+def test_a_range_that_is_not_coiled_does_not_fire():
+    """O13's gate, on the statistic that replaced the contraction ratio: a base
+    whose volatility sits mid-range in its own year is not a coiled spring, and
+    the recipe's premise is the coil."""
+    result = breakout.evaluate(breakout_tech(squeeze_percentile=0.62), cfg=ENABLED_CFG)
     assert not result.triggered
-    assert "still at full width" in result.reason
+    assert "not coiled" in result.reason
+    assert "62%" in result.reason, "the reading itself belongs in the reason"
 
 
-def test_an_unmeasurable_contraction_refuses_rather_than_assuming():
-    result = breakout.evaluate(breakout_tech(structure={"base_contraction": None}), cfg=ENABLED_CFG)
+def test_an_unmeasurable_squeeze_refuses_rather_than_assuming():
+    """"Cannot establish" is not "not coiled". A percentile needs a year of
+    history, and a young listing has no reading rather than a bad one — the
+    standing `features/` convention, enforced at the gate."""
+    result = breakout.evaluate(breakout_tech(squeeze_percentile=None), cfg=ENABLED_CFG)
     assert not result.triggered
-    assert "unknown" in result.reason
+    assert "cannot be established" in result.reason
+
+
+def test_the_squeeze_cap_is_read_from_config_not_hard_coded():
+    """A reading that fires under the shipped cap must stop firing when the cap
+    tightens below it, or the gate is decoration."""
+    tight = config.ScoringConfig.model_validate(
+        {
+            **ENABLED_CFG.model_dump(),
+            "recipes": {
+                **ENABLED_CFG.recipes.model_dump(),
+                "base_breakout": {
+                    **ENABLED_CFG.recipes.base_breakout.model_dump(),
+                    "max_squeeze_percentile": 0.10,
+                },
+            },
+        }
+    )
+    assert breakout.evaluate(breakout_tech(squeeze_percentile=0.15), cfg=ENABLED_CFG).triggered
+    assert not breakout.evaluate(breakout_tech(squeeze_percentile=0.15), cfg=tight).triggered
 
 
 # ── O12: the verified beat ──────────────────────────────────────────────────

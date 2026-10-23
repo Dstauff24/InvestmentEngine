@@ -61,26 +61,30 @@ def evaluate(technical: TechnicalFeatures, *, cfg=None) -> RecipeResult:
             checks,
         )
 
-    # RANGE CONTRACTION. The config asks for it (`range_contraction_ratio`) and
-    # the first version of this recipe silently ignored the parameter — a base
-    # that is TIGHTENING is the one that breaks cleanly, while a base at full
-    # width is still a range.
-    contracted = (
-        structure.base_contraction is not None
-        and structure.base_contraction <= recipe.range_contraction_ratio
-    )
-    checks["range_contracted"] = contracted
-    if not contracted:
-        measured = (
-            f"{structure.base_contraction:.2f}"
-            if structure.base_contraction is not None
-            else "unknown"
-        )
+    # THE SQUEEZE (O13). A base that is COILED is the one that breaks cleanly,
+    # and "coiled" is where current volatility sits in the symbol's own year —
+    # not the retired ratio of the last fifth of the base to the whole base,
+    # which was ~1.00 by construction. `squeeze_percentile` excludes today, so
+    # the break bar's own expansion cannot disqualify the setup it produced.
+    if technical.squeeze_percentile is None:
+        # "Cannot establish" is not "not coiled": a percentile needs a year of
+        # history, and a young listing has no reading rather than a bad one.
+        checks["squeezed"] = False
         return no_setup(
             NAME,
-            f"range contraction {measured} is above the "
-            f"{recipe.range_contraction_ratio:g} the recipe wants — the base is "
-            f"still at full width, not tightening",
+            "no squeeze reading — under a year of history, so where this "
+            "symbol's volatility sits in its own range cannot be established",
+            checks,
+        )
+
+    squeezed = technical.squeeze_percentile <= recipe.max_squeeze_percentile
+    checks["squeezed"] = squeezed
+    if not squeezed:
+        return no_setup(
+            NAME,
+            f"volatility sits at the {technical.squeeze_percentile:.0%} mark of its own "
+            f"year, above the {recipe.max_squeeze_percentile:.0%} the recipe wants — "
+            f"the range is not coiled",
             checks,
         )
 

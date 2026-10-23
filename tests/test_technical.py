@@ -630,3 +630,156 @@ def test_compute_only_measures_a_reaction_when_a_report_anchors_one():
     bars = reaction_bars([98.0, 100.0, 105.0, 106.0])
     assert tech.compute("T", bars).reaction is None
     assert tech.compute("T", bars, reported_on=REPORT).reaction is not None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The squeeze (O13), the price basis, and where a base ends
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _bars(ranges: list[float], *, price: float = 100.0) -> pd.DataFrame:
+    """Bars whose daily range is `ranges[i]` percent of a constant close.
+
+    Volatility is the only thing that varies, which is what makes the squeeze
+    percentile hand-checkable: with no gaps, true range is exactly high-low.
+    """
+    days = ps.sessions(len(ranges))
+    return pd.DataFrame(
+        {
+            "session_date": days,
+            "open": [price] * len(ranges),
+            "high": [price * (1 + r / 200.0) for r in ranges],
+            "low": [price * (1 - r / 200.0) for r in ranges],
+            "close": [price] * len(ranges),
+            "volume": [1_000_000.0] * len(ranges),
+        }
+    )
+
+
+def test_unchanging_volatility_sits_mid_range_not_at_a_one_year_high():
+    """TIES ARE NOT EXTREMES. The reading is a member of its own reference
+    window, so counting `<=` would put a tape whose range never changes at
+    1.00 — and a flat tape is mid-range by definition, not a high."""
+    assert tech.squeeze_percentile(_bars([2.0] * 300)) == pytest.approx(0.5)
+
+
+def test_a_quiet_fortnight_after_a_loud_year_reads_as_coiled():
+    quiet = _bars([4.0] * 290 + [0.5] * 10)
+    reading = tech.squeeze_percentile(quiet)
+    assert reading is not None and reading < 0.05, reading
+
+
+def test_an_expanding_range_reads_as_the_opposite_of_coiled():
+    loud = _bars([1.0] * 290 + [6.0] * 10)
+    reading = tech.squeeze_percentile(loud)
+    assert reading is not None and reading > 0.95, reading
+
+
+def test_the_squeeze_is_none_under_a_year_of_history():
+    """The standing convention: a percentile against 30 observations is a
+    plausible-looking number for a question that needs a year."""
+    assert tech.squeeze_percentile(_bars([2.0] * 200)) is None
+    assert tech.squeeze_percentile(_bars([2.0] * 263)) is not None
+
+
+def test_the_break_bar_is_excluded_from_its_own_squeeze_reading():
+    """O13's design choice, and the reason the recipe can fire at all: the coil
+    is a PRE-breakout condition, and the breakout bar is the release of it.
+    Letting it into the window would have the very expansion the recipe buys
+    disqualify the setup that produced it."""
+    coiled = _bars([4.0] * 290 + [0.5] * 10)
+    broke_out = pd.concat([coiled, _bars([9.0])], ignore_index=True)
+    assert tech.squeeze_percentile(broke_out) == pytest.approx(
+        tech.squeeze_percentile(coiled, exclude_today=False)
+    )
+    including = tech.squeeze_percentile(broke_out, exclude_today=False)
+    assert including > tech.squeeze_percentile(broke_out), "the break bar expands the window"
+
+
+def test_the_squeeze_is_scale_invariant():
+    """Normalised by close, so a stock that doubled over the reference year is
+    not read as permanently expanding."""
+    shape = [4.0] * 290 + [0.5] * 10
+    assert tech.squeeze_percentile(_bars(shape, price=10.0)) == pytest.approx(
+        tech.squeeze_percentile(_bars(shape, price=1000.0))
+    )
+
+
+# ── one basis per frame ─────────────────────────────────────────────────────
+
+
+def _reverse_split_frame(n: int = 300) -> pd.DataFrame:
+    """A 1-for-5 reverse split on the last bar, adjusted at read time (D24).
+
+    AMCR's real shape: `prices_daily` holds raw bars, so every bar before the
+    ex-date is scaled UP by five in adjusted terms.
+    """
+    from features.adjustment import adjust_bars
+
+    bars = ps.frame(ps.flat(n))
+    actions = pd.DataFrame(
+        [
+            {
+                "symbol": "TEST",
+                "ex_date": bars["session_date"].iloc[-1],
+                "action_type": "split",
+                "cash_amount": None,
+                "split_ratio": 0.2,
+            }
+        ]
+    )
+    return adjust_bars(bars, actions, mode="split_only", as_of=bars["session_date"].iloc[-1])
+
+
+def test_adjusted_columns_are_promoted_over_the_raw_ones():
+    frame = _reverse_split_frame()
+    promoted = tech.on_adjusted_basis(frame)
+    assert promoted["high"].iloc[0] == pytest.approx(frame["adj_high"].iloc[0])
+    assert frame["high"].iloc[0] != pytest.approx(frame["adj_high"].iloc[0]), "fixture is flat"
+
+
+def test_a_reverse_split_does_not_invent_a_breakout():
+    """THE AMCR REGRESSION. `compute` took the closes from `adj_close` while
+    handing the same frame to `price_structure`, which reads `high`/`low` — so
+    the adjusted close sat 4.3x above a raw `base_high` and `base_breakout`'s
+    trigger was satisfied on 806 consecutive sessions. Those were the only
+    firings that recipe ever recorded."""
+    features = tech.compute("TEST", _reverse_split_frame())
+    assert features.close is not None and features.structure.base_high is not None
+    assert features.close <= features.structure.base_high * 1.0001, (
+        f"close {features.close} above base_high {features.structure.base_high} — "
+        f"the two are on different price bases"
+    )
+
+
+def test_the_risk_unit_is_measured_on_the_same_basis_as_the_price():
+    """D17 sizes every position off ATR, so a split inside the 14-bar period
+    moved the stop distance on a real plan."""
+    frame = _reverse_split_frame()
+    features = tech.compute("TEST", frame)
+    assert features.atr == pytest.approx(tech.atr(tech.on_adjusted_basis(frame)))
+    assert features.atr != pytest.approx(tech.atr(frame)), "the raw frame reads differently"
+
+
+# ── a base cannot include the bar that breaks it ────────────────────────────
+
+
+def test_the_base_is_measured_through_the_previous_close():
+    """`_detect_base` walks backward from the last bar it is given, so handing
+    it today's bar makes `base_high >= today's high >= today's close` and the
+    breakout trigger ARITHMETICALLY UNREACHABLE — measured over 2,810 base
+    sessions on a clean basis, not one satisfied it."""
+    bars = ps.frame([*ps.flat(60), 130.0])
+    structure = tech.price_structure(bars, max_base_depth_pct=25.0, min_base_sessions=20)
+    assert structure.base_high == pytest.approx(100.0 * 1.01), "the pre-break high"
+    assert float(bars["close"].iloc[-1]) > structure.base_high, "today can clear it"
+
+
+def test_a_rising_tape_never_has_a_base_high_above_todays_high():
+    """The invariant the old code violated, stated as a test: on one basis, a
+    base measured through yesterday is clearable; a base including today is
+    not."""
+    bars = ps.frame(ps.rising(80))
+    structure = tech.price_structure(bars, max_base_depth_pct=25.0, min_base_sessions=20)
+    assert structure.base_high is not None
+    assert structure.base_high < float(bars["high"].iloc[-1])

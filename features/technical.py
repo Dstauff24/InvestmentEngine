@@ -53,15 +53,57 @@ __all__ = [
     "load_actions",
     "load_bars",
     "ma_stack",
+    "on_adjusted_basis",
     "price_structure",
     "relative_strength_vs_sector",
     "relative_volume",
     "rsi_wilder",
+    "squeeze_percentile",
 ]
 
 
 class InsufficientHistory(ValueError):
     """Raised only where a caller explicitly asks for strictness."""
+
+
+def on_adjusted_basis(bars: pd.DataFrame) -> pd.DataFrame:
+    """The frame with `adj_*` promoted over the raw OHLCV columns.
+
+    **ONE BASIS PER FRAME, OR THE MEASUREMENTS DISAGREE WITH EACH OTHER.**
+    `features.adjustment.adjust_bars` ADDS `adj_open`/`adj_high`/`adj_low`/
+    `adj_close`/`adj_volume` and PRESERVES the raw columns (D24 keeps
+    `prices_daily` raw and adjusts at read time). `compute` used to take
+    `adj_close` for the closes while handing the same frame to
+    `price_structure` and `atr`, which read `high`/`low`/`close` — so for any
+    symbol with a split inside the window, the levels and the risk unit were on
+    the OLD basis while the close was on the new one.
+
+    It is not a rounding difference. Measured live 2026-10-23 on AMCR, whose
+    1-for-5 REVERSE split scales its earlier adjusted closes UP by five: the
+    adjusted close sat 4.3x above a `base_high` read from the raw column, so
+    `base_breakout`'s "close is 0.5% above the base high" trigger was satisfied
+    on 806 consecutive sessions. Those were the only firings that recipe ever
+    recorded. A forward split fails the other way and more quietly — the raw
+    highs are on the pre-split basis, the base's depth reads tens of percent,
+    and the symbol is dropped for "no base" with nothing in the log to say the
+    reason was arithmetic.
+
+    ATR is the part that reaches furthest: D17 sizes every position off it, so
+    a split inside the 14-bar period moved the stop distance on a real plan.
+    """
+    if bars is None or not len(bars):
+        return bars
+    promotions = {
+        column: f"adj_{column}"
+        for column in ("open", "high", "low", "close", "volume")
+        if f"adj_{column}" in bars.columns
+    }
+    if not promotions:
+        return bars
+    frame = bars.copy()
+    for column, adjusted in promotions.items():
+        frame[column] = frame[adjusted]
+    return frame
 
 
 # ── moving averages ─────────────────────────────────────────────────────────
@@ -225,6 +267,84 @@ def atr_pct(bars: pd.DataFrame, period: int = 14) -> float | None:
     return None if last == 0 else value / last * 100.0
 
 
+SQUEEZE_WINDOW = 10
+SQUEEZE_HISTORY = TRADING_DAYS_PER_YEAR
+
+
+def squeeze_percentile(
+    bars: pd.DataFrame,
+    *,
+    window: int = SQUEEZE_WINDOW,
+    history: int = SQUEEZE_HISTORY,
+    exclude_today: bool = True,
+) -> float | None:
+    """Where current volatility sits in the symbol's OWN year: 0.0 to 1.0.
+
+    The `window`-session mean true range, normalised by close, ranked against
+    the last `history` readings of that same statistic. 0.12 means "quieter
+    than 88% of the past year"; 0.90 means the opposite. This is O13's
+    replacement for `base_contraction`, and the three choices in it are the
+    whole point:
+
+    **A LEVEL, NOT A RATIO OF TWO WINDOWS.** The retired statistic divided the
+    last fifth of the base by the whole base, which is ~1.00 BY CONSTRUCTION,
+    and measuring the last quarter against the prior quarter instead does not
+    fix it: both are ratios of adjacent samples of the same series, and the
+    measured median of that alternative is 1.013 (against the retired one's
+    1.004). A gate on either is a quantile of noise with no cross-sectional
+    meaning — "13% quieter than its own recent past" says nothing about whether
+    the stock is actually coiled. A percentile of the symbol's own history
+    does, and its scale is self-interpreting: a cap of 0.25 admits roughly the
+    quietest quarter of observations, so the gate's selectivity is legible
+    rather than accidental. It is also measured INDEPENDENTLY of the base
+    detector, which is what lets D43's sweep read its range off the live
+    distribution instead of around the shipped value.
+
+    **NORMALISED BY CLOSE.** A dollar range grows with price, so an unnormalised
+    series would read a stock that doubled over the reference year as
+    permanently expanding. TR/close compares 2024 with 2026.
+
+    **THE BREAK BAR IS EXCLUDED** (`exclude_today`), for the same reason
+    `relative_volume` excludes today from its own baseline: the coil is a
+    PRE-BREAKOUT condition, and the breakout bar is the release of it. Letting
+    that bar into the window would have the very range expansion the recipe is
+    buying disqualify the setup that produced it.
+
+    None when there is not enough history, per the standing convention: a
+    percentile computed against 30 observations is a plausible-looking number
+    for a question that needs a year.
+    """
+    frame = bars.dropna(subset=["high", "low", "close"]) if len(bars) else bars
+    if frame is None or not len(frame):
+        return None
+    if exclude_today:
+        frame = frame.iloc[:-1]
+    if len(frame) < history + window:
+        return None
+
+    high = frame["high"].astype(float)
+    low = frame["low"].astype(float)
+    closes = frame["close"].astype(float)
+    prev_close = closes.shift(1)
+    spans = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    normalised = (spans / closes).replace([float("inf"), float("-inf")], pd.NA).dropna()
+
+    rolling = normalised.rolling(window).mean().dropna()
+    if len(rolling) < history:
+        return None
+    reference = rolling.iloc[-history:]
+    current = float(rolling.iloc[-1])
+    # MID-RANK, so ties do not read as extremes. The current reading is a
+    # member of its own reference window, and counting `<=` would put a series
+    # whose volatility never changes at 1.00 — "a one-year high" for a flat
+    # tape. Averaging the ties puts it at 0.50, which is what mid-range means.
+    below = float((reference < current).sum())
+    tied = float((reference == current).sum())
+    return (below + 0.5 * tied) / float(len(reference))
+
+
 # ── volume ──────────────────────────────────────────────────────────────────
 
 
@@ -317,8 +437,6 @@ class PriceStructure:
     base_depth_pct: float | None = None
     """Depth of the detected CONSOLIDATION, as a % of its high."""
     base_weeks: float | None = None
-    base_contraction: float | None = None
-    """Recent ATR over the base-period ATR. Below 1 means range contraction."""
     gap_up_pct: float | None = None
     """Most recent session's gap vs the prior close, in %."""
     gap_day_low: float | None = None
@@ -360,9 +478,19 @@ def price_structure(
     swing = highs.iloc[-swing_lookback:] if len(highs) >= 2 else highs
     swing_lows = lows.iloc[-swing_lookback:] if len(lows) >= 2 else lows
 
-    base_high, base_low, depth, weeks, contraction = _detect_base(
-        highs,
-        lows,
+    # THE BASE IS WHAT PRICE DID BEFORE TODAY. `_detect_base` walks backward
+    # from the last bar it is given, so handing it today's bar makes
+    # `base_high >= today's high >= today's close` and the breakout trigger
+    # `close >= base_high * (1 + buffer)` ARITHMETICALLY UNREACHABLE. Measured
+    # 2026-10-23 over 2,810 base sessions on a clean basis: not one satisfied
+    # it, and the largest close/base_high ratio seen was 1.00000. A breakout is
+    # a statement about clearing the range that EXISTED, so the range is
+    # measured through the previous close and today is the break.
+    highs_before_today = highs.iloc[:-1]
+    lows_before_today = lows.iloc[:-1]
+    base_high, base_low, depth, weeks = _detect_base(
+        highs_before_today,
+        lows_before_today,
         max_depth_pct=max_base_depth_pct,
         min_sessions=min_base_sessions,
         max_sessions=base_lookback,
@@ -383,7 +511,6 @@ def price_structure(
         base_low=base_low,
         base_depth_pct=depth,
         base_weeks=weeks,
-        base_contraction=contraction,
         gap_up_pct=gap_pct,
         gap_day_low=gap_low,
         prior_close=prior,
@@ -397,21 +524,29 @@ def _detect_base(
     max_depth_pct: float,
     min_sessions: int,
     max_sessions: int,
-) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None, float | None]:
     """The longest recent stretch whose range fits inside `max_depth_pct`.
 
-    Walks BACKWARD from the latest bar, extending while the running range stays
-    within the cap, and stops at the first bar that would breach it. That is
-    the consolidation a breakout emerges from — as opposed to a fixed window,
-    which on a trending stock measures the trend and then fails its own depth
-    test.
+    Walks BACKWARD from the LAST BAR IT IS GIVEN, extending while the running
+    range stays within the cap, and stops at the first bar that would breach
+    it. That is the consolidation a breakout emerges from — as opposed to a
+    fixed window, which on a trending stock measures the trend and then fails
+    its own depth test.
 
-    Returns (high, low, depth_pct, weeks, contraction), all None when even
-    `min_sessions` cannot fit inside the cap — which is the correct answer for
-    a stock in a steep trend: it has no base.
+    The caller decides where "recent" ends, and `price_structure` ends it at
+    the PREVIOUS close: a base that includes today cannot be broken today.
+
+    Returns (high, low, depth_pct, weeks), all None when even `min_sessions`
+    cannot fit inside the cap — which is the correct answer for a stock in a
+    steep trend: it has no base.
+
+    It no longer returns a contraction ratio. That statistic (the last fifth of
+    the base over the whole base) was ~1.00 by construction and is retired with
+    O13; tightness is now `squeeze_percentile`, measured against the symbol's
+    own year rather than inside this window.
     """
     if len(highs) < min_sessions:
-        return (None,) * 5
+        return (None,) * 4
 
     best: tuple[int, float, float] | None = None
     running_high = running_low = None
@@ -429,7 +564,7 @@ def _detect_base(
             best = (count, running_high, running_low)
 
     if best is None:
-        return (None,) * 5
+        return (None,) * 4
 
     count, high, low = best
     depth = (high - low) / high * 100.0
@@ -437,15 +572,7 @@ def _detect_base(
     # holiday-shortened stretch.
     weeks = count / 5.0
 
-    # The config's `range_contraction_ratio` compares recent range to the
-    # base's own range — a base that is TIGHTENING is the one that breaks
-    # cleanly. Measured on true ranges over the last fifth of the base.
-    recent = max(5, count // 5)
-    base_range = (highs.iloc[-count:] - lows.iloc[-count:]).mean()
-    recent_range = (highs.iloc[-recent:] - lows.iloc[-recent:]).mean()
-    contraction = None if not base_range else float(recent_range / base_range)
-
-    return high, low, depth, weeks, contraction
+    return high, low, depth, weeks
 
 
 # ── relative strength vs sector (D33) ───────────────────────────────────────
@@ -696,6 +823,8 @@ class TechnicalFeatures:
     atr: float | None
     atr_pct: float | None
     relative_volume: float | None
+    squeeze_percentile: float | None
+    """Volatility against the symbol's own year (O13). Low = coiled."""
     week52: WeekStructure
     rs_vs_sector: float | None
     structure: PriceStructure
@@ -744,11 +873,12 @@ def compute(
     breakout = structure_cfg or config.scoring().recipes.base_breakout
     _require_ascending(bars)
 
-    column = "adj_close" if "adj_close" in bars else "close"
-    closes = bars[column] if column in bars else pd.Series(dtype=float)
-    volumes = (
-        bars["adj_volume"] if "adj_volume" in bars else bars.get("volume", pd.Series(dtype=float))
-    )
+    # EVERY reading below comes off ONE basis. See `on_adjusted_basis`: taking
+    # the closes from `adj_close` while the structure and the ATR read the raw
+    # columns is how a reverse split became 806 breakouts.
+    frame = on_adjusted_basis(bars)
+    closes = frame["close"] if "close" in frame else pd.Series(dtype=float)
+    volumes = frame.get("volume", pd.Series(dtype=float))
 
     clean = _clean(closes)
     return TechnicalFeatures(
@@ -757,15 +887,16 @@ def compute(
         close=float(clean.iloc[-1]) if len(clean) else None,
         ma=ma_stack(closes, fast=recipe.ma_fast, mid=recipe.ma_mid, slow=recipe.ma_slow),
         rsi=rsi_wilder(closes, recipe.rsi_period),
-        atr=atr(bars),
-        atr_pct=atr_pct(bars),
+        atr=atr(frame),
+        atr_pct=atr_pct(frame),
         relative_volume=relative_volume(volumes),
+        squeeze_percentile=squeeze_percentile(frame),
         week52=fifty_two_week_structure(closes),
         # The base cap and minimum come from the breakout recipe's own config
         # (D25), so a change there moves the measurement rather than leaving
         # this function's defaults silently disagreeing with the gate.
         structure=price_structure(
-            bars,
+            frame,
             max_base_depth_pct=breakout.max_base_depth_pct,
             min_base_sessions=int(breakout.min_base_weeks * 5),
         ),
@@ -779,7 +910,7 @@ def compute(
         reaction=(
             None
             if reported_on is None
-            else earnings_reaction(bars, reported_on=reported_on, release_time=release_time)
+            else earnings_reaction(frame, reported_on=reported_on, release_time=release_time)
         ),
     )
 

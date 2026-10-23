@@ -654,13 +654,33 @@ def test_pullback_to_an_ma_the_recipe_never_computes_is_rejected(tmp_path):
     )
 
 
-def test_an_expanding_range_is_not_a_base(tmp_path):
+def test_a_squeeze_cap_that_admits_everything_is_rejected(tmp_path):
+    """A percentile cap at or above 1 admits every observation, so it is not a
+    squeeze — the same shape of refusal the retired contraction ratio had, on
+    the statistic that replaced it."""
     expect_error(
         tmp_path,
         "scoring.yaml",
-        mutate("scoring.yaml", ["recipes", "base_breakout", "range_contraction_ratio"], 1.2),
-        "must be below 1",
+        mutate("scoring.yaml", ["recipes", "base_breakout", "max_squeeze_percentile"], 1.2),
+        "between 0 and 1",
     )
+
+
+def test_the_retired_contraction_parameter_is_gone(tmp_path):
+    """O13 RETIRED `range_contraction_ratio`, and a retired parameter must be
+    REJECTED rather than ignored.
+
+    Same reason as the drift window below: a config still carrying the old key
+    would load silently while nothing reads it, which is how an operator comes
+    to believe a gate is in force when it is not. And this one would be
+    especially quiet — the parameter it replaces gated a measurement that no
+    longer exists, so a revived key could never fire anything.
+    """
+    assert "range_contraction_ratio" not in cfg.BreakoutRecipe.model_fields
+
+    revived = copy.deepcopy(raw("scoring.yaml"))
+    revived["recipes"]["base_breakout"]["range_contraction_ratio"] = 0.6
+    expect_error(tmp_path, "scoring.yaml", revived, "unknown key")
 
 
 def test_the_retired_drift_window_parameter_is_gone(tmp_path):
@@ -1013,9 +1033,11 @@ def retired_parameters() -> set[int]:
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
 
 
-def test_the_doc_lists_exactly_79_live_parameters_and_one_tombstone():
+def test_the_doc_lists_exactly_79_live_parameters_and_two_tombstones():
     assert len(documented_parameters()) == 79
-    assert retired_parameters() == {12}
+    # #12 retired by D49 (max_days_since_earnings), #8 by O13's redesign
+    # (range_contraction_ratio). Numbers are never reused.
+    assert retired_parameters() == {8, 12}
 
 
 def test_every_tagged_value_is_documented():
@@ -1048,7 +1070,7 @@ def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
     assert len(tagged_parameters()) == 79
-    assert len(tagged_parameters()) + len(retired_parameters()) == 80
+    assert len(tagged_parameters()) + len(retired_parameters()) == 81
 
 
 # ══════════════════════════════════════════════════════════════════════════

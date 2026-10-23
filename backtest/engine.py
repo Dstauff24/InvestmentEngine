@@ -92,8 +92,8 @@ class ParamSet:
     @property
     def structure_key(self) -> tuple:
         """What the FEATURES depend on, so a sweep recomputes them only when it
-        has to. Gate-only parameters (the RSI band, the contraction ratio) do
-        not appear here, which is what makes most of a sweep nearly free."""
+        has to. Gate-only parameters (the RSI band, the squeeze cap) do not
+        appear here, which is what makes most of a sweep nearly free."""
         pullback = self.cfg.recipes.pullback_to_trend
         breakout = self.cfg.recipes.base_breakout
         return (

@@ -192,7 +192,17 @@ class BreakoutRecipe(Base):
     enabled: bool
     min_base_weeks: PositiveInt
     max_base_depth_pct: Percent
-    range_contraction_ratio: Annotated[float, Field(gt=0)]
+    # `range_contraction_ratio` was RETIRED by O13's redesign (doc row 8 is a
+    # tombstone). It compared the last fifth of the base to the whole base, a
+    # ratio centred on 1.00 BY CONSTRUCTION, so no legal value admitted a
+    # usable population. `max_squeeze_percentile` asks a different question —
+    # where current volatility sits in the symbol's OWN year — so it is a new
+    # name rather than a new number under the old one.
+    # Bounded by `_coherent` rather than by `Field(lt=1)`, so the refusal can
+    # SAY why one is not a squeeze. A field constraint that fires first would
+    # make that message unreachable, and unreachable validation code is worse
+    # than none.
+    max_squeeze_percentile: Annotated[float, Field(gt=0)]
     require_relative_strength_vs_sector: bool
     min_relative_volume_on_break: Annotated[float, Field(gt=0)]
     breakout_buffer_pct: Annotated[float, Field(ge=0)]
@@ -200,10 +210,11 @@ class BreakoutRecipe(Base):
 
     @model_validator(mode="after")
     def _coherent(self):
-        if self.range_contraction_ratio >= 1:
+        if not 0 < self.max_squeeze_percentile < 1:
             raise ValueError(
-                "base_breakout.range_contraction_ratio must be below 1; at or above 1 "
-                "the range is expanding, which is not a base"
+                "base_breakout.max_squeeze_percentile is a percentile of the symbol's "
+                "own volatility history and must sit strictly between 0 and 1; at 1 "
+                "every observation qualifies, which is not a squeeze"
             )
         _check_horizon(self.horizon_days, "base_breakout")
         return self

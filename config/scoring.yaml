@@ -302,18 +302,28 @@ recipes:
     horizon_days: [2, 15]              # framework swing horizon
 
   base_breakout:
-    # DORMANT, by decision rather than by accident (O13). `base_contraction` is
-    # measured as the ratio of mean daily range over the last fifth of the base
-    # to that of the whole base — a statistic centred on 1.00 by construction
-    # (measured: p10 0.81, median 1.00, p90 1.23 over 8,236 observations), so
-    # the 0.6 gate below asks for something that barely occurs and no legal
-    # value admits a usable population. Switched off so the logs say "disabled"
-    # instead of "fired zero times", which look identical and are not the same
-    # fact. Re-enable only after `_detect_base` is redesigned and re-swept.
+    # DORMANT, by decision rather than by accident (O13). Three defects were
+    # found underneath each other, and the first two were fatal on their own:
+    #   (1) the technical frame mixed bases — structure and ATR read the RAW
+    #       columns while the close read `adj_close`, so a reverse split made
+    #       AMCR "break out" on 806 consecutive sessions;
+    #   (2) the base was detected over a window ENDING TODAY, which makes
+    #       `close >= base_high * (1 + buffer)` unreachable (0 of 2,810 base
+    #       sessions on a clean basis);
+    #   (3) `base_contraction` was centred on 1.00 by construction, so no legal
+    #       gate admitted a usable population.
+    # All three are fixed; `max_squeeze_percentile` replaces the retired ratio.
+    # Still `false` until the sweep and a certifying run say the recipe earns
+    # re-enabling — a recipe firing zero times and one switched off look
+    # identical in the logs, and only one of those is a decision.
     enabled: false
     min_base_weeks: 4                  # [OPEN] #6 — "multi-week base" undefined
     max_base_depth_pct: 25             # [OPEN] #7
-    range_contraction_ratio: 0.6       # [OPEN] #8 — recent ATR vs base-period ATR
+    # Where the symbol's 10-day volatility sits in its own trailing year, 0-1.
+    # A LEVEL against its own history, not a ratio of two adjacent windows: any
+    # such ratio centres on 1.00 (measured 1.013 for the last-quarter-vs-prior
+    # alternative) and a gate on it is a quantile of noise.
+    max_squeeze_percentile: 0.25       # [OPEN] #81 — the quietest quarter of its year
     require_relative_strength_vs_sector: true
     min_relative_volume_on_break: 1.5  # recipe 2: rel-volume >= 1.5x
     breakout_buffer_pct: 0.5           # [OPEN] #9

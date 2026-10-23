@@ -61,6 +61,9 @@ def tech(**kw) -> TechnicalFeatures:
         "atr": 2.0,
         "atr_pct": 2.0,
         "relative_volume": 1.1,
+        # Pillar A does not read the squeeze either (it is `base_breakout`'s
+        # gate, O13), so a mid-range reading is the neutral choice.
+        "squeeze_percentile": 0.5,
         "week52": week,
         "rs_vs_sector": 7.5,
         # Pillar A does not read price structure — that is the recipes' input —

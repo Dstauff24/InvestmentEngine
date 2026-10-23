@@ -597,42 +597,46 @@ def test_the_report_states_the_survivorship_caveat_and_the_promotion_rule():
 
 def test_an_override_round_trips_through_the_loader():
     altered = sweep.with_override(
-        config.scoring(), "recipes.base_breakout.range_contraction_ratio", 0.85
+        config.scoring(), "recipes.base_breakout.max_squeeze_percentile", 0.4
     )
-    assert altered.recipes.base_breakout.range_contraction_ratio == 0.85
-    assert config.scoring().recipes.base_breakout.range_contraction_ratio != 0.85, "unmutated"
+    assert altered.recipes.base_breakout.max_squeeze_percentile == 0.4
+    assert config.scoring().recipes.base_breakout.max_squeeze_percentile != 0.4, "unmutated"
 
 
 def test_a_sweep_value_the_loader_refuses_is_rejected_not_tested():
-    """`range_contraction_ratio >= 1` is not a looser gate, it is not a base —
-    and the measured MEDIAN contraction is above 1, so the sweep really does
-    propose it."""
-    with pytest.raises(Exception, match="below 1"):
-        sweep.with_override(config.scoring(), "recipes.base_breakout.range_contraction_ratio", 1.04)
+    """A percentile cap at or above 1 admits every observation, so it is not a
+    squeeze — and a sweep that placed values at high percentiles really could
+    propose one."""
+    with pytest.raises(Exception, match="between 0 and 1"):
+        sweep.with_override(config.scoring(), "recipes.base_breakout.max_squeeze_percentile", 1.04)
 
 
 def test_param_sets_skip_a_rejected_value_and_keep_the_rest():
     axes = [
         sweep.Axis(
-            path="recipes.base_breakout.range_contraction_ratio",
-            values=(0.79, 0.9, 1.04),
+            path="recipes.base_breakout.max_squeeze_percentile",
+            values=(0.1, 0.25, 1.04),
             rationale="measured",
         )
     ]
     names = [s.name for s in sweep.param_sets_for(axes)]
-    assert names == ["baseline", "range_contraction_ratio=0.79", "range_contraction_ratio=0.9"]
+    assert names == [
+        "baseline",
+        "max_squeeze_percentile=0.1",
+        "max_squeeze_percentile=0.25",
+    ]
 
 
 def test_the_sweep_range_comes_from_the_measured_distribution():
     distributions = sweep.Distributions()
-    for value in [0.7, 0.8, 0.9, 1.0, 1.1]:
-        distributions.add("base_contraction", value)
+    for value in [0.1, 0.2, 0.3, 0.5, 0.9]:
+        distributions.add("squeeze_percentile", value)
     for value in [1.0, 2.0, 3.0]:
         distributions.add("gap_up_pct", value)
 
     axes = {axis.name: axis for axis in sweep.axes_from(distributions)}
-    assert axes["range_contraction_ratio"].values[0] == pytest.approx(0.7)
-    assert "measured p10" in axes["range_contraction_ratio"].rationale
+    assert axes["max_squeeze_percentile"].values[0] == pytest.approx(0.1)
+    assert "measured p10" in axes["max_squeeze_percentile"].rationale
 
 
 def test_the_depth_axis_says_it_cannot_use_its_own_measurement():
@@ -861,3 +865,33 @@ def test_two_arms_sharing_a_config_hash_is_reported_as_measuring_noise():
     ]
     text = metrics.render_report(BacktestResult(trades=trades, start=CALLED, end=CALLED, symbols=1))
     assert "two arms share a hash" in text
+
+
+def test_a_dormant_recipe_can_be_swept_without_editing_the_shipped_config():
+    """O13: `base_breakout` ships `enabled: false`, and a sweep off that
+    baseline would walk twenty arms that all fire nothing. `--with` applies the
+    override to EVERY arm, so the evidence and the shipped tree never disagree
+    about what was tested."""
+    baseline = sweep.baseline_with(["recipes.base_breakout.enabled=true"])
+    assert baseline.recipes.base_breakout.enabled is True
+    assert config.scoring().recipes.base_breakout.enabled is False, "the file is untouched"
+
+    axes = [
+        sweep.Axis(
+            path="recipes.base_breakout.max_squeeze_percentile",
+            values=(0.1,),
+            rationale="measured",
+        )
+    ]
+    sets = sweep.param_sets_for(axes, cfg=baseline)
+    assert all(s.cfg.recipes.base_breakout.enabled for s in sets), (
+        "an arm that inherits enabled=false measures nothing"
+    )
+    assert len({s.config_hash for s in sets}) == len(sets), "arms must be distinguishable"
+
+
+def test_the_sweep_report_prints_the_overrides_every_arm_ran_with():
+    """A reader who cannot see them would take the table for the shipped
+    configuration."""
+    text = sweep.render(sweep.Distributions(), {}, overrides=["recipes.base_breakout.enabled=true"])
+    assert "APPLIED TO EVERY ARM: recipes.base_breakout.enabled=true" in text

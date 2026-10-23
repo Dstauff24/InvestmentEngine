@@ -8,7 +8,8 @@ only on 30 closed Shadow Book ideas. An EXISTENCE GATE set too tight produces
 no ideas at all, so it can never accrue the evidence that would loosen it —
 unsatisfiable by construction. `base_breakout` is the live proof: its
 `range_contraction_ratio` of 0.6 admitted nothing in 433 symbols, so after a
-month of running it would have exactly as much evidence as on day one.
+month of running it would have exactly as much evidence as on day one. (That
+parameter is retired; O13 replaced the measurement it read.)
 
 **THE LIVE DISTRIBUTION SETS THE RANGE, NOT TASTE.** The sweep first MEASURES
 the gated quantity across the universe — what contraction ratios, base depths,
@@ -50,7 +51,7 @@ __all__ = ["Axis", "Distributions", "axes_from", "measure", "param_sets_for", "r
 
 # Every quantity an existence gate reads, with the parameter that gates it.
 GATED = {
-    "base_contraction": "recipes.base_breakout.range_contraction_ratio",
+    "squeeze_percentile": "recipes.base_breakout.max_squeeze_percentile",
     "base_depth_pct": "recipes.base_breakout.max_base_depth_pct",
     "base_weeks": "recipes.base_breakout.min_base_weeks",
     "relative_volume": "recipes.base_breakout.min_relative_volume_on_break",
@@ -130,7 +131,7 @@ def measure(
             out.observations += 1
             out.add("rsi", features.rsi)
             out.add("relative_volume", features.relative_volume)
-            out.add("base_contraction", features.structure.base_contraction)
+            out.add("squeeze_percentile", features.squeeze_percentile)
             out.add("base_depth_pct", features.structure.base_depth_pct)
             out.add("base_weeks", features.structure.base_weeks)
             out.add("gap_up_pct", features.structure.gap_up_pct)
@@ -175,15 +176,22 @@ def axes_from(distributions: Distributions, *, cfg=None) -> list[Axis]:
         values = [distributions.quantile(name, q) for q in quantiles]
         return tuple(round(v, 2) for v in values if v is not None)
 
-    contraction = at("base_contraction", 0.10, 0.25, 0.50)
-    if contraction:
+    # O13's replacement. A percentile is self-interpreting — a cap of 0.25
+    # admits roughly the quietest quarter of observations — so the sweep's
+    # values ARE its selectivity, and the quantity is measured independently of
+    # the base detector, which is what lets the live distribution set the range
+    # here while `max_base_depth_pct` below has to be swept around its shipped
+    # value.
+    squeeze = at("squeeze_percentile", 0.10, 0.25, 0.50)
+    if squeeze:
         axes.append(
             Axis(
-                path=GATED["base_contraction"],
-                values=contraction,
+                path=GATED["squeeze_percentile"],
+                values=tuple(v for v in squeeze if 0 < v < 1),
                 rationale=(
-                    f"shipped {scoring.recipes.base_breakout.range_contraction_ratio:g} vs "
-                    f"measured p10 {contraction[0]:g} — the gate sits below the data"
+                    f"shipped {scoring.recipes.base_breakout.max_squeeze_percentile:g}; "
+                    f"measured p10 {squeeze[0]:g} / p25 {squeeze[1]:g} of where "
+                    f"volatility sits in each symbol's own year"
                 ),
             )
         )
@@ -256,9 +264,9 @@ def with_override(cfg, path: str, value) -> config.ScoringConfig:
 
     Round-tripped through the loader so every cross-field invariant re-runs: a
     sweep value that contradicts another parameter is REJECTED rather than
-    silently tested. `range_contraction_ratio >= 1` is the live example — the
-    loader refuses it, because at or above 1 the range is expanding and that is
-    not a base.
+    silently tested. `max_squeeze_percentile >= 1` is the live example — the
+    loader refuses it, because a percentile cap at 1 admits every observation
+    and is not a squeeze.
     """
     data = cfg.model_dump()
     node = data
@@ -286,6 +294,27 @@ def param_sets_for(axes: list[Axis], *, cfg=None) -> list[ParamSet]:
     return sets
 
 
+def baseline_with(overrides: list[str] | None, *, cfg=None) -> config.ScoringConfig:
+    """The shipped config plus `PATH=VALUE` overrides applied to EVERY arm.
+
+    This is how a DORMANT recipe gets swept. `base_breakout` ships
+    `enabled: false` (O13), and a sweep off that baseline would walk twenty
+    configurations that all fire nothing — while flipping the shipped file to
+    run the sweep would mean the evidence and the tree disagree about what was
+    tested. The override is applied to the baseline and to every arm, and each
+    arm's `config_hash` then describes the configuration that actually ran.
+    """
+    scoring = cfg or config.scoring()
+    for item in overrides or []:
+        path, _, raw = item.partition("=")
+        if not raw:
+            raise SystemExit(f"--with needs PATH=VALUE, got {item!r}")
+        from backtest.engine import _coerce
+
+        scoring = with_override(scoring, path.strip(), _coerce(raw.strip()))
+    return scoring
+
+
 def run(
     *,
     symbols: list[str] | None = None,
@@ -295,6 +324,7 @@ def run(
     as_of: date | None = None,
     distributions: Distributions | None = None,
     allow_dirty: bool = False,
+    overrides: list[str] | None = None,
 ) -> tuple[Distributions, dict[str, dict[str, Expectancy]]]:
     """Measure, build the axes, walk every parameter set, group the results."""
     today = as_of or clock.session_date()
@@ -302,9 +332,10 @@ def run(
     if sample:
         universe = universe[:sample]
 
+    baseline = baseline_with(overrides)
     measured = distributions or measure(symbols=universe, as_of=today, years=years, sample=None)
-    axes = axes_from(measured)
-    sets = param_sets_for(axes)
+    axes = axes_from(measured, cfg=baseline)
+    sets = param_sets_for(axes, cfg=baseline)
     log.info("sweeping %d configuration(s) over %d symbol(s)", len(sets), len(universe))
 
     result = run_engine(
@@ -323,8 +354,18 @@ def run(
     return measured, by_set
 
 
-def render(measured: Distributions, by_set: dict[str, dict[str, Expectancy]]) -> str:
+def render(
+    measured: Distributions,
+    by_set: dict[str, dict[str, Expectancy]],
+    *,
+    overrides: list[str] | None = None,
+) -> str:
     lines = ["=" * 100, "D43 EXISTENCE-GATE SWEEP", "=" * 100, ""]
+    if overrides:
+        # Printed, because every arm below ran with these on and a reader who
+        # cannot see them would take the table for the shipped configuration.
+        lines.append(f"APPLIED TO EVERY ARM: {', '.join(overrides)}")
+        lines.append("")
     lines.append("MEASURED DISTRIBUTIONS (these set the sweep range, not taste)")
     lines.append(str(measured))
     lines.append("")
@@ -367,6 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--measure-only", action="store_true", help="print the distributions and stop"
     )
+    parser.add_argument(
+        "--with",
+        dest="overrides",
+        action="append",
+        metavar="PATH=VALUE",
+        help="apply to EVERY arm, e.g. recipes.base_breakout.enabled=true — the only "
+        "way to sweep a dormant recipe without editing the shipped config",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -378,7 +427,7 @@ def main(argv: list[str] | None = None) -> int:
         measured = measure(symbols=args.symbols, years=args.years, sample=args.sample)
         print(measured)
         print()
-        for axis in axes_from(measured):
+        for axis in axes_from(measured, cfg=baseline_with(args.overrides)):
             kind = "structural" if axis.structural else "gate-only"
             print(f"{axis.name:<28} {list(axis.values)}  [{kind}] — {axis.rationale}")
         return 0
@@ -389,8 +438,9 @@ def main(argv: list[str] | None = None) -> int:
         years=args.years,
         workers=args.workers,
         allow_dirty=args.allow_dirty,
+        overrides=args.overrides,
     )
-    print(render(measured, by_set))
+    print(render(measured, by_set, overrides=args.overrides))
     return 0
 
 
