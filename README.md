@@ -493,6 +493,16 @@ MAILTO=you@example.com
 # lasts 7 days and the warning must land 24h+ before it dies, whichever weekday
 # that falls on. The alert de-dupes, so this is one email, not seven.
 0 9 * * *      cd $ENGINE && .venv/bin/python -m scripts.token_expiry_check >> data/logs/token.log 2>&1
+
+# Friday scorecard — 18:00 ET. A SEPARATE ENTRY, deliberately: hanging a weekly
+# report off the end of the pipeline would make a Friday failure ambiguous (did
+# the snapshot fail, or did Telegram time out?) and would mean the scorecard
+# could never be re-run without re-running the pipeline. 18:00 rather than
+# 17:00 so the 16:30 run has finished writing the day — a scorecard that read a
+# half-written Friday would report a week that had not happened yet. NO
+# ALLOW_LIVE_CALLS: it reaches no provider and reads only what the nightly run
+# stored, so the flag appearing here would mean someone misunderstood it.
+0 18 * * 5     cd $ENGINE && .venv/bin/python -m jobs.weekly_scorecard >> data/logs/scorecard.log 2>&1
 ```
 
 Notes on the schedule:
@@ -505,6 +515,11 @@ Notes on the schedule:
   visible in `job_runs` and harmless.
 - The orchestrator releases abandoned `running` rows from a previous crash before
   starting, so a hard kill does not wedge the next night's run.
+- **The Friday scorecard is non-critical and cannot make a day look
+  incomplete**: `v_day_status` derives `day_complete` from CRITICAL jobs only,
+  so a Telegram outage on a Friday evening is a missing report, not a broken
+  day. Check it without sending anything:
+  `python -m jobs.weekly_scorecard --dry-run` prints the body it would deliver.
 - `mkdir -p data/logs` first; `data/` is gitignored.
 
 ---
