@@ -29,6 +29,16 @@ D50:
      row count it kept, so a certification cannot quietly include the window
      the value was picked in.
 
+  4. **`--floor R`, for an arm whose DESIGN was informed by in-sample
+     results.** Beating the baseline is not enough there: a geometry drawn to
+     fix what v1 did wrong in a window will beat v1 in that window by
+     construction, so the out-of-sample cut has to clear an absolute bar as
+     well. The bar is D40's `shadow_to_paper.min_expectancy_r`, the same
+     number D50's plateau rule uses, and the flag is OPT-IN — a criterion
+     added to a comparison after the fact would change what an earlier
+     adoption was judged against, which is the whole reason D48's criteria
+     were pre-registered.
+
 So every hash is printed next to the arm that produced it, the shipped config
 is compared to the named arm by value, loudly, and the window is stated.
 
@@ -113,10 +123,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recipe", default="post_earnings_drift")
     parser.add_argument("--since", help="ISO date; keep trades CALLED on or after it (D50)")
     parser.add_argument("--until", help="ISO date; keep trades CALLED strictly before it")
+    parser.add_argument(
+        "--floor",
+        nargs="?",
+        const="d40",
+        help="require the arm to clear an ABSOLUTE expectancy on every cut, not just "
+        "beat the baseline. Bare `--floor` uses D40's shadow_to_paper bar; a number "
+        "overrides it. For an arm whose design was informed by in-sample results.",
+    )
     args = parser.parse_args(argv)
 
     since = date.fromisoformat(args.since) if args.since else None
     until = date.fromisoformat(args.until) if args.until else None
+    floor = None
+    if args.floor is not None:
+        floor = (
+            config.scoring().promotion.shadow_to_paper.min_expectancy_r
+            if args.floor == "d40"
+            else float(args.floor)
+        )
 
     run = metrics.load_csv(args.csv)
     arms = arm_map(run)
@@ -157,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print("-" * 78)
     criteria_ok = True
+    floor_ok = True
     tier_b = None
     for label, rr in (
         ("all plans", None),
@@ -169,11 +195,17 @@ def main(argv: list[str] | None = None) -> int:
         arm_r = arm.expectancy_r if arm else None
         better = arm_r is not None and base_r is not None and arm_r > base_r
         criteria_ok &= better
+        if floor is not None:
+            clears = arm_r is not None and arm_r >= floor
+            floor_ok &= clears
         if rr == gates.tier_b:
             tier_b = arm
+        suffix = ""
+        if floor is not None:
+            suffix = f"  floor {'OK' if arm_r is not None and arm_r >= floor else 'MISSED'}"
         print(
             f"{label:<16} {_r(base_r):>14} {base.closed if base else 0:>8} "
-            f"{_r(arm_r):>18} {arm.closed if arm else 0:>8}  {better}"
+            f"{_r(arm_r):>18} {arm.closed if arm else 0:>8}  {better}{suffix}"
         )
 
     sample_ok = bool(tier_b) and tier_b.closed >= metrics.MIN_SAMPLE
@@ -185,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         f": {sample_ok} ({tier_b.closed if tier_b else 0})"
     )
     print(f"    ...and positive expectancy                      : {positive_ok}")
+    if floor is not None:
+        print(f"(3) every cut clears the absolute {floor:+.2f}R floor      : {floor_ok}")
 
     # ── the citation ─────────────────────────────────────────────────────────
     cited = sorted(arms[args.arm]["config_hash"])[0]
@@ -204,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             f"   other arms in this run: {other}"
         )
 
-    verdict = criteria_ok and sample_ok and positive_ok
+    verdict = criteria_ok and sample_ok and positive_ok and floor_ok
     print()
     print(f"CRITERIA: {'ADOPT' if verdict else 'DO NOT ADOPT'}")
     print(f"CITATION: {'OK' if citation_ok else 'MISMATCH'}")

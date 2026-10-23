@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backtest.provenance import config_hash
 from core import config
 from scripts import adoption_check
@@ -219,3 +221,46 @@ def test_without_a_window_the_header_says_it_is_not_a_certification(tmp_path, ca
 def test_a_window_that_keeps_nothing_cannot_adopt(tmp_path, capsys):
     assert run_check(write_run(tmp_path), extra=["--since", "2030-01-01"]) == 1
     assert "0 of 80 rows kept" in capsys.readouterr().out
+
+
+# ── the absolute floor, for an arm designed against in-sample results ───────
+
+
+def test_the_floor_is_opt_in_so_it_cannot_rewrite_an_earlier_adoption(tmp_path, capsys):
+    """D48's criteria were PRE-REGISTERED. A criterion added afterwards would
+    change what an earlier adoption was judged against, so the floor only
+    applies when asked for."""
+    path = write_run(tmp_path, baseline_r=0.02, arm_r=0.06)
+    assert run_check(path) == 0, "beats the baseline on every cut"
+    # Not the bare word: pytest's tmp_path contains this test's own name.
+    assert "absolute" not in capsys.readouterr().out
+
+    assert run_check(path, extra=["--floor"]) == 1
+    out = capsys.readouterr().out
+    assert "floor MISSED" in out
+    assert "every cut clears the absolute +0.10R floor      : False" in out
+
+
+def test_the_bare_floor_uses_d40s_promotion_bar():
+    """The same number D50's plateau rule uses, read from config rather than
+    restated."""
+    from core import config
+
+    assert config.scoring().promotion.shadow_to_paper.min_expectancy_r == pytest.approx(0.10)
+
+
+def test_an_explicit_floor_overrides_the_default(tmp_path, capsys):
+    path = write_run(tmp_path, baseline_r=0.02, arm_r=0.06)
+    assert run_check(path, extra=["--floor", "0.05"]) == 0
+    assert "clears the absolute +0.05R floor      : True" in capsys.readouterr().out
+
+
+def test_beating_a_weak_baseline_is_not_enough_under_the_floor(tmp_path, capsys):
+    """THE CASE THE FLOOR EXISTS FOR. A geometry drawn to fix what v1 did wrong
+    will beat v1 — the question is whether what it produces is worth trading at
+    all."""
+    path = write_run(tmp_path, baseline_r=-0.30, arm_r=0.04)
+    assert run_check(path) == 0, "it does beat the baseline"
+    capsys.readouterr()
+    assert run_check(path, extra=["--floor"]) == 1
+    assert "floor MISSED" in capsys.readouterr().out
