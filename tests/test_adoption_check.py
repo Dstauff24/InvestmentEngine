@@ -1,0 +1,174 @@
+"""The gate on an adoption, and on citing the right evidence.
+
+The second half exists because of a real mistake: on 2026-10-22 the criteria
+script printed a run's config hashes as a SORTED SET with no mapping back to
+the arms, and D48's config comment went out naming the BASELINE arm's hash as
+the evidence for adopting the other one. Only checking that the shipped config
+matched caught it. These tests pin both the mapping and the check.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from backtest.provenance import config_hash
+from core import config
+from scripts import adoption_check
+
+SHIPPED = config_hash(config.scoring())
+OTHER = "0000deadbeef"
+
+HEADER = (
+    "param_set,commit,config_hash,dirty,symbol,sector,recipe,called_on,regime,"
+    "risk_reward,outcome,entry,gross_r,net_r,days_held"
+)
+
+
+def row(arm: str, *, hash_: str, net_r: float, rr: float, commit="242301c", dirty="0") -> str:
+    return (
+        f"{arm},{commit},{hash_},{dirty},AAPL,Tech,post_earnings_drift,2024-03-01,"
+        f"bull_calm,{rr},target_2,100.0,{net_r},{net_r},7"
+    )
+
+
+def write_run(
+    tmp_path: Path,
+    *,
+    arm_hash: str = SHIPPED,
+    baseline_r: float = 0.10,
+    arm_r: float = 0.50,
+    arm_count: int = 40,
+    commit: str = "242301c",
+    dirty: str = "0",
+) -> Path:
+    """A run where the arm beats the baseline on every cut by construction."""
+    lines = [HEADER]
+    for _ in range(40):
+        lines.append(row("baseline", hash_=OTHER, net_r=baseline_r, rr=4.0))
+    for _ in range(arm_count):
+        lines.append(
+            row("verified", hash_=arm_hash, net_r=arm_r, rr=4.0, commit=commit, dirty=dirty)
+        )
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def run_check(path: Path, *, arm: str = "verified", extra: list[str] | None = None):
+    return adoption_check.main([str(path), "--arm", arm, *(extra or [])])
+
+
+# ── the mapping ─────────────────────────────────────────────────────────────
+
+
+def test_every_arm_is_printed_next_to_its_own_hash(tmp_path, capsys):
+    """NOT A SORTED SET. The set is what let a citation name the wrong arm."""
+    run_check(write_run(tmp_path))
+    out = capsys.readouterr().out
+
+    lines = out.splitlines()
+    baseline_line = next(line for line in lines if line.startswith("baseline"))
+    arm_line = next(line for line in lines if line.startswith("verified"))
+    assert OTHER in baseline_line and SHIPPED not in baseline_line
+    assert SHIPPED in arm_line and OTHER not in arm_line
+
+
+def test_the_mapping_includes_the_commit_and_whether_the_arm_was_clean(tmp_path, capsys):
+    run_check(write_run(tmp_path))
+    out = capsys.readouterr().out
+    assert "242301c" in out
+    assert "config hash" in out and "commit" in out and "clean" in out
+
+
+# ── the citation ────────────────────────────────────────────────────────────
+
+
+def test_a_citation_matching_the_shipped_config_passes(tmp_path, capsys):
+    assert run_check(write_run(tmp_path)) == 0
+    out = capsys.readouterr().out
+    assert "CITATION OK" in out
+    assert "the config in the repo IS the config that produced these numbers" in out
+
+
+def test_citing_the_wrong_arm_fails_loudly_and_names_the_others(tmp_path, capsys):
+    """THE MISTAKE THIS EXISTS FOR. Adopting one arm while citing another's
+    hash: the check must fail and show the hash that WOULD have matched."""
+    path = write_run(tmp_path, arm_hash=OTHER)
+    assert run_check(path) == 1
+    out = capsys.readouterr().out
+    assert "CITATION MISMATCH" in out
+    assert "the wrong arm is named" in out
+    assert "other arms in this run" in out
+
+
+def test_an_unflipped_config_fails_the_citation_too(tmp_path, capsys):
+    """Run before switching the config and the shipped hash is still the
+    baseline's — the same failure, and the message covers both readings."""
+    path = write_run(tmp_path, arm_hash="aaaa11112222")
+    assert run_check(path) == 1
+    out = capsys.readouterr().out
+    assert "has not been made yet" in out
+
+
+# ── the criteria ────────────────────────────────────────────────────────────
+
+
+def test_an_arm_that_loses_a_cut_is_not_adopted(tmp_path, capsys):
+    assert run_check(write_run(tmp_path, baseline_r=0.80, arm_r=0.20)) == 1
+    out = capsys.readouterr().out
+    assert "CRITERIA: DO NOT ADOPT" in out
+
+
+def test_a_sample_under_the_floor_is_not_adopted(tmp_path, capsys):
+    """D39(2)'s floor applies to the Tier B cut, and a tiny sample at a
+    flattering expectancy is exactly what it exists to refuse."""
+    assert run_check(write_run(tmp_path, arm_count=9)) == 1
+    out = capsys.readouterr().out
+    assert "CRITERIA: DO NOT ADOPT" in out
+    assert "(9)" in out
+
+
+def test_a_positive_but_tiny_edge_still_needs_the_sample(tmp_path, capsys):
+    run_check(write_run(tmp_path, arm_count=29))
+    out = capsys.readouterr().out
+    assert "closed : False (29)" in out.replace("  ", " ")
+
+
+# ── the artifact itself ─────────────────────────────────────────────────────
+
+
+def test_a_run_from_a_dirty_tree_may_not_be_cited(tmp_path, capsys):
+    assert run_check(write_run(tmp_path, dirty="1")) == 1
+    out = capsys.readouterr().out
+    assert "NOT CERTIFYING" in out
+    assert "dirty tree" in out
+    assert "nothing above may be cited" in out
+
+
+def test_rows_spanning_two_commits_are_refused_as_mixed_code(tmp_path, capsys):
+    path = write_run(tmp_path)
+    with path.open("a") as fh:
+        fh.write(row("verified", hash_=SHIPPED, net_r=0.5, rr=4.0, commit="deadbee") + "\n")
+    assert run_check(path) == 1
+    assert "MIXED CODE" in capsys.readouterr().out
+
+
+def test_an_unstamped_run_may_not_be_cited(tmp_path, capsys):
+    """A CSV written before provenance stamping records no commit, which is
+    the preview artifact — useful, never evidence."""
+    lines = [HEADER]
+    for arm, h in (("baseline", OTHER), ("verified", SHIPPED)):
+        for _ in range(40):
+            lines.append(row(arm, hash_=h, net_r=0.3, rr=4.0, commit="unknown", dirty="1"))
+    path = tmp_path / "preview.csv"
+    path.write_text("\n".join(lines) + "\n")
+    assert run_check(path) == 1
+    out = capsys.readouterr().out
+    assert "recorded no commit" in out
+
+
+def test_naming_an_arm_the_file_does_not_have_says_what_it_has(tmp_path, capsys):
+    assert run_check(write_run(tmp_path), arm="typo") == 1
+    out = capsys.readouterr().out
+    assert "no such arm" in out
+    assert "'baseline'" in out and "'verified'" in out
