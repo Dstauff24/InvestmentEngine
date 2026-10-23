@@ -122,7 +122,9 @@ backtest/        costs.py, resolve.py (calls the Shadow Book's tracker), regime.
                  metrics.py, sweep.py (D43), provenance.py (commit + config hash + dirty flag)
 scripts/         fmp_probe.py (endpoint reachability), field_probe.py (live field names vs
                  what parsers read), schwab_auth.py, sync_token.sh, deploy.sh, backup_db.sh,
-                 token_expiry_check.py, telegram_test.py
+                 token_expiry_check.py, telegram_test.py, env_contract.py (.env vs
+                 .env.example, deploy-enforced), test_counts.py (the measured status line),
+                 adoption_check.py (pre-registered criteria + citation)
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)
 docs/            engine-decisions-and-todo.md (canonical log, D1-D49 + O1-O14),
                  open-parameters.md (79 live rows + 1 tombstone), REBUILD_KICKOFF.md
@@ -139,6 +141,8 @@ docs/            engine-decisions-and-todo.md (canonical log, D1-D49 + O1-O14),
 - Python 3.11+, `requirements.txt` + `requirements-dev.txt` split, `psycopg[binary]` v3, pydantic v2, `requests` + `tenacity` (no provider SDKs for FMP/Finnhub), `schwab-py`, pandas/numpy.
 - ruff: py311, line 100, rules E/W/F/I/UP/B/C4/SIM/RET/PTH/DTZ/T20/ARG/RUF. DTZ is deliberate (bans naive datetimes). T20 waived for jobs/, scripts/, ingest/, db/init.py.
 - Never commit secrets. `.gitignore` blocks `.env*` (except `.env.example`), `*token*.json`, `data/*`. `.env.example` documents every variable (FMP_API_KEY, FINNHUB_API_KEY, SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_CALLBACK_URL=https://127.0.0.1, SCHWAB_TOKEN_PATH=data/schwab_token.json, DB vars incl. separate admin creds, SMTP + ALERT_EMAIL_ONFAIL, TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).
+- **`.env.example` IS A CONTRACT THE DEPLOY CHECKS (`scripts/env_contract.py`).** Every variable it names must be set in `.env` and must not still be a placeholder — the file, not the ambient environment, because `settings` loads `.env` with `override=False` and cron has almost none of the shell's variables. **`# [OPTIONAL]` with the reason beside it exempts a variable from BOTH**, since for an optional feature "blank" and "still the placeholder" are the same state: the feature is off, and every reader already refuses a placeholder (`settings.looks_like_placeholder`). Email is optional per D16's amendment — Telegram alone is supported — so `alerts/notify.py` asks the real accessors rather than testing presence, and the deploy PRINTS what it skipped ("OFF by design"), because "email is off" is a fact to read, not infer from silence. **A placeholder in a REQUIRED variable stays a deploy failure.**
+- **The commit-message status line is GENERATED, never typed: `python scripts/test_counts.py`.** It runs the unit suite, the integration suite against `ie_test`, and ruff, then prints "N unit + M integration tests pass; ruff clean on F files" — and refuses to emit anything if any of the three fails, because a line claiming a green suite above a commit where it is not reads as verification. `--append <file>` writes it into a commit message; `--no-integration` says so IN the line rather than dropping the clause. It exists because the same number was typed from memory twice and was wrong both times: a number typed by hand twice is a process, not a slip.
 - Idempotent ingestion (re-running a day upserts, never duplicates). Rate limiter is a sliding window, not a token bucket, shared via core. `for_each_symbol` fails a job above 25% symbol-failure rate with a 10-symbol minimum sample; total failure always raises regardless of sample size (never "ok, 0 rows" when everything failed).
 - Scoring logic unit-testable with fixture DataFrames, no network. Integration tests only under `pytest -m integration`.
 - Prefer boring, explicit code. This runs unattended.

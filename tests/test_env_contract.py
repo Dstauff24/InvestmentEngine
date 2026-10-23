@@ -67,16 +67,55 @@ def test_an_optional_variable_may_be_blank_or_absent(contract):
     )
     failures, notes = contract(example, "TELEGRAM_BOT_TOKEN=\n")
     assert failures == []
-    assert "2 marked [OPTIONAL]" in notes[0]
+    assert any("2 marked [OPTIONAL]" in note for note in notes)
 
 
-def test_a_placeholder_fails_even_when_the_variable_is_optional(contract):
-    """`# [OPTIONAL]` exempts a variable from being SET, never from carrying a
-    placeholder: `core/settings.py` refuses a placeholder at read time, which
-    turns a designed degrade into a hard failure."""
+def test_a_placeholder_in_an_optional_variable_is_off_by_design(contract):
+    """`# [OPTIONAL]` exempts a variable from being SET *and* from the
+    placeholder check, because for an optional feature those are the same
+    state: the feature is off. `core/settings.py` refuses a placeholder at read
+    time, so the code that reads it already treats this as absent — failing the
+    deploy over it would make an optional feature mandatory."""
     example = 'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"   # [OPTIONAL] EDGAR skips\n'
-    failures, _ = contract(example, 'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"\n')
-    assert failures == ["SEC_EDGAR_USER_AGENT: still a placeholder in .env"]
+    failures, notes = contract(example, 'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"\n')
+    assert failures == []
+    assert "OFF by design (1 optional, unset or placeholder): SEC_EDGAR_USER_AGENT" in notes[0]
+
+
+def test_an_optional_feature_left_off_is_printed_not_passed_in_silence(contract):
+    """ "Email is off" is a fact an operator should READ on the deploy, not
+    infer from the absence of a complaint. The D16 amendment makes email one of
+    two channels, so a blank SMTP block is a configuration, and a configuration
+    nobody can see is how an operator comes to believe alerts are arriving."""
+    example = (
+        "SMTP_USER=CHANGE_ME        # [OPTIONAL] placeholder = email channel off\n"
+        "SMTP_PASSWORD=CHANGE_ME        # [OPTIONAL] placeholder = email channel off\n"
+        "TELEGRAM_BOT_TOKEN=        # [OPTIONAL] the other channel\n"
+    )
+    failures, notes = contract(
+        example, "SMTP_USER=CHANGE_ME\nSMTP_PASSWORD=CHANGE_ME\nTELEGRAM_BOT_TOKEN=real-token\n"
+    )
+    assert failures == []
+    assert notes[0] == "OFF by design (2 optional, unset or placeholder): SMTP_PASSWORD, SMTP_USER"
+
+
+def test_a_placeholder_in_a_required_variable_is_still_a_deploy_failure(contract):
+    """The rule only moved for variables marked optional. An unmarked
+    placeholder is a value somebody meant to fill in and did not."""
+    failures, _ = contract("FMP_API_KEY=CHANGE_ME\n", "FMP_API_KEY=CHANGE_ME\n")
+    assert failures == ["FMP_API_KEY: still a placeholder in .env"]
+
+
+def test_the_shipped_example_marks_the_email_channel_optional(contract):
+    """D16's amendment in the file the deploy reads: Telegram alone is a
+    supported configuration, so none of these may be required."""
+    documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
+    for name in ("SMTP_USER", "SMTP_PASSWORD", "ALERT_EMAIL_TO", "ALERT_EMAIL_ONFAIL"):
+        assert name in documented, f"{name} is not documented in .env.example"
+        assert "[OPTIONAL]" in documented[name][1], (
+            f"{name} is marked required, but D16 makes email one of two channels — "
+            f"a deploy with Telegram alone would fail on it"
+        )
 
 
 def test_a_value_only_in_the_shell_fails_and_says_cron_will_not_see_it(contract):

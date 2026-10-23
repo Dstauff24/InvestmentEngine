@@ -521,6 +521,11 @@ pytest                # unit tests — fixture-driven, no network, no DB
 # database. Note the per-invocation PGDATABASE: no override flag is needed,
 # because `ie_test` is a scratch-looking name.
 PGDATABASE=ie_test pytest -m integration
+
+# Both suites plus ruff, and the ONE status line a commit message may quote.
+# It emits nothing if anything fails, and `--append msg.txt` writes the line
+# into a commit message so the number comes from the run, never from memory.
+python scripts/test_counts.py
 ```
 
 ### Two databases, separated by protection class

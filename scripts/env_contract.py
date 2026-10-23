@@ -16,9 +16,15 @@ digest reported a quiet market.
 
 **THE RULES.** Every variable in `.env.example` must be set in `.env` and must
 not still carry a placeholder. `# [OPTIONAL]` on the example's line exempts it
-from having to be SET, with the reason written beside it — it never exempts it
-from the placeholder check, because `core/settings.py` REFUSES a placeholder at
-read time and that turns a designed degrade into a hard failure.
+from BOTH, with the reason written beside it, because for an optional feature
+"blank" and "still the placeholder" are the same state: the feature is off, and
+the code that reads it already treats a placeholder as absent (`alerts/notify
+.py` asks the real accessors, each of which refuses one). A placeholder in a
+REQUIRED variable stays a deploy failure — that is a value somebody meant to
+fill in and did not.
+
+Skipped optional variables are PRINTED, not silently passed. "Email is off" is
+a fact an operator should read, not infer from the absence of a complaint.
 """
 
 from __future__ import annotations
@@ -80,6 +86,7 @@ def check() -> tuple[list[str], list[str]]:
     wanted, have = parse(EXAMPLE), parse(ACTUAL)
     failures: list[str] = []
     notes: list[str] = []
+    off: list[str] = []
     optional_count = 0
 
     for name, (example_value, example_line) in sorted(wanted.items()):
@@ -87,8 +94,16 @@ def check() -> tuple[list[str], list[str]]:
         optional_count += optional
         value, present = (have[name][0], True) if name in have else ("", False)
         ambient = os.environ.get(name, "")
+        placeholder = looks_like_a_placeholder(value, example_value)
 
-        if looks_like_a_placeholder(value, example_value):
+        if optional:
+            # Blank or placeholder are the SAME state for something optional:
+            # the feature is off. Recorded so the operator reads it.
+            if not value or placeholder:
+                off.append(name)
+            continue
+
+        if placeholder:
             detail = f"{name}: still a placeholder in .env"
             if ambient and not looks_like_a_placeholder(ambient, example_value):
                 detail += " (your shell has a real value; CRON WILL NOT SEE IT)"
@@ -96,13 +111,15 @@ def check() -> tuple[list[str], list[str]]:
             continue
 
         if not value:
-            if optional:
-                continue
             detail = f"{name}: {'blank' if present else 'missing'} in .env"
             if ambient:
                 detail += " (your shell has a value; CRON WILL NOT SEE IT)"
             failures.append(detail)
 
+    if off:
+        notes.append(
+            f"OFF by design ({len(off)} optional, unset or placeholder): " + ", ".join(off)
+        )
     notes.append(
         f"{len(wanted)} variable(s) in .env.example, {optional_count} marked [OPTIONAL], "
         f"{len(wanted) - len(failures)} satisfied by .env"
