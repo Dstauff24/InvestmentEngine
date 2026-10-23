@@ -860,3 +860,120 @@ def test_the_plan_says_which_geometry_produced_it():
     """Two arms in one Shadow Book would otherwise be indistinguishable."""
     assert "[v1]" in pullback.evaluate(tech(), cata(), cfg=V1).reason
     assert "[v2]" in pullback.evaluate(tech(), cata(), cfg=V2).reason
+
+
+V3 = _with_geometry(variant="v3")
+
+
+def test_v3_keeps_v2s_entry_and_stop_and_trims_at_the_reclaim():
+    """The explicit version of what v2 did by accident: same reclaim entry,
+    same structural stop, and the reclaim becomes the TRIM rather than a
+    waypoint on the way to a far target."""
+    plan = pullback.evaluate(tech(), cata(), cfg=V3).plan
+    v2 = pullback.evaluate(tech(), cata(), cfg=V2).plan
+    assert plan.stop == pytest.approx(v2.stop)
+    assert plan.entry == pytest.approx(v2.entry)
+    assert plan.target_1 == pytest.approx(120.0), "the reclaim"
+
+
+def test_v3_has_no_far_target_at_all():
+    """No TP2 by design. A trailing plan carrying one would be two exit rules
+    for one remainder, and the backtest could not say which it measured."""
+    plan = pullback.evaluate(tech(), cata(), cfg=V3).plan
+    assert plan.target_2 is None
+    assert plan.trails is True
+    assert plan.trail_ma == 20, "from exits.swing.runner_trail, which said ma_20 all along"
+
+
+def test_v3_quotes_r_to_tp1_per_d12s_amendment():
+    """D11 quotes R:R to TP2 because quoting to TP1 would make every plan look
+    like 1:1. A trailing plan has no TP2, so it quotes to TP1 and its gate is
+    1.0R — at or above which the trim plus the breakeven stop mean the trade
+    cannot lose money once TP1 is hit."""
+    plan = pullback.evaluate(tech(), cata(), cfg=V3).plan
+    assert plan.risk_reward == pytest.approx(plan.risk_reward_tp1)
+    assert plan.risk_reward == pytest.approx((120.0 - 100.0) / (100.0 - 96.0))
+
+
+def test_v3_refuses_when_the_framework_says_the_runner_does_not_trail():
+    """`runner_trail: none` is a legal configuration and makes v3 impossible:
+    a trailing variant without a trail would leave the remainder with no exit,
+    and inventing one would be a different strategy."""
+    from core import config as core_config
+
+    no_trail = core_config.RiskConfig.model_validate(
+        {
+            **core_config.risk().model_dump(),
+            "exits": {
+                **core_config.risk().exits.model_dump(),
+                "swing": {
+                    **core_config.risk().exits.swing.model_dump(),
+                    "runner_trail": "none",
+                },
+            },
+        }
+    )
+    import core.config as module
+
+    original = module.risk
+    module.risk = lambda: no_trail
+    try:
+        result = pullback.evaluate(tech(), cata(), cfg=V3)
+    finally:
+        module.risk = original
+    assert not result.triggered
+    assert "would have no exit at all" in result.reason
+
+
+def test_an_unparseable_trail_is_rejected_by_the_loader():
+    """A trail nobody can parse is a trail nobody runs — which is what
+    `runner_trail` was for its first three days of existence."""
+    from core import config as core_config
+
+    with pytest.raises(Exception, match="not a rule the engine implements"):
+        core_config.RiskConfig.model_validate(
+            {
+                **core_config.risk().model_dump(),
+                "exits": {
+                    **core_config.risk().exits.model_dump(),
+                    "swing": {
+                        **core_config.risk().exits.swing.model_dump(),
+                        "runner_trail": "chandelier",
+                    },
+                },
+            }
+        )
+
+
+def test_a_fixed_target_plan_still_needs_its_tp2():
+    """The other direction: only a trailing plan may omit TP2."""
+    from scoring.recipes.base import build_plan
+
+    plan, why = build_plan(
+        entry_reference=100.0,
+        structural_stop=96.0,
+        target_1=110.0,
+        target_2=None,
+        features=tech(),
+        horizon_days=(5, 45),
+        cfg=CFG,
+    )
+    assert plan is None
+    assert "only a trailing plan may omit it" in why
+
+
+def test_a_trailing_plan_must_not_also_carry_a_tp2():
+    from scoring.recipes.base import build_plan
+
+    plan, why = build_plan(
+        entry_reference=100.0,
+        structural_stop=96.0,
+        target_1=110.0,
+        target_2=130.0,
+        features=tech(),
+        horizon_days=(5, 45),
+        cfg=CFG,
+        trail_ma=20,
+    )
+    assert plan is None
+    assert "must not also carry a TP2" in why

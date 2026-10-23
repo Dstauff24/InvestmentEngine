@@ -23,6 +23,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -253,7 +254,7 @@ class DriftRecipe(Base):
         return self
 
 
-PullbackVariant = Literal["v1", "v2"]
+PullbackVariant = Literal["v1", "v2", "v3"]
 
 
 class PullbackGeometry(Base):
@@ -281,9 +282,15 @@ class PullbackGeometry(Base):
     """
 
     variant: PullbackVariant = "v1"
+    """WHICH GEOMETRY. `v3` is the explicit version of what v2 did by accident
+    (O20): the same reclaim entry and structural stop, a trim at a structural
+    TP1, and then the RUNNER TRAILS (`exits.swing.runner_trail`) instead of
+    reaching for a far target. No TP2 at all, so R:R is quoted to TP1 and the
+    Tier A gate is 1.0R (D12, amended) — at or above 1R the trim plus the
+    breakeven stop mean the trade cannot lose money once TP1 is hit."""
     swing_lookback_days: PositiveInt  # [OPEN] #71
     tp2_measured_move: float  # [OPEN] #72 — v1 only
-    pullback_low_lookback_days: PositiveInt  # [OPEN] #82 — v2 only
+    pullback_low_lookback_days: PositiveInt  # [OPEN] #82 — v2 and v3
     tp2_leg_multiple: float  # [OPEN] #83 — v2 only
 
     @model_validator(mode="after")
@@ -299,6 +306,11 @@ class PullbackGeometry(Base):
         if self.tp2_leg_multiple <= 0 or self.tp2_measured_move <= 0:
             raise ValueError("pullback_to_trend TP2 multiples must be positive")
         return self
+
+    @property
+    def trails(self) -> bool:
+        """Does the remainder exit on a trail rather than at a target?"""
+        return self.variant == "v3"
 
 
 class BreakoutGeometry(Base):
@@ -709,12 +721,42 @@ class CircuitBreaker(Base):
     resets_after: Literal["winning_week", "calendar_month"]
 
 
+TRAIL_PATTERN = re.compile(r"^ma_(\d+)$")
+
+
 class SwingExits(Base):
     trim_at_target_1: Fraction
     trim_at_target_2: Fraction
     move_stop_to_breakeven_at: Literal["target_1", "target_2", "never"]
     runner_trail: str
+    """How the runner exits, as the framework writes it: `ma_<days>`, or
+    `none`. **READ FROM 2026-10-23 (O20).** It said `ma_20` from the beginning
+    and nothing trailed anything — a key that loads while nothing reads it is
+    how an operator comes to believe a rule is in force when it is not, which
+    is why `test_no_config_field_is_unread_in_a_layer_that_exists` now exists.
+    """
     max_holding_days: PositiveInt
+    """THE SAFETY NET, not the exit. v2's expectancy turned out to be carried by
+    timeout marks at this number (O15), which is why v3 trails instead and this
+    is swept as a bound rather than relied on as the edge."""
+
+    @property
+    def trail_ma_days(self) -> int | None:
+        """The trail's MA window, or None when the runner does not trail."""
+        found = TRAIL_PATTERN.match(self.runner_trail.strip().lower())
+        return int(found.group(1)) if found else None
+
+    @model_validator(mode="after")
+    def _trail_is_a_rule_the_code_knows(self):
+        value = self.runner_trail.strip().lower()
+        if value != "none" and not TRAIL_PATTERN.match(value):
+            raise ValueError(
+                f"exits.swing.runner_trail {self.runner_trail!r} is not a rule the "
+                f"engine implements: use `ma_<days>` (e.g. ma_20) or `none`. A trail "
+                f"nobody can parse is a trail nobody runs, which is what this key was "
+                f"for its first three days of existence"
+            )
+        return self
 
     @model_validator(mode="after")
     def _trims_leave_a_runner(self):

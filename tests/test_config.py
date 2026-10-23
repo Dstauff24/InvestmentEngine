@@ -1131,7 +1131,7 @@ def test_an_unknown_pullback_geometry_variant_is_rejected(tmp_path):
     expect_error(
         tmp_path,
         "scoring.yaml",
-        mutate("scoring.yaml", ["geometry", "pullback_to_trend", "variant"], "v3"),
+        mutate("scoring.yaml", ["geometry", "pullback_to_trend", "variant"], "v9"),
         "variant",
     )
 
@@ -1244,7 +1244,11 @@ PENDING_LAYERS = {
     # D12's amended 1.0R gate mean "cannot lose money once TP1 is hit".
     # `trim_at_target_2` stays inert after that: v3 has no TP2, and the
     # position-level accounting a fixed-target trim needs is O17's.
-    "SwingExits": "O20 (trail + the TP1 trim); the TP2 trim is O17",
+    # `runner_trail` is READ now (v3 parses it into a window). The two trim
+    # FRACTIONS are not: the tracker uses `move_stop_to_breakeven_at` but
+    # measures R on the whole position, so modelling a trim needs the
+    # position-level accounting that is O17's.
+    "SwingExits": "the trim fractions need position-level accounting (O17)",
 }
 
 

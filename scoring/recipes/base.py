@@ -39,8 +39,13 @@ class TradePlan:
     entry_high: float
     stop: float
     target_1: float
-    target_2: float
+    target_2: float | None
+    """None for a TRAILING plan (O20): the runner has no far target to quote,
+    which is the whole design rather than a missing value."""
     horizon_days: tuple[int, int]
+    trail_ma: int | None = None
+    """The MA window the runner trails, from `exits.swing.runner_trail`. Set
+    means the remainder exits on a trail; None means it exits at TP2."""
 
     @property
     def entry(self) -> float:
@@ -52,6 +57,10 @@ class TradePlan:
         return self.entry - self.stop
 
     @property
+    def trails(self) -> bool:
+        return self.trail_ma is not None
+
+    @property
     def risk_reward(self) -> float:
         """To TP2 — the target D11 calls a "true win".
 
@@ -59,8 +68,18 @@ class TradePlan:
         trade (D18 moves the stop to breakeven there) while TP2 is what the
         idea is actually for. Reporting R:R to TP1 would make every plan look
         like roughly 1:1 and the D12 gates meaningless.
+
+        **A TRAILING PLAN QUOTES TO TP1 (D12, amended Oct 23 2026).** It has no
+        TP2 by design, and its Tier A gate is 1.0R rather than 2:1 — at or
+        above 1R the trim plus the breakeven stop mean the trade cannot lose
+        money once TP1 is hit, so the number falls out of the trim rules rather
+        than out of a sweep.
         """
-        return (self.target_2 - self.entry) / self.risk if self.risk > 0 else 0.0
+        if self.risk <= 0:
+            return 0.0
+        if self.trails or self.target_2 is None:
+            return self.risk_reward_tp1
+        return (self.target_2 - self.entry) / self.risk
 
     @property
     def risk_reward_tp1(self) -> float:
@@ -103,10 +122,11 @@ def build_plan(
     entry_reference: float,
     structural_stop: float,
     target_1: float,
-    target_2: float,
+    target_2: float | None,
     features: TechnicalFeatures,
     horizon_days: tuple[int, int],
     cfg=None,
+    trail_ma: int | None = None,
 ) -> tuple[TradePlan | None, str]:
     """Assemble a plan from a reference price and structural levels.
 
@@ -140,11 +160,20 @@ def build_plan(
             f"stop is {risk / atr:.2f} ATR from entry, inside the "
             f"{geometry.min_stop_atr:g} ATR noise floor"
         )
-    if target_1 <= entry or target_2 <= target_1:
-        return None, (
-            f"targets are not above the entry in order "
-            f"(entry {entry:.2f}, TP1 {target_1:.2f}, TP2 {target_2:.2f})"
-        )
+    if target_1 <= entry:
+        return None, f"TP1 {target_1:.2f} is not above the entry {entry:.2f}"
+    if trail_ma is None:
+        if target_2 is None:
+            return None, "a fixed-target plan needs a TP2; only a trailing plan may omit it"
+        if target_2 <= target_1:
+            return None, (
+                f"targets are not above the entry in order "
+                f"(entry {entry:.2f}, TP1 {target_1:.2f}, TP2 {target_2:.2f})"
+            )
+    elif target_2 is not None:
+        # A trailing plan with a far target would be two exit rules for one
+        # remainder, and the backtest could not say which one it measured.
+        return None, "a trailing plan must not also carry a TP2"
 
     return (
         TradePlan(
@@ -154,6 +183,7 @@ def build_plan(
             target_1=target_1,
             target_2=target_2,
             horizon_days=horizon_days,
+            trail_ma=trail_ma,
         ),
         "",
     )

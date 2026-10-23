@@ -10,6 +10,16 @@ from scoring.recipes.base import RecipeResult, build_plan, no_setup
 NAME = "pullback_to_trend"
 
 
+def trail_window() -> int | None:
+    """The trail's MA window, from `exits.swing.runner_trail` (risk.yaml).
+
+    Read from the RISK config rather than duplicated into the scoring geometry:
+    the framework states the trail once, beside D18's trim rules, and a second
+    copy is the thing that drifts.
+    """
+    return config.risk().exits.swing.trail_ma_days
+
+
 def evaluate(
     technical: TechnicalFeatures,
     catalyst: CatalystFeatures,
@@ -44,6 +54,7 @@ def evaluate(
     structure = technical.structure
 
     checks: dict[str, bool] = {}
+    trail_ma: int | None = None
 
     if not recipe.enabled:
         return no_setup(NAME, "recipe disabled in config")
@@ -126,7 +137,35 @@ def evaluate(
             checks,
         )
 
-    if geometry.variant == "v2":
+    if geometry.variant == "v3":
+        # THE EXPLICIT VERSION OF WHAT v2 DID BY ACCIDENT (O20). Same entry,
+        # same structural stop; the difference is the exit. v2 earned +0.24R
+        # out of sample while 1.7% of its trades touched a target and 34% were
+        # marked out at a 45-day clock — a trend-following profile wearing a
+        # measured-move target. So: trim at the reclaim, then TRAIL the runner.
+        if structure.pullback_low is None:
+            return no_setup(
+                NAME,
+                f"no pullback low over the last "
+                f"{geometry.pullback_low_lookback_days} session(s) — v3 hangs the "
+                f"stop on it and will not fall back to the swing low",
+                checks,
+            )
+        trail_ma = trail_window()
+        if trail_ma is None:
+            # `runner_trail: none` is a legal configuration and means this
+            # recipe has no exit for its remainder. Refusing is the only honest
+            # answer: a trailing variant without a trail is not v3.
+            return no_setup(
+                NAME,
+                "v3 trails the runner and `exits.swing.runner_trail` is `none`, "
+                "so the remainder would have no exit at all",
+                checks,
+            )
+        structural_stop = structure.pullback_low
+        target_1 = reclaim
+        target_2 = None
+    elif geometry.variant == "v2":
         # The pullback's OWN low, not the 60-day low. None REFUSES rather than
         # falling back: silently using `swing_low` would make v2 report v1's
         # geometry under v2's name, which is the one thing a variant must never
@@ -143,19 +182,22 @@ def evaluate(
         # The recovered leg, projected beyond the reclaim. Structure the market
         # made; it does not move with where price sits today.
         leg = reclaim - structure.pullback_low
+        target_1 = reclaim
         target_2 = reclaim + leg * geometry.tp2_leg_multiple
     else:
         structural_stop = structure.swing_low
+        target_1 = reclaim
         target_2 = technical.close + distance * geometry.tp2_measured_move
 
     plan, why = build_plan(
         entry_reference=technical.close,
         structural_stop=structural_stop,
-        target_1=reclaim,
+        target_1=target_1,
         target_2=target_2,
         features=technical,
         horizon_days=tuple(recipe.horizon_days),
         cfg=scoring_cfg,
+        trail_ma=trail_ma,
     )
     if plan is None:
         return no_setup(NAME, f"setup fired but the geometry is unusable: {why}", checks)
