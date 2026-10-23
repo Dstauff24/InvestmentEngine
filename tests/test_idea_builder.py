@@ -439,3 +439,192 @@ def test_an_exactly_threshold_rr_passes_because_the_gate_is_inclusive():
     exact = build(scored=scored(tier="B", composite=60.0), result=result(plan=plan(target_2=115.0)))
     assert isinstance(exact, Idea)
     assert exact.risk_reward == pytest.approx(3.0)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D42 amended: slots go to ideas that pass EVERY stage
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def universe(*items) -> object:
+    from scoring.composite import UniverseRun, rank_universe
+
+    run = UniverseRun(scored=list(items))
+    rank_universe(run.scored)
+    return run
+
+
+def contexts(mapping, *, shared_book=None, sectors=None):
+    """A `build_context` that serves canned per-symbol inputs.
+
+    `shared_book` is one OpenBook for every symbol, which is what makes the
+    stateful guards testable: the walk must see its own acceptances in it.
+    """
+    the_book = shared_book if shared_book is not None else book()
+
+    def build_context(item):
+        entry = mapping.get(item.symbol)
+        if entry is None:
+            return None
+        return {
+            "result": entry,
+            "catalyst": cata(),
+            "sector": (sectors or {}).get(item.symbol, "Technology"),
+            "status": "shadow",
+            "book": the_book,
+            "iv_rank": None,
+            "iv_history_days": 0,
+            "account_value": ACCOUNT,
+        }
+
+    return build_context
+
+
+def test_a_gate_passing_plan_at_rank_six_is_surfaced_when_the_top_five_cannot_be():
+    """THE LIVE BUG, 2026-10-23. Five composite leaders (EXPD, DVN, MPC, FTNT,
+    VLO) held every slot with no recipe plan between them, and any plan-bearing
+    idea at rank 6 was discarded before anything looked at it. Three days of
+    that is three days of Shadow Book calls the engine measured nothing from.
+    """
+    from decision.idea_builder import assign_slots
+
+    leaders = [
+        scored(symbol=s, composite=c)
+        for s, c in (("EXPD", 95.0), ("DVN", 94.0), ("MPC", 93.0), ("FTNT", 92.0), ("VLO", 91.0))
+    ]
+    sixth = scored(symbol="AAPL", composite=90.0)
+    run = universe(*leaders, sixth)
+
+    # Only the sixth has a plan at all.
+    assignment = assign_slots(run, build_context=contexts({"AAPL": result()}))
+
+    assert [idea.symbol for idea in assignment.accepted] == ["AAPL"]
+    assert sixth.surfaced is True
+    assert all(item.surfaced is False for item in leaders)
+    assert assignment.walked == 6, "it had to look past all five to find one"
+    stages = {symbol: r.stage for symbol, r in assignment.refused_by_symbol.items()}
+    assert stages == dict.fromkeys(["EXPD", "DVN", "MPC", "FTNT", "VLO"], "plan")
+
+
+def test_a_rank_six_idea_is_surfaced_when_the_leaders_are_REFUSED_too():
+    """The same hole one stage later: a plan that exists and fails D12's R:R
+    gate used to take a slot and print a refusal. Walking past it is the point
+    of running every stage before the cut."""
+    from decision.idea_builder import assign_slots
+
+    thin = result(plan=plan(target_2=104.0))  # R:R well under Tier A's 2:1
+    leaders = [scored(symbol=s, composite=c) for s, c in (("EXPD", 95.0), ("DVN", 94.0))]
+    sixth = scored(symbol="AAPL", composite=90.0)
+    run = universe(*leaders, sixth)
+
+    assignment = assign_slots(
+        run,
+        build_context=contexts({"EXPD": thin, "DVN": thin, "AAPL": result()}),
+        limit=1,
+    )
+    assert [idea.symbol for idea in assignment.accepted] == ["AAPL"]
+    assert assignment.refused_by_symbol["EXPD"].stage == "risk_reward"
+
+
+def test_the_walk_stops_as_soon_as_the_slots_are_full():
+    """Lazy by design: the cost is how far it had to go, not the size of the
+    qualifying population (190 ideas qualified on 2026-10-21)."""
+    from decision.idea_builder import assign_slots
+
+    items = [scored(symbol=f"S{i}", composite=95.0 - i) for i in range(20)]
+    run = universe(*items)
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {f"S{i}": result() for i in range(20)},
+            # One sector each, so D38's two-per-sector guard does not bind and
+            # the only thing stopping the walk is the slot count.
+            sectors={f"S{i}": f"Sector{i}" for i in range(20)},
+        ),
+        limit=3,
+    )
+    assert len(assignment.accepted) == 3
+    assert assignment.walked == 3, "it never looked at the other seventeen"
+
+
+def test_an_accepted_idea_counts_against_the_sector_guard_for_the_next_one():
+    """THE SECOND BUG. One immutable book was handed to every candidate, so
+    five ideas accepted the same day in the same sector each saw the sector
+    count as it was BEFORE any of them — D38's guard read as enforced and was
+    not."""
+    from decision.idea_builder import assign_slots
+
+    items = [scored(symbol=f"S{i}", composite=95.0 - i) for i in range(4)]
+    run = universe(*items)
+    shared = book()
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {f"S{i}": result() for i in range(4)},
+            shared_book=shared,
+            sectors=dict.fromkeys([f"S{i}" for i in range(4)], "Energy"),
+        ),
+        limit=4,
+    )
+    guard = config.risk().sector_guard.max_concurrent_swings_per_sector
+    assert len(assignment.accepted) == guard, f"D38 allows {guard} positions per sector"
+    assert assignment.watch_only, "D38 surfaces the excess rather than hiding it"
+    assert shared.by_sector["Energy"] == guard, (
+        "a watch-only idea is not a position and must not be counted as one"
+    )
+    assert all("WATCH ONLY" in " ".join(idea.notes) for idea in assignment.watch_only)
+    assert all(
+        idea.symbol not in {a.symbol for a in assignment.accepted} for idea in assignment.watch_only
+    ), "outside the N, not inside it"
+    declined = assignment.declined_by_symbol()
+    assert declined[assignment.watch_only[0].symbol].stage == "sector"
+
+
+def test_an_accepted_idea_counts_against_the_heat_cap_for_the_next_one():
+    """D17's 10% total open heat, applied within the day's own decisions."""
+    from decision.idea_builder import assign_slots
+
+    items = [scored(symbol=f"S{i}", composite=95.0 - i) for i in range(10)]
+    run = universe(*items)
+    shared = book()
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {f"S{i}": result() for i in range(10)},
+            shared_book=shared,
+            sectors={f"S{i}": f"Sector{i}" for i in range(10)},
+        ),
+        limit=10,
+    )
+    cap = config.risk().heat.max_open_heat_pct
+    assert shared.open_risk_pct <= cap + 1e-9
+    assert any(r.stage == "sizing" for _, r in assignment.refused), (
+        "the cap has to refuse someone, or it is not a cap"
+    )
+
+
+def test_a_watch_only_idea_does_not_consume_an_actionable_slot():
+    """D38's excess is INFORMATION, not a call. Letting it hold a slot would be
+    the 2026-10-23 bug in a new costume: the digest full of ideas the engine
+    declined to size, and a tradeable one discarded below them."""
+    from decision.idea_builder import assign_slots
+
+    # Three in one sector (the third is watch-only), then one elsewhere.
+    items = [
+        scored(symbol=s, composite=c)
+        for s, c in (("E1", 95.0), ("E2", 94.0), ("E3", 93.0), ("T1", 92.0))
+    ]
+    run = universe(*items)
+    shared = book()
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {s: result() for s in ("E1", "E2", "E3", "T1")},
+            shared_book=shared,
+            sectors={"E1": "Energy", "E2": "Energy", "E3": "Energy", "T1": "Technology"},
+        ),
+        limit=3,
+    )
+    assert [idea.symbol for idea in assignment.accepted] == ["E1", "E2", "T1"]
+    assert [idea.symbol for idea in assignment.watch_only] == ["E3"]
+    assert run.scored[2].surfaced is False, "watch-only is not a Shadow Book call"

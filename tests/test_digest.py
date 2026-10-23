@@ -118,9 +118,10 @@ def test_the_zero_plan_body_states_the_gates_in_force():
     assert "Tier A composite >=" in body
 
 
-def test_refusals_are_reported_separately_from_candidates():
-    """A symbol that ranked top and was then declined is the most informative
-    line available on a zero-plan day."""
+def test_the_highest_scoring_no_setup_names_are_a_section_of_their_own():
+    """D42 AMENDED. These symbols out-scored the calls and could not be traded,
+    which is worth printing BY NAME and in its own section — the live bug on
+    2026-10-23 was five such names silently occupying every actionable slot."""
     _, body = render(
         content(
             stats=STATS,
@@ -128,8 +129,38 @@ def test_refusals_are_reported_separately_from_candidates():
             refusals=["EXPD: REFUSED at risk_reward — R:R 1.4 below 3:1"],
         )
     )
-    assert "RANKED BUT NOT ACTIONABLE" in body
+    assert "HIGHEST-SCORING, NO SETUP" in body
     assert "R:R 1.4 below 3:1" in body
+
+
+def test_the_refusal_counts_say_how_far_the_walk_went():
+    """The number that would have made the surfacing bug visible on its first
+    evening: 305 symbols produced no setup, and the engine had to walk past all
+    of them. Printed as counts rather than 305 lines."""
+    _, body = render(
+        content(
+            stats=STATS,
+            candidates=CANDIDATES,
+            refusals=["EXPD: REFUSED at plan — no recipe produced a plan"],
+            refusal_summary={"plan": 305, "risk_reward": 4},
+        )
+    )
+    assert "declined by stage — 305 at plan, 4 at risk_reward" in body
+    assert "a high composite is not a setup" in body
+
+
+def test_an_incomplete_day_prints_no_refusal_counts_either():
+    """The 2026-10-22 lesson, applied to the new section: if scoring did not
+    complete, the counts describe nothing and must not be shown."""
+    _, body = render(
+        content(
+            refusals=["EXPD: REFUSED at plan"],
+            refusal_summary={"plan": 305},
+            blocked=[{"job_name": "scoring_pass", "status": "failed", "error": "boom"}],
+        )
+    )
+    assert "HIGHEST-SCORING" not in body
+    assert "305" not in body
 
 
 def test_a_zero_plan_digest_still_renders_without_stats():
@@ -510,3 +541,48 @@ def test_a_failed_step_is_reported_even_before_the_run_is_due(monkeypatch):
     noon_et = datetime(2026, 10, 23, 16, 0, tzinfo=UTC)
     [row] = digest.incomplete_steps(date(2026, 10, 23), ("scoring_pass",), now=noon_et)
     assert row["status"] == "failed"
+
+
+def test_watch_only_ideas_get_their_own_section_with_the_d38_reason():
+    """D42 amended: outside the actionable N, in a section of their own. A
+    watch-only idea holding a slot would be the 2026-10-23 bug in a new
+    costume — the digest full of ideas the engine declined to size."""
+    _, body = render(
+        content(
+            cards=["AAPL  Tier A  entry 100.00"],
+            stats=STATS,
+            watch_only=["XOM  Tier A  WATCH ONLY — 2 swing(s) already open in Energy"],
+        )
+    )
+    assert "WATCH ONLY (D38 — the sector is at its limit)" in body
+    assert "already open in Energy" in body
+    assert "no slot taken, no risk booked" in body
+
+
+def test_the_three_sections_are_separate_and_in_order():
+    """Calls, watch-only, highest-scoring-no-setup. A reader must be able to
+    tell "I could trade this" from "this is information" from "this scored
+    higher and produced nothing"."""
+    _, body = render(
+        content(
+            cards=["AAPL  Tier A  entry 100.00"],
+            stats=STATS,
+            watch_only=["XOM  WATCH ONLY — Energy is full"],
+            refusals=["EXPD: REFUSED at plan — no recipe produced a plan"],
+            refusal_summary={"plan": 305},
+        )
+    )
+    watch = body.index("WATCH ONLY (D38")
+    no_setup = body.index("HIGHEST-SCORING, NO SETUP")
+    assert body.index("AAPL") < watch < no_setup
+
+
+def test_watch_only_lines_are_not_counted_as_ideas():
+    """The lesson that produced the third digest shape: counting strings
+    instead of ideas is how a zero-plan evening reports itself as an idea
+    digest."""
+    card = content(stats=STATS, candidates=CANDIDATES, watch_only=["XOM  WATCH ONLY"])
+    assert card.has_ideas is False
+    _, body = render(card)
+    assert "NOTHING TODAY" in body or "no idea cleared" in body.lower()
+    assert "WATCH ONLY" in body

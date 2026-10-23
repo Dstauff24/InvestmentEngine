@@ -1053,6 +1053,10 @@ CREATE TABLE IF NOT EXISTS daily_candidates (
     recipe            TEXT,
     risk_reward       NUMERIC(10, 4),
     no_plan_reason    TEXT,
+    -- WHICH GATE declined it (D42 amended): plan, risk_reward, events, sector
+    -- or sizing, with that stage's own sentence. NULL when it became a call.
+    refused_stage     TEXT,
+    refused_reason    TEXT,
 
     -- The gates in force, travelling with the row exactly as they do on
     -- `daily_scoring_stats` and `shadow_book`: a threshold change must not

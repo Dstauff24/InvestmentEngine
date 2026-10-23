@@ -34,7 +34,15 @@ from scoring.recipes.base import RecipeResult
 
 log = logging.getLogger(__name__)
 
-__all__ = ["Idea", "Rejection", "build_idea", "vehicle_line"]
+__all__ = [
+    "Idea",
+    "Rejection",
+    "SlotAssignment",
+    "assign_slots",
+    "build_idea",
+    "reserve",
+    "vehicle_line",
+]
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,11 @@ class Idea:
     vehicle: str
     vehicle_note: str
     notes: list[str] = field(default_factory=list)
+    watch_only: bool = False
+    """D38's excess: the sector is at its limit, so the idea SURFACES as
+    information and is not a position. It takes a digest slot and reserves no
+    book state — counting it against the heat cap would charge risk nobody
+    took."""
     """Every caveat the card must carry — D19 flags, thin-data warnings."""
 
     @property
@@ -181,6 +194,169 @@ def share_count(account_value: float, risk_pct: float, risk_per_share: float) ->
     return int((account_value * risk_pct / 100.0) // risk_per_share)
 
 
+# ── slot assignment (D42, amended Oct 23 2026) ──────────────────────────────
+
+
+@dataclass
+class SlotAssignment:
+    """Which ideas got the day's actionable slots, and why the rest did not."""
+
+    accepted: list = field(default_factory=list)
+    """Ideas that passed EVERY stage, in composite order. These take the slots."""
+    watch_only: list = field(default_factory=list)
+    """D38's excess: the sector is at its limit, so the idea is INFORMATION.
+    **Outside the N.** It consumes no actionable slot, reserves no book state,
+    and is not a Shadow Book call — the engine declined to size it, and a call
+    it declined to take is not a call. It gets its own digest section with the
+    D38 reason, because "this sector is working and we are already full" is
+    worth reading."""
+    refused: list = field(default_factory=list)
+    """(ScoredSymbol, Rejection) for every candidate walked and declined."""
+    walked: int = 0
+    """How far down the ranking the walk went. The number that makes the bug
+    this replaced visible: it used to be exactly `max_ideas_per_day`."""
+
+    @property
+    def refused_by_symbol(self) -> dict:
+        return {scored.symbol: rejection for scored, rejection in self.refused}
+
+    def declined_by_symbol(self) -> dict:
+        """Every candidate that did NOT take a slot, with the stage that said
+        so — refusals plus the watch-only excess, which `daily_candidates`
+        records under D38's own stage name."""
+        out = dict(self.refused_by_symbol)
+        for idea in self.watch_only:
+            out[idea.symbol] = Rejection(
+                idea.symbol,
+                next(
+                    (note for note in idea.notes if note.startswith("WATCH ONLY")),
+                    "watch only (D38)",
+                ),
+                "sector",
+            )
+        return out
+
+
+def reserve(book: OpenBook, *, symbol: str, sector: str | None, risk_pct: float) -> None:
+    """Count an ACCEPTED idea against the book, so the next candidate sees it.
+
+    **THE SECOND BUG FOUND WITH THE FIRST.** `build_ideas` passed one immutable
+    `OpenBook` to every candidate in turn, so five ideas accepted on the same
+    day in the same sector each saw `sector_count` as it was BEFORE any of them
+    — D38's two-per-sector guard, D17's max-concurrent-swings and the 10% heat
+    cap all counted yesterday's book and none of today's decisions. The guards
+    read as enforced and were not.
+    """
+    book.symbols.add(symbol)
+    key = sector or ""
+    book.by_sector[key] = book.by_sector.get(key, 0) + 1
+    book.swing_count += 1
+    book.open_risk_pct += risk_pct
+
+
+def assign_slots(
+    run,
+    *,
+    build_context,
+    limit: int | None = None,
+    cfg=None,
+) -> SlotAssignment:
+    """Fill the day's actionable slots by walking the ranking in order.
+
+    **D42 AMENDED: SURFACED MEANS "TOP N BY COMPOSITE AMONG IDEAS THAT PASS
+    EVERY STAGE".** It used to mean "top N by composite among ideas that
+    cleared a TIER gate", decided before any plan was built — so on 2026-10-23
+    five composite leaders with no recipe plan (EXPD, DVN, MPC, FTNT, VLO) took
+    all five slots and the digest reported five refusals, while any plan-bearing
+    idea at rank 6 or lower was discarded unseen. Three days of that is three
+    days of Shadow Book calls the engine measured nothing from.
+
+    **EVERY STAGE, not just the plan check.** D12's R:R gate, D19's event
+    checks, D38's sector guard, D17's heat cap and concurrency limits and D18's
+    Tier B budget all now run BEFORE a slot is assigned, through this one
+    function — because a gate applied after the cut reproduces the same bug one
+    step later, and two copies of a gate drift.
+
+    The walk is lazy: candidates are evaluated in composite order and it stops
+    at `limit` acceptances, so the cost is "how far it had to go" rather than
+    "the whole qualifying population". `walked` records that distance, which is
+    the number that would have made the original bug visible.
+
+    `build_context(scored)` supplies the per-symbol inputs a stage needs
+    (recipe result, catalyst, sector, status, book, IV, account). Injected so
+    this function stays testable without a database, and so the caller decides
+    what a "book" means for the ladder state in play (D44).
+    """
+    scoring_cfg = cfg or config.scoring()
+    slots = scoring_cfg.ranking.max_ideas_per_day if limit is None else limit
+
+    ranked = [s for s in run.scored if s.tier is not None and s.composite is not None]
+    ranked.sort(key=lambda s: (-(s.composite or 0.0), s.symbol))
+
+    assignment = SlotAssignment()
+    tier_b_spent: dict[str, float] = {}
+    for scored in ranked:
+        if len(assignment.accepted) >= slots:
+            break
+        assignment.walked += 1
+        scored.surfaced = False
+
+        context = build_context(scored)
+        if context is None or context.get("result") is None:
+            triggered = ", ".join(r.recipe for r in scored.triggered) or "none"
+            assignment.refused.append(
+                (
+                    scored,
+                    Rejection(
+                        scored.symbol,
+                        f"no recipe produced a plan (triggered: {triggered})",
+                        "plan",
+                    ),
+                )
+            )
+            continue
+
+        status = context["status"]
+        built = build_idea(
+            scored,
+            context["result"],
+            context["catalyst"],
+            sector=context.get("sector"),
+            status=status,
+            book=context["book"],
+            iv_rank=context.get("iv_rank"),
+            iv_history_days=context.get("iv_history_days"),
+            account_value=context.get("account_value"),
+            tier_b_spent_pct=tier_b_spent.get(status, 0.0),
+            cfg=scoring_cfg,
+        )
+        if isinstance(built, Rejection):
+            assignment.refused.append((scored, built))
+            continue
+
+        if built.watch_only:
+            # D38's excess is INFORMATION, not a call: outside the N, no slot,
+            # no book state, not logged to the Shadow Book. Charging the heat
+            # cap for risk nobody took would refuse the next real idea on a
+            # trade that does not exist, and filling the actionable slots with
+            # ideas the engine declined to size is the bug this walk replaced.
+            assignment.watch_only.append(built)
+            continue
+
+        assignment.accepted.append(built)
+        scored.surfaced = True
+        # The state the NEXT candidate must see (D17/D38/D18).
+        reserve(
+            context["book"],
+            symbol=scored.symbol,
+            sector=context.get("sector"),
+            risk_pct=built.risk_pct,
+        )
+        if scored.tier == "B":
+            tier_b_spent[status] = tier_b_spent.get(status, 0.0) + built.risk_pct
+    return assignment
+
+
 # ── the builder ─────────────────────────────────────────────────────────────
 
 
@@ -209,6 +385,7 @@ def build_idea(
     risk_cfg = config.risk()
     account = account_value if account_value is not None else settings.shadow_account_value()
     notes: list[str] = []
+    watch_only = False
 
     if scored.tier is None:
         return Rejection(scored.symbol, scored.tier_reason or "no tier", "tier")
@@ -262,6 +439,7 @@ def build_idea(
             # D38: the information that the sector is working is worth keeping;
             # the concentration is not.
             notes.append(f"WATCH ONLY — {reason}")
+            watch_only = True
         else:
             return Rejection(scored.symbol, reason, "sector")
     if book.holds(scored.symbol):
@@ -351,4 +529,5 @@ def build_idea(
         vehicle=vehicle,
         vehicle_note=vehicle_note,
         notes=notes,
+        watch_only=watch_only,
     )

@@ -250,7 +250,13 @@ def _send_digest() -> int:
     them would double the run for nothing.
     """
     result = scoring_pass.latest()
-    digest.run(result.cards, result.candidates, refusals=result.refusals)
+    digest.run(
+        result.cards,
+        result.candidates,
+        refusals=result.refusals,
+        refusal_summary=result.refusal_summary,
+        watch_only=result.watch_only,
+    )
     return len(result.cards) or len(result.candidates)
 
 

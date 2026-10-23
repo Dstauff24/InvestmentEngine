@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 
 JOB_NAME = "scoring_pass"
 
-__all__ = ["PassResult", "run"]
+__all__ = ["MAX_REFUSALS_SHOWN", "PassResult", "run"]
+
+# How many refusals the digest NAMES. The rest are counted by stage: the
+# engine's own numbers say 305 symbols produced no setup on a typical day, and
+# a report that printed each one would bury the five that nearly made it.
+MAX_REFUSALS_SHOWN = 5
 
 
 @dataclass
@@ -40,6 +45,12 @@ class PassResult:
 
     cards: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
+    """The HIGHEST-SCORING few, named. Capped at `MAX_REFUSALS_SHOWN`."""
+    refusal_summary: dict[str, int] = field(default_factory=dict)
+    """How many candidates each stage declined, across the whole walk."""
+    watch_only: list[str] = field(default_factory=list)
+    """D38's excess, rendered. OUTSIDE the N and not Shadow Book calls, so they
+    are neither `cards` nor `refusals` — a section of their own."""
     candidates: list[dict] = field(default_factory=list)
     ideas_logged: int = 0
     surfaced: int = 0
@@ -71,12 +82,29 @@ def run(*, as_of: date | None = None) -> int:
         # already in `daily_scoring_stats`, written by score_universe.
         built = build_ideas(universe_run, as_of=day)
         ideas = [item for item in built if isinstance(item, Idea)]
-        refusals = [render_idea(item) for item in built if not isinstance(item, Idea)]
+        # THE WALK NOW REFUSES EVERY CANDIDATE IT PASSED (D42 amended), which
+        # on 2026-10-21 was 309 of them. The digest gets the HIGHEST-SCORING
+        # few by name and the rest as a count per stage: a reader needs to know
+        # that 305 symbols produced no setup, not to read 305 lines saying so.
+        assignment = universe_run.assignment
+        refused = assignment.refused if assignment else []
+        watching = [idea.card() for idea in (assignment.watch_only if assignment else [])]
+        refusals = [
+            render_idea(rejection)
+            for _, rejection in sorted(refused, key=lambda pair: -(pair[0].composite or 0.0))[
+                :MAX_REFUSALS_SHOWN
+            ]
+        ]
+        refusal_summary: dict[str, int] = {}
+        for _, rejection in refused:
+            refusal_summary[rejection.stage] = refusal_summary.get(rejection.stage, 0) + 1
         logged = log_surfaced(ideas, sentiment_scorer=scorer_id(get_scorer()), as_of=day)
 
         _LAST = PassResult(
             cards=[idea.card() for idea in ideas],
             refusals=refusals,
+            refusal_summary=refusal_summary,
+            watch_only=watching,
             candidates=candidates,
             ideas_logged=logged,
             surfaced=len(universe_run.surfaced),

@@ -137,6 +137,14 @@ class DigestContent:
     stats: dict | None
     closed: list[dict]
     open_calls: list[dict]
+    watch_only: list[str] = field(default_factory=list)
+    """D38's excess (D42 amended): ideas whose sector is already at its limit.
+    Surfaced as INFORMATION in a section of their own — outside the actionable
+    N, consuming no slot, reserving no book state, and not Shadow Book calls."""
+    refusal_summary: dict = field(default_factory=dict)
+    """{stage: count} over the whole ranked walk (D42 amended). The counts are
+    the point: 305 symbols with no setup is one fact, and five near-misses
+    named individually is another."""
     blocked: list[dict] = field(default_factory=list)
     """Idea-feeding steps that did not succeed. Non-empty ⇒ the third shape."""
     degraded: list[dict] = field(default_factory=list)
@@ -183,6 +191,8 @@ def build_digest(
     candidates: list[dict],
     *,
     refusals: list[str] | None = None,
+    refusal_summary: dict | None = None,
+    watch_only: list[str] | None = None,
     as_of: date | None = None,
 ) -> DigestContent:
     """Gather the day's material. `candidates` are the top-ranked scored rows.
@@ -208,6 +218,8 @@ def build_digest(
         session_date=day,
         cards=[] if blocked else cards,
         refusals=[] if blocked else (refusals or []),
+        refusal_summary={} if blocked else (refusal_summary or {}),
+        watch_only=[] if blocked else (watch_only or []),
         candidates=[] if blocked else candidates[:MAX_CANDIDATES],
         stats=db.fetch_one(STATS, (day,)),
         closed=db.fetch_all(CHANGES, (day,)),
@@ -283,6 +295,12 @@ def render(content: DigestContent) -> tuple[str, str]:
             )
             lines.append("")
 
+    # THE OTHER TWO SECTIONS, on every shape that has them. `build_digest`
+    # blanks both when scoring did not complete, so an incomplete evening
+    # cannot print either.
+    lines.extend(_watch_only_section(content))
+    lines.extend(_no_setup_section(content))
+
     if content.closed:
         lines.append("─" * 40)
         lines.append("CLOSED SINCE YESTERDAY")
@@ -302,6 +320,55 @@ def render(content: DigestContent) -> tuple[str, str]:
         lines.append("")
 
     return subject, "\n".join(lines).rstrip() + "\n"
+
+
+def _watch_only_section(content: DigestContent) -> list[str]:
+    """D38's excess (D42 amended). Printed on EVERY shape that has one.
+
+    It lived inside `_selectivity_report` for an afternoon, which meant it
+    appeared only on a zero-plan day — so an evening with one call and three
+    watch-only ideas would have shown the call and silently dropped the rest.
+    The sections are about different populations, not different evenings.
+    """
+    # Suppressed on an incomplete evening whatever the caller passed, for the
+    # same reason `_selectivity_report` refuses to run: the content describes a
+    # walk that did not happen. `build_digest` also blanks it, and two guards
+    # on the 2026-10-22 failure is the right number.
+    if not content.watch_only or content.scoring_incomplete:
+        return []
+    lines = ["WATCH ONLY (D38 — the sector is at its limit):"]
+    for card in content.watch_only:
+        lines.extend(f"  {line}" for line in card.splitlines())
+    lines += [
+        "  Information, not calls: no slot taken, no risk booked, nothing logged",
+        "  to the Shadow Book. The sector working is worth knowing; the",
+        "  concentration is not worth taking.",
+        "",
+    ]
+    return lines
+
+
+def _no_setup_section(content: DigestContent) -> list[str]:
+    """The highest scorers that produced nothing tradeable (D42 amended).
+
+    A SEPARATE SECTION FROM THE CALLS. These symbols out-scored the ones above
+    and could not be traded, which is worth printing BY NAME — and the counts
+    say how far down the ranking the engine had to walk, the number that would
+    have made the 2026-10-23 surfacing bug visible on its first evening.
+    """
+    if content.scoring_incomplete or not (content.refusals or content.refusal_summary):
+        return []
+    lines = ["HIGHEST-SCORING, NO SETUP (ranked above the calls, not actionable):"]
+    lines.extend(f"  {line}" for line in content.refusals)
+    if content.refusal_summary:
+        shape = ", ".join(
+            f"{count} at {stage}" for stage, count in sorted(content.refusal_summary.items())
+        )
+        lines.append(f"  declined by stage — {shape}")
+        if content.refusal_summary.get("plan"):
+            lines.append("  `plan` means no recipe fired at all: a high composite is not a setup.")
+    lines.append("")
+    return lines
 
 
 def _selectivity_report(content: DigestContent, cfg) -> list[str]:
@@ -339,14 +406,6 @@ def _selectivity_report(content: DigestContent, cfg) -> list[str]:
             shape = ", ".join(f"{k} pillar(s): {v}" for k, v in sorted(histogram.items()))
             lines.append(f"  evidence depth (D41) — {shape}")
             lines.append("  a composite built on two pillars is not the claim four would be")
-        lines.append("")
-
-    if content.refusals:
-        # The most informative lines available on a zero-plan day: these
-        # symbols ranked at the top and were then declined, and by what.
-        lines.append("RANKED BUT NOT ACTIONABLE:")
-        for line in content.refusals:
-            lines.append(f"  {line}")
         lines.append("")
 
     if content.candidates:
@@ -388,6 +447,8 @@ def run(
     candidates: list[dict],
     *,
     refusals: list[str] | None = None,
+    refusal_summary: dict | None = None,
+    watch_only: list[str] | None = None,
     as_of: date | None = None,
     send: bool = True,
 ) -> str:
@@ -400,7 +461,14 @@ def run(
     from core.jobs import job_run
 
     day = as_of or clock.session_date()
-    content = build_digest(cards, candidates, refusals=refusals, as_of=day)
+    content = build_digest(
+        cards,
+        candidates,
+        refusals=refusals,
+        refusal_summary=refusal_summary,
+        watch_only=watch_only,
+        as_of=day,
+    )
     subject, body = render(content)
 
     with job_run(JOB_NAME, session_date=day, is_critical=False, triggered_by="manual") as job:

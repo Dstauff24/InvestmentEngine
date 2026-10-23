@@ -26,7 +26,7 @@ import pandas as pd
 
 from core import clock, config, db, settings
 from decision.book import LADDER_STATES, load_book
-from decision.idea_builder import Idea, Rejection, build_idea
+from decision.idea_builder import Idea, Rejection, SlotAssignment, assign_slots
 from features import catalyst as catalyst_features
 from features import fundamental as fundamental_features
 from features import sentiment as sentiment_features
@@ -260,6 +260,11 @@ def score_universe(
     rank_universe(scored)
 
     run = UniverseRun(scored=scored)
+    # SLOTS BEFORE STATS. `surfaced` is now the output of slot assignment
+    # (D42, amended), and `daily_scoring_stats.surfaced_count` plus
+    # `daily_candidates.surfaced` both read it — recording them first would
+    # have written zeros for every day.
+    run.assignment = assign_daily_slots(run, as_of=day)
     if record_stats:
         record_daily_stats(run, day=day)
         record_candidates(run, day=day)
@@ -317,12 +322,12 @@ CANDIDATES_UPSERT = """
     INSERT INTO daily_candidates (
         session_date, symbol, rank, composite, percentile, scored_pillars,
         pillars_scored, tier, tier_reason, surfaced, recipe, risk_reward,
-        no_plan_reason, gates_in_force, close_raw
+        no_plan_reason, refused_stage, refused_reason, gates_in_force, close_raw
     ) VALUES (
         %(session_date)s, %(symbol)s, %(rank)s, %(composite)s, %(percentile)s,
         %(scored_pillars)s, %(pillars_scored)s, %(tier)s, %(tier_reason)s,
         %(surfaced)s, %(recipe)s, %(risk_reward)s, %(no_plan_reason)s,
-        %(gates_in_force)s, %(close_raw)s
+        %(refused_stage)s, %(refused_reason)s, %(gates_in_force)s, %(close_raw)s
     )
     ON CONFLICT (session_date, symbol) DO UPDATE SET
         rank           = EXCLUDED.rank,
@@ -336,6 +341,8 @@ CANDIDATES_UPSERT = """
         recipe         = EXCLUDED.recipe,
         risk_reward    = EXCLUDED.risk_reward,
         no_plan_reason = EXCLUDED.no_plan_reason,
+        refused_stage  = EXCLUDED.refused_stage,
+        refused_reason = EXCLUDED.refused_reason,
         gates_in_force = EXCLUDED.gates_in_force,
         close_raw      = EXCLUDED.close_raw
 """
@@ -365,6 +372,24 @@ def candidate_rows(run: UniverseRun, *, day: date, cfg=None) -> list[dict]:
     ranked.sort(key=lambda s: s.rank)
     top = ranked[: scoring_cfg.ranking.max_ideas_per_day]
 
+    # THE NEAR-MISSES, wherever they rank (D42 amended). A candidate whose plan
+    # existed and was declined by a LATER stage is the most informative row in
+    # this table — on 2026-10-21 there were four of them against 305 symbols
+    # with no plan at all, and the one idea that passed everything sat at rank
+    # 51. Keeping only the top N by rank would hide exactly that.
+    # Refusals AND D38's watch-only excess: both declined a slot, and the
+    # table has to say which gate did it.
+    refused = run.assignment.declined_by_symbol() if run.assignment else {}
+    kept = {item.symbol for item in top}
+    near_misses = [
+        item
+        for item in ranked
+        if item.symbol not in kept
+        and refused.get(item.symbol, None) is not None
+        and refused[item.symbol].stage != "plan"
+    ]
+    top = [*top, *near_misses]
+
     gates = {
         "tier_a_min_composite": scoring_cfg.tiers.a.min_composite,
         "tier_b_min_composite": scoring_cfg.tiers.b.min_composite,
@@ -390,6 +415,12 @@ def candidate_rows(run: UniverseRun, *, day: date, cfg=None) -> list[dict]:
                 "recipe": best.recipe if best else None,
                 "risk_reward": round(best.plan.risk_reward, 4) if best else None,
                 "no_plan_reason": None if best else _no_plan_reason(item),
+                "refused_stage": (
+                    None if item.surfaced else getattr(refused.get(item.symbol), "stage", None)
+                ),
+                "refused_reason": (
+                    None if item.surfaced else getattr(refused.get(item.symbol), "reason", None)
+                ),
                 "gates_in_force": gates,
                 "close_raw": None,
             }
@@ -508,6 +539,72 @@ IV_SQL = """
 """
 
 
+def _context_for(
+    item,
+    *,
+    as_of: date,
+    sectors: dict,
+    statuses,
+    books: dict,
+    account: float,
+) -> dict | None:
+    """The per-symbol inputs every refusal stage needs. One symbol, one read.
+
+    Called by `assign_slots` as it walks DOWN the ranking, so these reads
+    happen only for the candidates actually considered — the cost is "how far
+    the walk went", not "the whole qualifying universe".
+    """
+    best = item.best_plan
+    if best is None:
+        return None
+    status = statuses.of(best.recipe)
+    iv = db.fetch_one(IV_SQL, (item.symbol, as_of)) or {}
+    card_events = catalyst_features.load_events(item.symbol, as_of=as_of)
+    catalyst = catalyst_features.compute(
+        item.symbol,
+        card_events,
+        [],
+        as_of=as_of,
+        own_estimate=_own_estimate(item.symbol, card_events, as_of=as_of),
+    )
+    return {
+        "result": best,
+        "catalyst": catalyst,
+        "sector": sectors.get(item.symbol),
+        "status": status,
+        "book": books[status],
+        "iv_rank": _float(iv.get("iv_rank_252")),
+        "iv_history_days": iv.get("history_days"),
+        "account_value": account,
+    }
+
+
+def assign_daily_slots(run: UniverseRun, *, as_of: date) -> SlotAssignment:
+    """Fill the day's actionable slots (D42, amended). Reads the live books."""
+    account = settings.shadow_account_value()
+    sectors = sectors_by_symbol()
+    statuses = config.scoring().promotion.status
+    books = {state: load_book(state, account_value=account) for state in LADDER_STATES}
+    assignment = assign_slots(
+        run,
+        build_context=lambda item: _context_for(
+            item,
+            as_of=as_of,
+            sectors=sectors,
+            statuses=statuses,
+            books=books,
+            account=account,
+        ),
+    )
+    log.info(
+        "D42 slots: %d accepted, %d refused, walked %d candidate(s) down the ranking",
+        len(assignment.accepted),
+        len(assignment.refused),
+        assignment.walked,
+    )
+    return assignment
+
+
 def build_ideas(run: UniverseRun, *, as_of: date) -> list[Idea | Rejection | str]:
     """Idea OBJECTS for the surfaced symbols (D42), or why each refused.
 
@@ -520,45 +617,11 @@ def build_ideas(run: UniverseRun, *, as_of: date) -> list[Idea | Rejection | str
     minimum" is the most useful line the engine can print about a symbol it
     ranked first and then declined — a silent omission would read as a bug.
     """
-    account = settings.shadow_account_value()
-    sectors = sectors_by_symbol()
-    statuses = config.scoring().promotion.status
-    books = {state: load_book(state, account_value=account) for state in LADDER_STATES}
-
-    out: list[Idea | Rejection | str] = []
-    for item in run.surfaced:
-        best = item.best_plan
-        if best is None:
-            triggered = ", ".join(r.recipe for r in item.triggered) or "none"
-            out.append(
-                f"{item.symbol}: no trade plan — tier {item.tier} on composite "
-                f"{item.composite:.1f}, but no recipe produced a plan "
-                f"(triggered: {triggered})"
-            )
-            continue
-
-        status = statuses.of(best.recipe)
-        iv = db.fetch_one(IV_SQL, (item.symbol, as_of)) or {}
-        card_events = catalyst_features.load_events(item.symbol, as_of=as_of)
-        catalyst = catalyst_features.compute(
-            item.symbol,
-            card_events,
-            [],
-            as_of=as_of,
-            own_estimate=_own_estimate(item.symbol, card_events, as_of=as_of),
-        )
-        built = build_idea(
-            item,
-            best,
-            catalyst,
-            sector=sectors.get(item.symbol),
-            status=status,
-            book=books[status],
-            iv_rank=_float(iv.get("iv_rank_252")),
-            iv_history_days=iv.get("history_days"),
-            account_value=account,
-        )
-        out.append(built)
+    assignment = run.assignment or assign_daily_slots(run, as_of=as_of)
+    out: list[Idea | Rejection | str] = list(assignment.accepted)
+    # Every candidate the walk declined, named with its stage — the line that
+    # tells a reader why a high scorer did not become a call.
+    out.extend(rejection for _, rejection in assignment.refused)
     return out
 
 

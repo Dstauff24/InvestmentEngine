@@ -224,13 +224,23 @@ def test_ranking_never_promotes_an_idea_that_failed_its_gate():
     assert all(not s.surfaced for s in universe)
 
 
-def test_the_digest_cap_surfaces_the_top_by_rank():
+def test_ranking_no_longer_decides_what_surfaces():
+    """D42 AMENDED (Oct 23, 2026). `rank_universe` used to mark the top
+    `max_ideas_per_day` tier-passers as surfaced right here, BEFORE any plan
+    was built — so five composite leaders with no recipe plan took all five
+    slots and every plan-bearing idea below them was discarded unseen.
+
+    Phase two now ranks and tiers; `decision.idea_builder.assign_slots` walks
+    that ranking and surfaces only what passes every stage."""
     cap = CFG.ranking.max_ideas_per_day
     universe = [build(f"S{i}", 95 - i, 95 - i, 95 - i, 95 - i) for i in range(cap + 4)]
     rank_universe(universe)
-    surfaced = [s for s in universe if s.surfaced]
-    assert len(surfaced) == cap
-    assert {s.symbol for s in surfaced} == {f"S{i}" for i in range(cap)}
+
+    assert [s.rank for s in universe] == list(range(1, len(universe) + 1))
+    assert all(s.tier is not None for s in universe[:cap]), "they still qualify"
+    assert not any(s.surfaced for s in universe), (
+        "nothing surfaces until a plan has been built and every stage has run"
+    )
 
 
 def test_the_run_summary_reports_the_mask_histogram():

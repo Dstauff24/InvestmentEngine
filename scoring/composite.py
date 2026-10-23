@@ -262,14 +262,17 @@ def rank_universe(scored: list[ScoredSymbol], cfg=None) -> list[ScoredSymbol]:
     for item in scored:
         item.tier, item.tier_reason = tier_for(item.pillars, item.composite, scoring_cfg)
 
-    # D33: the digest surfaces at most `max_ideas_per_day` BY RANK, and only
-    # among ideas that already cleared a tier gate. Ranking never promotes an
-    # idea that failed its gate.
-    eligible = [s for s in scored if s.tier is not None]
-    eligible.sort(key=lambda s: (-(s.composite or 0.0), s.symbol))
-    for item in eligible[: scoring_cfg.ranking.max_ideas_per_day]:
-        item.surfaced = True
-
+    # **RANKING NO LONGER DECIDES WHAT SURFACES (D42, amended Oct 23 2026).**
+    # It used to mark the top `max_ideas_per_day` tier-passers as surfaced
+    # right here — before any plan was built — so on 2026-10-23 five composite
+    # leaders with no recipe plan took all five slots and every plan-bearing
+    # idea below them was discarded unseen. Three days of that.
+    #
+    # `surfaced` is now set by `decision.idea_builder.assign_slots`, which
+    # walks this ranking in order and assigns a slot only to an idea that
+    # passes EVERY stage. Phase two ranks; slot assignment surfaces. The two
+    # were conflated because, on the day it was written, the only gate that
+    # existed was the tier gate.
     return scored
 
 
@@ -278,6 +281,11 @@ class UniverseRun:
     """What one full scoring pass produced. For the digest and the job report."""
 
     scored: list[ScoredSymbol] = field(default_factory=list)
+    assignment: object | None = None
+    """The day's slot assignment (`decision.idea_builder.SlotAssignment`), set
+    once by the scoring pass. Kept HERE so the digest renders the same decision
+    the Shadow Book logged: re-walking the ranking would re-read the books and
+    could, after a fill, reach a different answer."""
 
     @property
     def surfaced(self) -> list[ScoredSymbol]:
