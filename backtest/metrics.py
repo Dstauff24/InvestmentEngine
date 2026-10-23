@@ -28,6 +28,7 @@ from datetime import date
 from core import config
 
 __all__ = [
+    "GATES_BIND_ABOVE",
     "Expectancy",
     "Reachability",
     "by_recipe",
@@ -40,6 +41,12 @@ __all__ = [
 
 # D39(2): no weight or threshold moves on fewer than this many closed ideas.
 MIN_SAMPLE = 30
+
+# Above this share of plans clearing Tier A, the gate has stopped
+# discriminating (recipe 1's v2 measured 100%). A REPORT threshold, not a
+# strategy parameter: it decides what gets flagged for a human to look at, and
+# nothing in the engine reads it.
+GATES_BIND_ABOVE = 0.90
 
 
 @dataclass
@@ -213,6 +220,21 @@ class Reachability:
     share_tier_b: float | None
 
     @property
+    def gates_not_binding(self) -> bool:
+        """Nearly every plan clears Tier A: the gate has stopped discriminating.
+
+        **THE SAME DEFECT AS `unreachable`, MIRRORED.** D12's R:R gates are
+        supposed to do real work, which is why R:R is DERIVED from structure
+        rather than configured — "TP2 = 3R" would satisfy the gates by
+        construction on every idea. A geometry that passes 98% of its plans has
+        reached that state without configuring anything: recipe 1's v2 put the
+        stop on the pullback low and the target a full leg beyond the reclaim,
+        giving a median R:R of 6.6, and its Tier A share was 100%. A gate
+        everything passes is not a gate.
+        """
+        return bool(self.plans) and (self.share_tier_a or 0) > GATES_BIND_ABOVE
+
+    @property
     def unreachable(self) -> bool:
         """No plan clears EITHER gate: nothing this recipe produced could
         become an idea. None (no plans at all) is not unreachable — it is
@@ -273,12 +295,27 @@ def render_reachability(items: list[Reachability], *, cfg=None) -> list[str]:
         lines.append("  (no plans in the window)")
         return lines
     for item in items:
-        flag = "   << UNREACHABLE" if item.unreachable else ""
+        flag = ""
+        if item.unreachable:
+            flag = "   << UNREACHABLE"
+        elif item.gates_not_binding:
+            flag = "   << GATES NOT BINDING"
         lines.append(
             f"{item.recipe:<24} {item.plans:>6} {item.rr_min:>6.2f} {item.rr_p25:>6.2f} "
             f"{item.rr_median:>6.2f} {item.rr_p75:>6.2f} {item.rr_max:>6.2f} "
             f"{item.share_tier_a:>6.0%} {item.share_tier_b:>6.0%}{flag}"
         )
+    loose = [i.recipe for i in items if i.gates_not_binding]
+    if loose:
+        lines.append("")
+        lines.append(
+            f"  GATES NOT BINDING: {', '.join(loose)} — over "
+            f"{GATES_BIND_ABOVE:.0%} of plans clear Tier A, so D12's R:R gate is"
+        )
+        lines.append("  passing almost everything. R:R is DERIVED so the gate does real work;")
+        lines.append("  a geometry that reaches a 98% pass rate has satisfied it by")
+        lines.append("  construction, which is the unreachable case mirrored.")
+
     blocked = [i.recipe for i in items if i.unreachable]
     if blocked:
         lines.append("")

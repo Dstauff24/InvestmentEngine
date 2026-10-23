@@ -1374,3 +1374,41 @@ def test_every_report_prints_the_reachability_section():
     text = metrics.render_report(CsvRun(trades=[trade], start="a", end="b", symbols=1))
     assert "GATE REACHABILITY" in text
     assert "<< UNREACHABLE" in text
+
+
+def test_a_gate_almost_everything_clears_is_flagged_as_not_binding():
+    """THE MIRROR OF `unreachable`, and recipe 1's v2 is the live case: stop on
+    the pullback low, target a full leg beyond the reclaim, median R:R 6.6, and
+    100% of plans clearing Tier A. R:R is DERIVED so D12's gate does real work;
+    a geometry that passes everything has satisfied the gate by construction
+    without configuring anything."""
+    trades = [_Plan("pullback_v2", rr) for rr in (2.4, 3.8, 6.6, 6.6, 11.2)]
+    [item] = metrics.reachability(trades)
+    assert item.share_tier_a == 1.0
+    assert item.gates_not_binding is True
+    assert item.unreachable is False
+
+    text = "\n".join(metrics.render_reachability([item]))
+    assert "<< GATES NOT BINDING" in text
+    assert "the unreachable case mirrored" in text
+
+
+def test_a_gate_that_discriminates_is_flagged_neither_way():
+    """`post_earnings_drift` at 26% is what a working gate looks like."""
+    trades = [_Plan("drift", rr) for rr in (0.5, 1.0, 1.4, 1.9, 2.5, 3.2)]
+    [item] = metrics.reachability(trades)
+    assert item.share_tier_a == pytest.approx(2 / 6)
+    assert item.gates_not_binding is False
+    assert item.unreachable is False
+    text = "\n".join(metrics.render_reachability([item]))
+    assert "<<" not in text
+
+
+def test_the_binding_threshold_is_a_report_threshold_not_a_strategy_one():
+    """Nothing in the engine reads it: it decides what a human is asked to look
+    at, which is why it lives beside MIN_SAMPLE rather than in config."""
+    assert metrics.GATES_BIND_ABOVE == 0.90
+    just_under = [_Plan("r", 2.5)] * 9 + [_Plan("r", 1.0)]
+    [item] = metrics.reachability(just_under)
+    assert item.share_tier_a == pytest.approx(0.9)
+    assert item.gates_not_binding is False, "exactly 90% is not 'over 90%'"
