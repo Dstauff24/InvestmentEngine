@@ -1152,3 +1152,137 @@ def test_the_shipped_config_still_runs_the_v1_geometry():
     """Every number on record was measured under v1, so the flag may not drift
     to v2 without a decision and a side-by-side backtest (D43/D50)."""
     assert cfg.scoring().geometry.pullback_to_trend.variant == "v1"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Every configured field is read by something
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _unread_config_fields() -> dict[str, list[str]]:
+    """{model: [fields that nothing outside core/config.py reads by name]}."""
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    source = "\n".join(
+        path.read_text()
+        for folder in (
+            "alerts",
+            "backtest",
+            "core",
+            "db",
+            "decision",
+            "features",
+            "ingest",
+            "jobs",
+            "scoring",
+            "scripts",
+            "shadow_book",
+        )
+        for path in (root / folder).rglob("*.py")
+        if path.name != "config.py"
+    )
+    tree = ast.parse((root / "core" / "config.py").read_text())
+    out: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for statement in node.body:
+            if not isinstance(statement, ast.AnnAssign) or not isinstance(
+                statement.target, ast.Name
+            ):
+                continue
+            name = statement.target.id
+            if name.startswith("_"):
+                continue
+            if f".{name}" not in source and f'"{name}"' not in source:
+                out.setdefault(node.name, []).append(name)
+    return out
+
+
+# Config blocks whose READER DOES NOT EXIST YET. Every one is a rule from the
+# decision log written down ahead of the layer that will enforce it, which is a
+# legitimate state and a measurable one: 60-odd parameters of D17/D18/D35 risk
+# and allocation discipline are declared and inert, and D52 calls that layer
+# the primary product. The reason is the open item that will read them.
+PENDING_LAYERS = {
+    # O17, the portfolio-adviser layer: heat, buckets, sleeves, the ratchet,
+    # drift, concentration, the circuit breaker, dividend handling.
+    "Heat": "O17",
+    "StableBuckets": "O17",
+    "BucketTargets": "O17",
+    "AllocationTargets": "O17",
+    "Sleeve": "O17",
+    "Sleeves": "O17",
+    "Ratchet": "O17",
+    "Dividends": "O17",
+    "Cash": "O17",
+    "CircuitBreaker": "O17",
+    "CircuitBreakerAction": "O17",
+    "TierBBudget": "O17",
+    "Pyramiding": "O17",
+    "OptionsRisk": "O17",
+    "OptionExits": "O17",
+    "VehicleByIVRank": "O17",
+    "RiskConfig": "O17",
+    # O18, the research lab: reinstating a demoted pillar needs the calibration
+    # work, and ranking alternatives need the forward-return tables.
+    "SentimentReinstatement": "O18",
+    "Ranking": "O18",
+    "ScoringConfig": "O18",
+    "PaperToLive": "O18 (the calibration curve, D39(1))",
+    # Recipe shapes not yet built: the reversal-candle condition recipe 1 never
+    # implemented, and the insider-cluster derivative exclusion (stored
+    # unfiltered on purpose, D25).
+    "PullbackRecipe": "a condition recipe 1 never implemented",
+    "InsiderCluster": "D25 stores rows unfiltered; the filter reads code, not this flag",
+    "UniverseSources": "the watchlist path is resolved by the universe builder's own default",
+    "OptionChainScope": "aggregate IV is derived in schwab_chains without reading the flag",
+    # O20 WIRES MOST OF THIS. `runner_trail: ma_20` has been the framework's
+    # answer since the beginning and nothing has ever trailed anything; v3's
+    # geometry reads it and `trim_at_target_1`, whose fraction is what makes
+    # D12's amended 1.0R gate mean "cannot lose money once TP1 is hit".
+    # `trim_at_target_2` stays inert after that: v3 has no TP2, and the
+    # position-level accounting a fixed-target trim needs is O17's.
+    "SwingExits": "O20 (trail + the TP1 trim); the TP2 trim is O17",
+}
+
+
+def test_no_config_field_is_unread_in_a_layer_that_exists():
+    """THREE TIMES NOW, a value has sat in config that nothing read.
+
+    `range_contraction_ratio` gated a measurement centred on 1.00 (retired,
+    O13). `swing_lookback_days` agreed with `price_structure`'s own default of
+    60, so changing it moved nothing (wired, O15). `runner_trail: ma_20` has
+    said "the runner trails the 20-day MA" since the framework was written and
+    nothing has ever trailed anything (v3's job, O20).
+
+    "A key that LOADS while nothing reads it is how an operator comes to
+    believe a rule is in force when it is not" — the decision log's words about
+    the retired key, and this is the guard that would have caught all three.
+
+    Blocks whose reader does not exist yet are listed in `PENDING_LAYERS` with
+    the open item that will read them. That is not an exemption list to grow
+    casually: adding a name means admitting a rule is inert, and the list
+    shrinks as the layers land.
+    """
+    unread = {
+        model: fields
+        for model, fields in _unread_config_fields().items()
+        if model not in PENDING_LAYERS
+    }
+    assert unread == {}, (
+        f"these config fields are loaded and read by nothing: {unread} — wire them, "
+        f"retire them, or add the BLOCK to PENDING_LAYERS with the open item that will"
+    )
+
+
+def test_the_pending_layers_list_only_names_blocks_that_are_really_inert():
+    """The other direction: a block that HAS been wired must leave the list, or
+    the list becomes a place where live rules hide."""
+    unread = _unread_config_fields()
+    wired = [model for model in PENDING_LAYERS if model not in unread]
+    assert wired == [], (
+        f"these blocks are in PENDING_LAYERS but something now reads them: {wired} — "
+        f"remove them from the list"
+    )
