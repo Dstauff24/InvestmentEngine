@@ -264,3 +264,81 @@ def test_beating_a_weak_baseline_is_not_enough_under_the_floor(tmp_path, capsys)
     capsys.readouterr()
     assert run_check(path, extra=["--floor"]) == 1
     assert "floor MISSED" in capsys.readouterr().out
+
+
+# ── the standard-error margin ───────────────────────────────────────────────
+
+
+def _dispersed_run(tmp_path: Path, *, baseline_mean: float, arm_mean: float, spread: float = 1.0):
+    """A run whose R multiples DISPERSE, so a standard error exists.
+
+    `write_run` gives every row the same net R, which makes the sd zero and any
+    difference infinitely significant — fine for the other criteria, useless
+    for this one.
+    """
+    lines = [HEADER]
+    for i in range(120):
+        swing = spread if i % 2 else -spread
+        lines.append(row("baseline", hash_=OTHER, net_r=baseline_mean + swing, rr=4.0))
+        lines.append(row("verified", hash_=SHIPPED, net_r=arm_mean + swing, rr=4.0))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_difference_inside_one_standard_error_is_not_a_win(tmp_path, capsys):
+    """THE POINT OF THE FLAG. Two populations of a few hundred R multiples
+    differ by a tenth of an R from sampling alone, so "+0.22R beats +0.16R" is
+    not an answer until the spread is on the page beside it."""
+    path = _dispersed_run(tmp_path, baseline_mean=0.16, arm_mean=0.22, spread=1.0)
+    assert run_check(path) == 0, "it does beat the baseline"
+    capsys.readouterr()
+
+    assert run_check(path, extra=["--margin-se"]) == 1
+    out = capsys.readouterr().out
+    assert "by >1 SE on all three cuts : False" in out
+    assert "1SE" in out
+
+
+def test_a_difference_well_outside_the_spread_still_wins(tmp_path, capsys):
+    path = _dispersed_run(tmp_path, baseline_mean=0.0, arm_mean=1.2, spread=0.2)
+    assert run_check(path, extra=["--margin-se"]) == 0
+    assert "by >1 SE on all three cuts : True" in capsys.readouterr().out
+
+
+def test_the_margin_multiple_is_configurable(tmp_path, capsys):
+    # delta +0.40R against a combined SE of 0.13R: clears 1 SE and 2 SE, not 4.
+    path = _dispersed_run(tmp_path, baseline_mean=0.0, arm_mean=0.4, spread=1.0)
+    assert run_check(path, extra=["--margin-se", "2"]) == 0
+    capsys.readouterr()
+    assert run_check(path, extra=["--margin-se", "4"]) == 1
+    assert "by >4 SE" in capsys.readouterr().out
+
+
+def test_a_population_too_small_to_have_a_spread_fails_the_margin(tmp_path, capsys):
+    """An untestable criterion is a FAILED one, not a waived one: with one
+    trade there is no standard error, and "cannot tell" must not read as
+    "passed"."""
+    lines = [HEADER, row("baseline", hash_=OTHER, net_r=0.1, rr=4.0)]
+    lines.append(row("verified", hash_=SHIPPED, net_r=0.9, rr=4.0))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    assert run_check(path, extra=["--margin-se"]) == 1
+    assert "no SE: too few trades" in capsys.readouterr().out
+
+
+def test_the_spread_of_the_difference_is_the_conservative_one(tmp_path):
+    """`sqrt(se_a^2 + se_b^2)` assumes independence the arms do not have — a
+    tighter gate's trades are a SUBSET of a looser one's — which makes the bar
+    HIGHER than a paired test would. A challenger should have to overcome that
+    direction, not benefit from it."""
+    from backtest import metrics
+
+    path = _dispersed_run(tmp_path, baseline_mean=0.0, arm_mean=0.3, spread=1.0)
+    run = metrics.load_csv(path)
+    base = adoption_check.cut(run, "baseline", "post_earnings_drift", None)
+    arm = adoption_check.cut(run, "verified", "post_earnings_drift", None)
+    combined = adoption_check.margin_se(base, arm)
+    assert combined == pytest.approx((base.standard_error_r**2 + arm.standard_error_r**2) ** 0.5)
+    assert combined > base.standard_error_r

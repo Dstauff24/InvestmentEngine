@@ -29,7 +29,18 @@ D50:
      row count it kept, so a certification cannot quietly include the window
      the value was picked in.
 
-  4. **`--floor R`, for an arm whose DESIGN was informed by in-sample
+  4. **`--margin-se [N]`, when "better" has to mean "better than noise".**
+     Criterion (1) otherwise asks only whether one mean exceeds another, and
+     two populations of a few hundred R multiples differ by a tenth of an R
+     from sampling alone. With the flag, the arm must beat the baseline by more
+     than N standard errors of the DIFFERENCE on every cut, printed next to the
+     gap so the reader can see how close it was. The SE of the difference is
+     taken as `sqrt(se_a^2 + se_b^2)`, which assumes independence the two arms
+     do not have — a tighter gate's trades are a SUBSET of a looser one's — and
+     that makes the test CONSERVATIVE, which is the direction a challenger
+     should have to overcome.
+
+  5. **`--floor R`, for an arm whose DESIGN was informed by in-sample
      results.** Beating the baseline is not enough there: a geometry drawn to
      fix what v1 did wrong in a window will beat v1 in that window by
      construction, so the out-of-sample cut has to clear an absolute bar as
@@ -106,6 +117,15 @@ def within(trades, *, since: date | None, until: date | None) -> list:
     return out
 
 
+def margin_se(base, arm) -> float | None:
+    """SE of the difference between two populations' mean net R."""
+    first = base.standard_error_r if base else None
+    second = arm.standard_error_r if arm else None
+    if first is None or second is None:
+        return None
+    return (first**2 + second**2) ** 0.5
+
+
 def cut(run, arm: str, recipe: str, min_rr: float | None, *, since=None, until=None):
     rows = [t for t in run.trades if t.param_set == arm and t.recipe == recipe]
     rows = within(rows, since=since, until=until)
@@ -124,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", help="ISO date; keep trades CALLED on or after it (D50)")
     parser.add_argument("--until", help="ISO date; keep trades CALLED strictly before it")
     parser.add_argument(
+        "--margin-se",
+        dest="margin",
+        nargs="?",
+        const="1",
+        help="require the arm to beat the baseline by more than N standard errors of "
+        "the difference on every cut (bare flag = 1). Without it, criterion (1) asks "
+        "only whether one mean exceeds another.",
+    )
+    parser.add_argument(
         "--floor",
         nargs="?",
         const="d40",
@@ -135,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
 
     since = date.fromisoformat(args.since) if args.since else None
     until = date.fromisoformat(args.until) if args.until else None
+    margin = float(args.margin) if args.margin is not None else None
     floor = None
     if args.floor is not None:
         floor = (
@@ -194,6 +224,20 @@ def main(argv: list[str] | None = None) -> int:
         base_r = base.expectancy_r if base else None
         arm_r = arm.expectancy_r if arm else None
         better = arm_r is not None and base_r is not None and arm_r > base_r
+        gap_note = ""
+        if margin is not None:
+            spread = margin_se(base, arm)
+            needed = None if spread is None else margin * spread
+            if needed is None:
+                # Under two trades there is no standard error, so the margin
+                # test cannot be applied — and an untestable criterion is a
+                # FAILED one here, not a waived one.
+                better = False
+                gap_note = "  (no SE: too few trades)"
+            else:
+                delta = (arm_r or 0.0) - (base_r or 0.0)
+                better = better and delta > needed
+                gap_note = f"  d {delta:+.2f} vs {margin:g}SE {needed:.2f}"
         criteria_ok &= better
         if floor is not None:
             clears = arm_r is not None and arm_r >= floor
@@ -205,13 +249,18 @@ def main(argv: list[str] | None = None) -> int:
             suffix = f"  floor {'OK' if arm_r is not None and arm_r >= floor else 'MISSED'}"
         print(
             f"{label:<16} {_r(base_r):>14} {base.closed if base else 0:>8} "
-            f"{_r(arm_r):>18} {arm.closed if arm else 0:>8}  {better}{suffix}"
+            f"{_r(arm_r):>18} {arm.closed if arm else 0:>8}  {better}{gap_note}{suffix}"
         )
 
     sample_ok = bool(tier_b) and tier_b.closed >= metrics.MIN_SAMPLE
     positive_ok = bool(tier_b) and (tier_b.expectancy_r or 0) > 0
     print()
-    print(f"(1) {args.arm} beats {args.against} on all three cuts : {criteria_ok}")
+    beats = (
+        f"beats {args.against} by >{margin:g} SE on all three cuts"
+        if margin is not None
+        else f"beats {args.against} on all three cuts"
+    )
+    print(f"(1) {args.arm} {beats} : {criteria_ok}")
     print(
         f"(2) its R:R >= {gates.tier_b:g} cut has >= {metrics.MIN_SAMPLE} closed "
         f": {sample_ok} ({tier_b.closed if tier_b else 0})"

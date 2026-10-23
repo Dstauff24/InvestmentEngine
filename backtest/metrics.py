@@ -20,6 +20,7 @@ strategy whose edge disappears into it never had one.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import date
@@ -60,6 +61,20 @@ class Expectancy:
     def expectancy_r(self) -> float | None:
         """Mean NET R per CLOSED trade. The number strategy selection uses."""
         return statistics.fmean(self.net_rs) if self.net_rs else None
+
+    @property
+    def standard_error_r(self) -> float | None:
+        """Standard error of the mean net R: sd / sqrt(n).
+
+        What makes "+0.22R beats +0.16R" answerable. R multiples disperse
+        around ±1, so a few dozen trades carry an SE of 0.15R and a six-point
+        difference between two such populations is noise wearing a decimal
+        point. None under two trades, where the sd is undefined — not 0.0,
+        which would read as a certain measurement.
+        """
+        if len(self.net_rs) < 2:
+            return None
+        return statistics.stdev(self.net_rs) / math.sqrt(len(self.net_rs))
 
     @property
     def gross_expectancy_r(self) -> float | None:
