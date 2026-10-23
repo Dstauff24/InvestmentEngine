@@ -27,7 +27,16 @@ from datetime import date
 
 from core import config
 
-__all__ = ["Expectancy", "by_recipe", "by_recipe_and_regime", "render_report", "summarise"]
+__all__ = [
+    "Expectancy",
+    "Reachability",
+    "by_recipe",
+    "by_recipe_and_regime",
+    "reachability",
+    "render_reachability",
+    "render_report",
+    "summarise",
+]
 
 # D39(2): no weight or threshold moves on fewer than this many closed ideas.
 MIN_SAMPLE = 30
@@ -163,6 +172,123 @@ def by_recipe(trades: list) -> dict[str, Expectancy]:
     return summarise(trades, key=lambda t: t.recipe)
 
 
+@dataclass(frozen=True)
+class Reachability:
+    """Can a recipe's geometry even PRODUCE a plan the engine may act on?
+
+    A standing check, because O13 took three fixes to reach the question that
+    settled it. `base_breakout` was repaired until it fired 480 times, swept,
+    judged out of sample — and only then did anyone measure that its R:R runs
+    0.56 to 1.70, so **not one of its plans could pass D12's 2:1 gate.** Its
+    expectancy was computed over a population the live engine would have
+    refused in its entirety, which is a number about nothing.
+
+    The bound is arithmetic, not luck. A break fires when the close clears the
+    base high, so `close - base_low` is about one base depth; the stop sits
+    `stop_atr_buffer` ATR below the base low and TP2 is `tp2_depth_multiple`
+    depths above the close:
+
+        risk   = (close - base_low) + 0.5 ATR ~= depth + 0.5 ATR
+        reward = 1.8 x depth
+        R:R    = 1.8 x depth / (depth + 0.5 ATR)  <  1.8, for every depth
+
+    No value of depth or ATR reaches 2.0, so the Tier A gate is unreachable by
+    construction and Tier B's 3:1 doubly so. `pullback_to_trend` shows the same
+    symptom one step less severely — a median R:R of 0.85, with 4% of plans
+    clearing 2:1 — which is what recipe 1's v2 geometry exists to fix.
+
+    So every report prints this, per recipe, and FLAGS a zero: a recipe whose
+    plans can never clear a gate is not a weak strategy, it is a strategy the
+    engine cannot express.
+    """
+
+    recipe: str
+    plans: int
+    rr_min: float | None
+    rr_p25: float | None
+    rr_median: float | None
+    rr_p75: float | None
+    rr_max: float | None
+    share_tier_a: float | None
+    share_tier_b: float | None
+
+    @property
+    def unreachable(self) -> bool:
+        """No plan clears EITHER gate: nothing this recipe produced could
+        become an idea. None (no plans at all) is not unreachable — it is
+        unmeasured, and saying otherwise would condemn a recipe for being
+        switched off."""
+        return bool(self.plans) and not self.share_tier_a and not self.share_tier_b
+
+
+def reachability(trades: list, *, cfg=None) -> list[Reachability]:
+    """Per recipe: the R:R distribution of its PLANS and what share clears D12.
+
+    Measured over PLANS rather than closed trades, because the question is
+    whether the geometry can produce an actionable idea at all — a plan the
+    engine would refuse never gets the chance to close.
+    """
+    gates = (cfg or config.risk()).min_risk_reward
+    grouped: dict[str, list[float]] = {}
+    for trade in trades:
+        if trade.risk_reward is None:
+            continue
+        grouped.setdefault(trade.recipe, []).append(float(trade.risk_reward))
+
+    out: list[Reachability] = []
+    for recipe, values in sorted(grouped.items()):
+        ordered = sorted(values)
+        count = len(ordered)
+
+        def at(share: float, ordered=ordered, count=count) -> float:
+            return ordered[min(count - 1, max(0, round(share * (count - 1))))]
+
+        out.append(
+            Reachability(
+                recipe=recipe,
+                plans=count,
+                rr_min=ordered[0],
+                rr_p25=at(0.25),
+                rr_median=statistics.median(ordered),
+                rr_p75=at(0.75),
+                rr_max=ordered[-1],
+                share_tier_a=sum(v >= gates.tier_a for v in ordered) / count,
+                share_tier_b=sum(v >= gates.tier_b for v in ordered) / count,
+            )
+        )
+    return out
+
+
+def render_reachability(items: list[Reachability], *, cfg=None) -> list[str]:
+    """The section every report prints. Returns lines."""
+    gates = (cfg or config.risk()).min_risk_reward
+    lines = [
+        f"GATE REACHABILITY — can the geometry produce a plan D12 accepts? "
+        f"(Tier A >= {gates.tier_a:g}, Tier B >= {gates.tier_b:g})",
+        f"{'recipe':<24} {'plans':>6} {'min':>6} {'p25':>6} {'med':>6} {'p75':>6} "
+        f"{'max':>6} {'>=A':>7} {'>=B':>7}",
+        "-" * 118,
+    ]
+    if not items:
+        lines.append("  (no plans in the window)")
+        return lines
+    for item in items:
+        flag = "   << UNREACHABLE" if item.unreachable else ""
+        lines.append(
+            f"{item.recipe:<24} {item.plans:>6} {item.rr_min:>6.2f} {item.rr_p25:>6.2f} "
+            f"{item.rr_median:>6.2f} {item.rr_p75:>6.2f} {item.rr_max:>6.2f} "
+            f"{item.share_tier_a:>6.0%} {item.share_tier_b:>6.0%}{flag}"
+        )
+    blocked = [i.recipe for i in items if i.unreachable]
+    if blocked:
+        lines.append("")
+        lines.append(f"  UNREACHABLE: {', '.join(blocked)} — not one plan clears either gate, so")
+        lines.append("  every expectancy above for it is measured on a population the live")
+        lines.append("  engine would refuse. That is a GEOMETRY defect, not a weak edge: the")
+        lines.append("  stop and targets cannot span the gate (O13's bound).")
+    return lines
+
+
 def eligible(trades: list, *, min_rr: float) -> list:
     """The trades D12 would actually have let through.
 
@@ -246,6 +372,12 @@ def render_report(result) -> str:
                 item.label = f"{name} / {recipe}"
                 lines.append(_row(item))
         lines.append("")
+
+    # BEFORE the gated cuts, because it explains an empty one. A reader who
+    # meets "no plan cleared this gate" first will look for a thin sample; the
+    # reachability table says whether the geometry could ever have cleared it.
+    lines.extend(render_reachability(reachability(reference)))
+    lines.append("")
 
     gates = config.risk().min_risk_reward
     for tier, minimum in (("A", gates.tier_a), ("B", gates.tier_b)):

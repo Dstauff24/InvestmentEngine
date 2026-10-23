@@ -1249,3 +1249,128 @@ def test_the_selection_reads_each_axis_against_its_own_recipe():
     }
     chosen = sweep.selection([axis], by_set)["max_squeeze_percentile"]
     assert chosen.chosen == pytest.approx(0.2)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Gate reachability — can the geometry produce a plan D12 accepts?
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _Plan:
+    """A trade row with only what reachability reads."""
+
+    def __init__(self, recipe: str, risk_reward: float | None):
+        self.recipe = recipe
+        self.risk_reward = risk_reward
+
+
+def test_the_distribution_and_the_shares_are_measured_over_plans():
+    """Over PLANS, not closed trades: a plan the engine would refuse never
+    gets the chance to close, so counting closures would hide the refusal."""
+    trades = [_Plan("r", rr) for rr in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0)]
+    [item] = metrics.reachability(trades)
+    assert item.plans == 8
+    assert item.rr_min == pytest.approx(0.5)
+    assert item.rr_max == pytest.approx(5.0)
+    assert item.rr_median == pytest.approx(2.25)
+    assert item.share_tier_a == pytest.approx(5 / 8), "2.0 and above"
+    assert item.share_tier_b == pytest.approx(3 / 8), "3.0 and above"
+    assert item.unreachable is False
+
+
+def test_a_recipe_whose_plans_cannot_clear_either_gate_is_flagged():
+    """THE O13 CASE. `base_breakout` was repaired until it fired 480 times,
+    swept, and judged out of sample before anyone measured that its R:R runs
+    0.56 to 1.70 — so every expectancy it produced described a population the
+    live engine would have refused in its entirety."""
+    trades = [_Plan("base_breakout", rr) for rr in (0.56, 1.40, 1.53, 1.61, 1.70)]
+    [item] = metrics.reachability(trades)
+    assert item.share_tier_a == 0.0
+    assert item.share_tier_b == 0.0
+    assert item.unreachable is True
+
+    text = "\n".join(metrics.render_reachability([item]))
+    assert "UNREACHABLE" in text
+    assert "GEOMETRY defect, not a weak edge" in text
+
+
+def test_no_plans_at_all_is_unmeasured_not_unreachable():
+    """A recipe that is switched off produces nothing, and condemning it for
+    that would be the same confusion as reading an empty table as a quiet
+    market."""
+    assert metrics.reachability([]) == []
+    item = metrics.Reachability(
+        recipe="off",
+        plans=0,
+        rr_min=None,
+        rr_p25=None,
+        rr_median=None,
+        rr_p75=None,
+        rr_max=None,
+        share_tier_a=None,
+        share_tier_b=None,
+    )
+    assert item.unreachable is False
+
+
+def test_a_recipe_that_clears_only_tier_a_is_not_flagged():
+    """Tier B demands MORE (3:1, D12's compelling asymmetry), so clearing one
+    gate and not the other is a narrow recipe rather than a broken one."""
+    trades = [_Plan("r", rr) for rr in (2.1, 2.2, 2.3)]
+    [item] = metrics.reachability(trades)
+    assert item.share_tier_a == 1.0
+    assert item.share_tier_b == 0.0
+    assert item.unreachable is False
+
+
+def test_plans_with_no_risk_reward_are_skipped_not_counted_as_zero():
+    trades = [_Plan("r", None), _Plan("r", 4.0)]
+    [item] = metrics.reachability(trades)
+    assert item.plans == 1
+    assert item.share_tier_a == 1.0
+
+
+def test_the_gates_come_from_config():
+    """D12's numbers live in `risk.yaml`; a gate change must move this table
+    rather than leaving it describing the old one."""
+    trades = [_Plan("r", rr) for rr in (1.0, 2.5, 4.0)]
+    shipped = metrics.reachability(trades)[0]
+    assert shipped.share_tier_a == pytest.approx(2 / 3)
+
+    from core import config as core_config
+
+    loosened = core_config.RiskConfig.model_validate(
+        {
+            **core_config.risk().model_dump(),
+            "min_risk_reward": {"tier_a": 1.0, "tier_b": 2.0},
+        }
+    )
+    relaxed = metrics.reachability(trades, cfg=loosened)[0]
+    assert relaxed.share_tier_a == 1.0
+    assert relaxed.share_tier_b == pytest.approx(2 / 3)
+
+
+def test_every_report_prints_the_reachability_section():
+    """STANDING, not on request: the check exists because the question was
+    asked three fixes too late once."""
+    from backtest.metrics import CsvRun, CsvTrade
+
+    trade = CsvTrade(
+        param_set="baseline",
+        commit="abc1234",
+        config_hash="deadbeef",
+        dirty=False,
+        recipe="base_breakout",
+        regime="bull_calm",
+        outcome="timeout",
+        symbol="AAPL",
+        called_on=date(2025, 1, 2),
+        risk_reward=1.7,
+        entry=100.0,
+        gross_r=0.1,
+        net_r=0.1,
+        days_held=30,
+    )
+    text = metrics.render_report(CsvRun(trades=[trade], start="a", end="b", symbols=1))
+    assert "GATE REACHABILITY" in text
+    assert "<< UNREACHABLE" in text
