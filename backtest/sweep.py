@@ -17,6 +17,26 @@ RSI readings and gap sizes actually occur — and places the candidate values at
 percentiles of that distribution. A sweep over invented values would test
 whether the engine likes round numbers.
 
+**D50: THE VALUE IS PICKED BY A RULE, AND NOT IN THE WINDOW IT IS JUDGED IN.**
+Two guards, both mechanical, because a human reading a sweep table picks the
+best cell and a best cell is often noise:
+
+  1. **Centre of the widest positive plateau** (`plateau_choice`). A swept value
+     qualifies on positive expectancy AND D39(2)'s 30 closed trades; the chosen
+     value must have a QUALIFYING NEIGHBOUR ON EACH SIDE, so a lone spike —
+     one good cell between two bad ones — disqualifies itself. No plateau means
+     no value is picked, and for a dormant recipe that means it stays dormant.
+     A plateau is a claim that the result survives the gate being slightly
+     wrong, which is the only kind of result worth shipping.
+  2. **Split sample.** Selection runs on an IN-SAMPLE window and the adoption
+     criteria are then applied to a LATER, non-overlapping one. `--start` and
+     `--end` must be given explicitly: without them this module REFUSES to
+     print a selection, because a table whose window nobody pinned is a table
+     somebody will pick from.
+
+The axis must also carry at least `MIN_AXIS_VALUES` candidates, or "is this a
+plateau or a spike" is not a question the output can answer.
+
 **ONE AXIS AT A TIME, FROM THE BASELINE.** Not a grid. A grid of five axes is
 hundreds of configurations whose interactions cannot be read off the output,
 and the question here is narrower and answerable: with everything else as
@@ -47,7 +67,21 @@ from features import technical as technical_features
 
 log = logging.getLogger(__name__)
 
-__all__ = ["Axis", "Distributions", "axes_from", "measure", "param_sets_for", "run"]
+__all__ = [
+    "Axis",
+    "Distributions",
+    "Plateau",
+    "Point",
+    "axes_from",
+    "measure",
+    "param_sets_for",
+    "plateau_choice",
+    "run",
+]
+
+# D50. Fewer candidates than this and a "plateau" cannot be distinguished from
+# a spike, so the rule would be decoration.
+MIN_AXIS_VALUES = 5
 
 # Every quantity an existence gate reads, with the parameter that gates it.
 GATED = {
@@ -140,6 +174,104 @@ def measure(
 
 
 @dataclass(frozen=True)
+class Point:
+    """One swept value's result for the recipe its gate belongs to."""
+
+    value: float
+    expectancy_r: float | None
+    closed: int
+
+    @property
+    def qualifies(self) -> bool:
+        """Positive expectancy on a population D39(2) will look at."""
+        return (
+            self.expectancy_r is not None
+            and self.expectancy_r > 0
+            and self.closed >= metrics_min_sample()
+        )
+
+
+@dataclass(frozen=True)
+class Plateau:
+    """What D50's rule returns: a value, or a refusal, and why either way."""
+
+    chosen: float | None
+    reason: str
+    members: tuple[float, ...] = ()
+
+    def __str__(self) -> str:
+        head = "no value" if self.chosen is None else f"{self.chosen:g}"
+        return f"{head} — {self.reason}"
+
+
+def metrics_min_sample() -> int:
+    from backtest.metrics import MIN_SAMPLE
+
+    return MIN_SAMPLE
+
+
+def plateau_choice(points: list[Point]) -> Plateau:
+    """D50's selection rule, applied mechanically.
+
+    The centre of the WIDEST run of consecutive qualifying values, where
+    qualifying is positive expectancy with at least D39(2)'s 30 closed trades.
+    A run must be at least three values long, which is what makes "both
+    neighbours qualify" true of its centre and what disqualifies a lone spike.
+
+    The tie-breaks are stated rather than left to list order, because a rule
+    whose answer depends on iteration order is not a rule:
+
+      * even-length run -> the LOWER of the two middles, the tighter gate;
+      * runs of equal width -> the one whose WEAKEST member is strongest, since
+        a plateau is only as good as the cell you might land on by accident;
+      * still tied -> the lower value.
+    """
+    ordered = sorted(points, key=lambda p: p.value)
+    if len(ordered) < MIN_AXIS_VALUES:
+        return Plateau(
+            None,
+            f"only {len(ordered)} value(s) on the axis, under the {MIN_AXIS_VALUES} a "
+            f"plateau needs to be distinguishable from a spike",
+        )
+
+    runs: list[list[Point]] = []
+    current: list[Point] = []
+    for point in ordered:
+        if point.qualifies:
+            current.append(point)
+        else:
+            if current:
+                runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+
+    usable = [r for r in runs if len(r) >= 3]
+    if not usable:
+        best = max((len(r) for r in runs), default=0)
+        spike = " (a lone spike, which D50 disqualifies)" if best in (1, 2) else ""
+        return Plateau(
+            None,
+            f"no plateau: the longest run of qualifying values is {best}{spike}, and "
+            f"the centre of a plateau must have a qualifying neighbour on each side",
+        )
+
+    def rank(run: list[Point]) -> tuple:
+        weakest = min(p.expectancy_r or 0.0 for p in run)
+        return (len(run), weakest, -run[0].value)
+
+    chosen_run = max(usable, key=rank)
+    middle = chosen_run[(len(chosen_run) - 1) // 2]
+    return Plateau(
+        middle.value,
+        f"centre of a {len(chosen_run)}-wide plateau "
+        f"({', '.join(f'{p.value:g}' for p in chosen_run)}), weakest member "
+        f"{min(p.expectancy_r or 0.0 for p in chosen_run):+.2f}R",
+        tuple(p.value for p in chosen_run),
+    )
+
+
+@dataclass(frozen=True)
 class Axis:
     """One parameter, the values to try, and where they came from."""
 
@@ -182,7 +314,7 @@ def axes_from(distributions: Distributions, *, cfg=None) -> list[Axis]:
     # the base detector, which is what lets the live distribution set the range
     # here while `max_base_depth_pct` below has to be swept around its shipped
     # value.
-    squeeze = at("squeeze_percentile", 0.10, 0.25, 0.50)
+    squeeze = at("squeeze_percentile", 0.05, 0.10, 0.20, 0.30, 0.40, 0.50)
     if squeeze:
         axes.append(
             Axis(
@@ -190,8 +322,9 @@ def axes_from(distributions: Distributions, *, cfg=None) -> list[Axis]:
                 values=tuple(v for v in squeeze if 0 < v < 1),
                 rationale=(
                     f"shipped {scoring.recipes.base_breakout.max_squeeze_percentile:g}; "
-                    f"measured p10 {squeeze[0]:g} / p25 {squeeze[1]:g} of where "
-                    f"volatility sits in each symbol's own year"
+                    f"six candidates from p05 {squeeze[0]:g} to p50 {squeeze[-1]:g} of "
+                    f"where volatility sits in each symbol's own year — D50 needs "
+                    f"{MIN_AXIS_VALUES} to tell a plateau from a spike"
                 ),
             )
         )
@@ -320,20 +453,31 @@ def run(
     symbols: list[str] | None = None,
     sample: int | None = 60,
     years: int = 3,
+    start: date | None = None,
+    end: date | None = None,
     workers: int = 1,
     as_of: date | None = None,
     distributions: Distributions | None = None,
     allow_dirty: bool = False,
     overrides: list[str] | None = None,
-) -> tuple[Distributions, dict[str, dict[str, Expectancy]]]:
-    """Measure, build the axes, walk every parameter set, group the results."""
+) -> tuple[Distributions, dict[str, dict[str, Expectancy]], list[Axis]]:
+    """Measure, build the axes, walk every parameter set, group the results.
+
+    `start`/`end` pin the window. Under D50 a sweep used for SELECTION must
+    pin it, and `render` refuses to print a chosen value when it was not.
+    """
     today = as_of or clock.session_date()
     universe = symbols if symbols is not None else db.active_symbols()
     if sample:
         universe = universe[:sample]
 
     baseline = baseline_with(overrides)
-    measured = distributions or measure(symbols=universe, as_of=today, years=years, sample=None)
+    # The distributions are measured over the SAME window the walk uses, so the
+    # percentiles that place the candidates describe the data being judged.
+    measure_years = years if start is None else max(1, round((today - start).days / 365))
+    measured = distributions or measure(
+        symbols=universe, as_of=end or today, years=measure_years, sample=None
+    )
     axes = axes_from(measured, cfg=baseline)
     sets = param_sets_for(axes, cfg=baseline)
     log.info("sweeping %d configuration(s) over %d symbol(s)", len(sets), len(universe))
@@ -341,6 +485,8 @@ def run(
     result = run_engine(
         symbols=universe,
         years=years,
+        start=start,
+        end=end,
         param_sets=sets,
         as_of=today,
         workers=workers,
@@ -351,7 +497,36 @@ def run(
     for name in result.param_sets:
         trades = [t for t in result.trades if t.param_set == name]
         by_set[name] = summarise(trades, key=lambda t: t.recipe)
-    return measured, by_set
+    return measured, by_set, axes
+
+
+def selection(
+    axes: list[Axis],
+    by_set: dict[str, dict[str, Expectancy]],
+) -> dict[str, Plateau]:
+    """D50's rule applied to every axis in the table. {axis name: Plateau}.
+
+    The recipe an axis belongs to is read off the parameter path, so the rule
+    is applied to the population the gate actually admits — judging a
+    `base_breakout` gate by the drift recipe's trades would be meaningless and
+    is the kind of mistake a hand-read table invites.
+    """
+    out: dict[str, Plateau] = {}
+    for axis in axes:
+        recipe = axis.path.split(".")[1]
+        points = []
+        for value in axis.values:
+            arm = by_set.get(f"{axis.name}={value:g}", {})
+            item = arm.get(recipe)
+            points.append(
+                Point(
+                    value=value,
+                    expectancy_r=item.expectancy_r if item else None,
+                    closed=item.closed if item else 0,
+                )
+            )
+        out[axis.name] = plateau_choice(points)
+    return out
 
 
 def render(
@@ -359,12 +534,18 @@ def render(
     by_set: dict[str, dict[str, Expectancy]],
     *,
     overrides: list[str] | None = None,
+    axes: list[Axis] | None = None,
+    window: tuple[date | None, date | None] | None = None,
 ) -> str:
     lines = ["=" * 100, "D43 EXISTENCE-GATE SWEEP", "=" * 100, ""]
     if overrides:
         # Printed, because every arm below ran with these on and a reader who
         # cannot see them would take the table for the shipped configuration.
         lines.append(f"APPLIED TO EVERY ARM: {', '.join(overrides)}")
+        lines.append("")
+    pinned = bool(window and window[0] and window[1])
+    if pinned:
+        lines.append(f"SELECTION WINDOW: {window[0]} .. {window[1]} (D50: in-sample)")
         lines.append("")
     lines.append("MEASURED DISTRIBUTIONS (these set the sweep range, not taste)")
     lines.append(str(measured))
@@ -383,6 +564,28 @@ def render(
                 + ("" if item.sufficient else "  (n<30)")
             )
     lines.append("")
+    lines.append("D50 SELECTION (centre of the widest positive plateau, >=30 closed each)")
+    lines.append("-" * 100)
+    if not pinned:
+        lines.append(
+            "  NOT A SELECTION RUN: no explicit --start/--end, so no value may be picked "
+            "from this table."
+        )
+        lines.append(
+            "  A window nobody pinned is a window somebody will pick from after seeing "
+            "the answer (D50)."
+        )
+    elif not axes:
+        lines.append("  no axes")
+    else:
+        for name, plateau in selection(axes, by_set).items():
+            lines.append(f"  {name:<28} {plateau}")
+        lines.append("")
+        lines.append(
+            "  A chosen value is a PROPOSAL. D50 certifies it on the LATER window, "
+            "with the adoption criteria applied there alone."
+        )
+    lines.append("")
     lines.append(
         "One axis at a time from the baseline. A row that fires MORE and keeps its "
         "expectancy is a gate that was too tight;"
@@ -398,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--sample", type=int, default=60, help="symbols to sweep")
     parser.add_argument("--years", type=int, default=3)
+    parser.add_argument("--start", help="ISO start date; D50 REQUIRES it for a selection run")
+    parser.add_argument("--end", help="ISO end date")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--symbols", nargs="*")
     parser.add_argument(
@@ -432,15 +637,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{axis.name:<28} {list(axis.values)}  [{kind}] — {axis.rationale}")
         return 0
 
-    measured, by_set = run(
+    start = date.fromisoformat(args.start) if args.start else None
+    end = date.fromisoformat(args.end) if args.end else None
+    measured, by_set, axes = run(
         symbols=args.symbols,
         sample=args.sample,
         years=args.years,
+        start=start,
+        end=end,
         workers=args.workers,
         allow_dirty=args.allow_dirty,
         overrides=args.overrides,
     )
-    print(render(measured, by_set, overrides=args.overrides))
+    print(
+        render(
+            measured,
+            by_set,
+            overrides=args.overrides,
+            axes=axes,
+            window=(start, end),
+        )
+    )
     return 0
 
 

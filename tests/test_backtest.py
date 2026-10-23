@@ -629,14 +629,18 @@ def test_param_sets_skip_a_rejected_value_and_keep_the_rest():
 
 def test_the_sweep_range_comes_from_the_measured_distribution():
     distributions = sweep.Distributions()
-    for value in [0.1, 0.2, 0.3, 0.5, 0.9]:
+    for value in [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.9]:
         distributions.add("squeeze_percentile", value)
     for value in [1.0, 2.0, 3.0]:
         distributions.add("gap_up_pct", value)
 
     axes = {axis.name: axis for axis in sweep.axes_from(distributions)}
-    assert axes["max_squeeze_percentile"].values[0] == pytest.approx(0.1)
-    assert "measured p10" in axes["max_squeeze_percentile"].rationale
+    squeeze = axes["max_squeeze_percentile"]
+    assert squeeze.values[0] == pytest.approx(0.05), "placed at the measured p05"
+    assert len(squeeze.values) >= sweep.MIN_AXIS_VALUES, (
+        "D50 needs enough candidates to tell a plateau from a spike"
+    )
+    assert "p05" in squeeze.rationale
 
 
 def test_the_depth_axis_says_it_cannot_use_its_own_measurement():
@@ -895,3 +899,190 @@ def test_the_sweep_report_prints_the_overrides_every_arm_ran_with():
     configuration."""
     text = sweep.render(sweep.Distributions(), {}, overrides=["recipes.base_breakout.enabled=true"])
     assert "APPLIED TO EVERY ARM: recipes.base_breakout.enabled=true" in text
+
+
+def test_engine_overrides_apply_to_the_baseline_and_every_variant():
+    """`--with` is how a dormant recipe gets walked (O13). The baseline must
+    carry the override too, or the comparison is against a configuration that
+    fires nothing."""
+    from backtest.engine import _param_sets
+
+    sets = _param_sets(
+        ["recipes.base_breakout.max_squeeze_percentile=0.4"],
+        ["recipes.base_breakout.enabled=true"],
+    )
+    assert [s.name for s in sets] == ["baseline", "max_squeeze_percentile=0.4"]
+    assert all(s.cfg.recipes.base_breakout.enabled for s in sets)
+    assert sets[0].cfg.recipes.base_breakout.max_squeeze_percentile == pytest.approx(0.25)
+    assert sets[1].cfg.recipes.base_breakout.max_squeeze_percentile == pytest.approx(0.4)
+    assert config.scoring().recipes.base_breakout.enabled is False, "the file is untouched"
+
+
+def test_an_overridden_baseline_cannot_certify_the_shipped_config():
+    """The citation consequence, stated as a test: if the baseline arm is not
+    the shipped config, its hash differs, and `adoption_check` is supposed to
+    call that a mismatch rather than wave it through."""
+    from backtest.engine import _param_sets
+    from backtest.provenance import config_hash
+
+    overridden = _param_sets(None, ["recipes.base_breakout.enabled=true"])[0]
+    assert overridden.config_hash != config_hash(config.scoring())
+    assert _param_sets(None, None)[0].config_hash == config_hash(config.scoring())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D50: the value is picked by a rule, not by eye
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _points(*rows) -> list[sweep.Point]:
+    """(value, expectancy, closed) triples."""
+    return [sweep.Point(value=v, expectancy_r=r, closed=n) for v, r, n in rows]
+
+
+def test_the_centre_of_the_widest_plateau_is_chosen():
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, -0.10, 40),
+            (0.10, +0.20, 45),
+            (0.20, +0.30, 50),
+            (0.30, +0.15, 60),
+            (0.40, -0.05, 70),
+            (0.50, +0.40, 80),
+        )
+    )
+    assert chosen.chosen == pytest.approx(0.20)
+    assert chosen.members == (0.10, 0.20, 0.30)
+    assert "3-wide plateau" in chosen.reason
+
+
+def test_a_lone_spike_is_disqualified():
+    """THE WHOLE POINT OF THE RULE. 0.30 is the best cell in the table and it
+    sits between two losers, so it is noise until proven otherwise — and a
+    human reading the table picks it."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, -0.10, 40),
+            (0.10, -0.20, 45),
+            (0.20, -0.05, 50),
+            (0.30, +0.90, 60),
+            (0.40, -0.15, 70),
+            (0.50, -0.30, 80),
+        )
+    )
+    assert chosen.chosen is None
+    assert "lone spike" in chosen.reason
+
+
+def test_a_thin_population_does_not_qualify_however_good_it_looks():
+    """D39(2)'s floor, inside the selection rule: 29 closed trades at +2R is
+    not a plateau member, so three of them are not a plateau."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, +2.00, 5),
+            (0.10, +2.00, 12),
+            (0.20, +2.00, 29),
+            (0.30, -0.10, 60),
+            (0.40, -0.15, 70),
+            (0.50, -0.30, 80),
+        )
+    )
+    assert chosen.chosen is None
+    assert "no plateau" in chosen.reason
+
+
+def test_no_plateau_means_no_value_is_picked():
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, +0.10, 40),
+            (0.10, -0.20, 45),
+            (0.20, +0.30, 50),
+            (0.30, -0.15, 60),
+            (0.40, +0.05, 70),
+        )
+    )
+    assert chosen.chosen is None
+
+
+def test_an_even_plateau_takes_the_lower_middle():
+    """Stated tie-break: the tighter gate. A rule whose answer depends on
+    iteration order is not a rule."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, -0.10, 40),
+            (0.10, +0.20, 45),
+            (0.20, +0.30, 50),
+            (0.30, +0.25, 60),
+            (0.40, +0.15, 70),
+            (0.50, -0.30, 80),
+        )
+    )
+    assert chosen.members == (0.10, 0.20, 0.30, 0.40)
+    assert chosen.chosen == pytest.approx(0.20)
+
+
+def test_equal_width_plateaus_are_broken_by_their_weakest_member():
+    """A plateau is only as good as the cell you might land on by accident."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.05, +0.05, 40),
+            (0.10, +0.06, 45),
+            (0.20, +0.05, 50),
+            (0.30, -0.50, 60),
+            (0.40, +0.30, 70),
+            (0.50, +0.31, 80),
+            (0.60, +0.29, 90),
+        )
+    )
+    assert chosen.members == (0.40, 0.50, 0.60)
+    assert chosen.chosen == pytest.approx(0.50)
+
+
+def test_too_few_candidates_cannot_answer_the_question():
+    chosen = sweep.plateau_choice(_points((0.1, +0.2, 40), (0.25, +0.3, 50), (0.5, +0.1, 60)))
+    assert chosen.chosen is None
+    assert "under the 5" in chosen.reason
+
+
+def test_an_unpinned_window_refuses_to_print_a_selection():
+    """D50's second guard, enforced in the renderer: a table whose window
+    nobody pinned is a table somebody will pick from after seeing the
+    answer."""
+    text = sweep.render(sweep.Distributions(), {}, axes=[], window=None)
+    assert "NOT A SELECTION RUN" in text
+    assert "SELECTION WINDOW" not in text
+
+    pinned = sweep.render(
+        sweep.Distributions(),
+        {},
+        axes=[],
+        window=(date(2022, 10, 1), date(2024, 10, 1)),
+    )
+    assert "SELECTION WINDOW: 2022-10-01 .. 2024-10-01" in pinned
+
+
+def test_the_selection_reads_each_axis_against_its_own_recipe():
+    """An axis is judged on the population its gate admits. Judging a
+    `base_breakout` gate by the drift recipe's trades would be meaningless, and
+    a hand-read table invites exactly that."""
+    axis = sweep.Axis(
+        path="recipes.base_breakout.max_squeeze_percentile",
+        values=(0.05, 0.1, 0.2, 0.3, 0.4),
+        rationale="measured",
+    )
+
+    def arm(expectancy, closed):
+        item = metrics.Expectancy(label="base_breakout")
+        item.closed = closed
+        item.net_rs = [expectancy] * closed
+        return {"base_breakout": item, "post_earnings_drift": metrics.Expectancy(label="drift")}
+
+    by_set = {
+        "max_squeeze_percentile=0.05": arm(-0.1, 40),
+        "max_squeeze_percentile=0.1": arm(0.2, 40),
+        "max_squeeze_percentile=0.2": arm(0.3, 40),
+        "max_squeeze_percentile=0.3": arm(0.1, 40),
+        "max_squeeze_percentile=0.4": arm(-0.2, 40),
+    }
+    chosen = sweep.selection([axis], by_set)["max_squeeze_percentile"]
+    assert chosen.chosen == pytest.approx(0.2)

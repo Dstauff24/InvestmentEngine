@@ -4,7 +4,11 @@
     python scripts/adoption_check.py data/backtest_d48_evidence.csv \
         --arm beat_source=verified
 
-Two jobs, and the second one exists because of a mistake:
+    python scripts/adoption_check.py data/backtest_o13_certifying.csv \
+        --arm max_squeeze_percentile=0.2 --since 2024-10-01 --until 2026-10-01
+
+Three jobs now; the second exists because of a mistake and the third because of
+D50:
 
   1. **Apply the criteria** to a certifying run: the named arm must beat the
      baseline on all three cuts (all plans, Tier A's R:R gate, Tier B's), and
@@ -19,8 +23,14 @@ Two jobs, and the second one exists because of a mistake:
      caught it. A citation nobody can check is not a citation, and a sorted set
      is exactly how you end up citing the wrong half of your own experiment.
 
-So every hash is printed next to the arm that produced it, and the shipped
-config is compared to the named arm by value, loudly.
+  3. **Apply them to ONE WINDOW.** D50 selects a value on an in-sample window
+     and certifies it on a later, non-overlapping one. `--since`/`--until`
+     filter by `called_on`, and the window is printed in the header with the
+     row count it kept, so a certification cannot quietly include the window
+     the value was picked in.
+
+So every hash is printed next to the arm that produced it, the shipped config
+is compared to the named arm by value, loudly, and the window is stated.
 
 Exit code 0 only when the criteria hold AND the citation matches. Reads a CSV
 and the config; no network, no database.
@@ -30,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,8 +83,22 @@ def certifying_problems(arms: dict[str, dict]) -> list[str]:
     return problems
 
 
-def cut(run, arm: str, recipe: str, min_rr: float | None):
+def within(trades, *, since: date | None, until: date | None) -> list:
+    """Trades CALLED inside the window. Filtered on `called_on`, not on the
+    exit: a trade belongs to the window that produced the decision, and
+    filtering on the exit would push a trade into the window it was still open
+    in and count the same decision in two places."""
+    out = trades
+    if since:
+        out = [t for t in out if t.called_on >= since]
+    if until:
+        out = [t for t in out if t.called_on < until]
+    return out
+
+
+def cut(run, arm: str, recipe: str, min_rr: float | None, *, since=None, until=None):
     rows = [t for t in run.trades if t.param_set == arm and t.recipe == recipe]
+    rows = within(rows, since=since, until=until)
     if min_rr is not None:
         rows = metrics.eligible(rows, min_rr=min_rr)
     return metrics.by_recipe(rows).get(recipe)
@@ -86,11 +111,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--arm", required=True, help="the param set being adopted")
     parser.add_argument("--against", default=BASELINE, help=f"comparison arm (default {BASELINE})")
     parser.add_argument("--recipe", default="post_earnings_drift")
+    parser.add_argument("--since", help="ISO date; keep trades CALLED on or after it (D50)")
+    parser.add_argument("--until", help="ISO date; keep trades CALLED strictly before it")
     args = parser.parse_args(argv)
+
+    since = date.fromisoformat(args.since) if args.since else None
+    until = date.fromisoformat(args.until) if args.until else None
 
     run = metrics.load_csv(args.csv)
     arms = arm_map(run)
-    print(f"{args.csv}: {len(run.trades)} rows, {run.symbols} symbols\n")
+    print(f"{args.csv}: {len(run.trades)} rows, {run.symbols} symbols")
+    if since or until:
+        kept = within(run.trades, since=since, until=until)
+        print(
+            f"WINDOW (D50): called_on in [{since or '-'}, {until or '-'}) — "
+            f"{len(kept)} of {len(run.trades)} rows kept"
+        )
+    else:
+        print("WINDOW: the whole run (no --since/--until; not a D50 certification)")
+    print()
 
     # ── the mapping, explicitly ──────────────────────────────────────────────
     print(f"{'arm (param set)':<34} {'config hash':<14} {'commit':<10} {'rows':>6}  clean")
@@ -124,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         (f"R:R >= {gates.tier_a:g}", gates.tier_a),
         (f"R:R >= {gates.tier_b:g}", gates.tier_b),
     ):
-        base, arm = cut(run, args.against, args.recipe, rr), cut(run, args.arm, args.recipe, rr)
+        base = cut(run, args.against, args.recipe, rr, since=since, until=until)
+        arm = cut(run, args.arm, args.recipe, rr, since=since, until=until)
         base_r = base.expectancy_r if base else None
         arm_r = arm.expectancy_r if arm else None
         better = arm_r is not None and base_r is not None and arm_r > base_r

@@ -645,17 +645,26 @@ def _as_date(value) -> date:
     return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
 
 
-def _param_sets(variants: list[str] | None) -> list[ParamSet]:
+def _param_sets(variants: list[str] | None, overrides: list[str] | None = None) -> list[ParamSet]:
     """The baseline, plus one set per `--variant path=value`.
 
     Walked TOGETHER rather than in separate runs, because the features are the
     expensive part: a gate-only override shares them, so comparing two
     configurations over four years costs barely more than measuring one. It
     also removes the question of whether the two runs saw the same data.
-    """
-    from backtest.sweep import with_override
 
-    sets = [ParamSet.baseline()]
+    `overrides` (`--with`) apply to the baseline AND to every variant — the way
+    to walk a DORMANT recipe without editing the shipped config (O13). Note
+    what that does to a citation: the baseline arm's `config_hash` then
+    describes the overridden configuration, so `scripts/adoption_check.py` will
+    report a MISMATCH against the shipped tree, which is the honest answer. A
+    run whose baseline is not the shipped config cannot certify the shipped
+    config.
+    """
+    from backtest.sweep import baseline_with, with_override
+
+    base = baseline_with(overrides)
+    sets = [ParamSet(name="baseline", cfg=base)]
     for item in variants or []:
         path, _, raw = item.partition("=")
         if not raw:
@@ -663,7 +672,7 @@ def _param_sets(variants: list[str] | None) -> list[ParamSet]:
         sets.append(
             ParamSet(
                 name=f"{path.rsplit('.', 1)[-1]}={raw}",
-                cfg=with_override(config.scoring(), path.strip(), _coerce(raw.strip())),
+                cfg=with_override(base, path.strip(), _coerce(raw.strip())),
             )
         )
     return sets
@@ -708,6 +717,15 @@ def main(argv: list[str] | None = None) -> int:
         "recipes.post_earnings_drift.beat_source=verified. Repeatable. Gate-only "
         "overrides share the baseline's features, so the comparison is nearly free.",
     )
+    parser.add_argument(
+        "--with",
+        dest="overrides",
+        action="append",
+        metavar="PATH=VALUE",
+        help="apply to the baseline AND every variant, e.g. "
+        "recipes.base_breakout.enabled=true — the way to walk a dormant recipe "
+        "without editing the shipped config; the baseline then no longer certifies it",
+    )
     parser.add_argument("--out", help="write every trade to this CSV")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
@@ -720,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     if symbols is None and args.sample:
         symbols = db.active_symbols()[: args.sample]
     result = run(
-        param_sets=_param_sets(args.variant),
+        param_sets=_param_sets(args.variant, args.overrides),
         symbols=symbols,
         start=date.fromisoformat(args.start) if args.start else None,
         end=date.fromisoformat(args.end) if args.end else None,

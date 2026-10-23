@@ -24,9 +24,18 @@ HEADER = (
 )
 
 
-def row(arm: str, *, hash_: str, net_r: float, rr: float, commit="242301c", dirty="0") -> str:
+def row(
+    arm: str,
+    *,
+    hash_: str,
+    net_r: float,
+    rr: float,
+    commit="242301c",
+    dirty="0",
+    called_on="2024-03-01",
+) -> str:
     return (
-        f"{arm},{commit},{hash_},{dirty},AAPL,Tech,post_earnings_drift,2024-03-01,"
+        f"{arm},{commit},{hash_},{dirty},AAPL,Tech,post_earnings_drift,{called_on},"
         f"bull_calm,{rr},target_2,100.0,{net_r},{net_r},7"
     )
 
@@ -172,3 +181,41 @@ def test_naming_an_arm_the_file_does_not_have_says_what_it_has(tmp_path, capsys)
     out = capsys.readouterr().out
     assert "no such arm" in out
     assert "'baseline'" in out and "'verified'" in out
+
+
+# ── D50: the criteria are applied to ONE window ─────────────────────────────
+
+
+def test_a_window_keeps_only_the_trades_called_inside_it(tmp_path, capsys):
+    """D50 selects a value on one window and certifies it on a later one, so a
+    certification must be able to EXCLUDE the window the value was picked in."""
+    lines = [HEADER]
+    # In-sample: the arm looks terrible. Out-of-sample: it wins.
+    for _ in range(40):
+        lines.append(row("baseline", hash_=OTHER, net_r=0.50, rr=4.0, called_on="2023-03-01"))
+        lines.append(row("verified", hash_=SHIPPED, net_r=-0.20, rr=4.0, called_on="2023-03-01"))
+        lines.append(row("baseline", hash_=OTHER, net_r=0.10, rr=4.0, called_on="2025-03-01"))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.60, rr=4.0, called_on="2025-03-01"))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    assert run_check(path, extra=["--since", "2024-10-01", "--until", "2026-10-01"]) == 0
+    out = capsys.readouterr().out
+    assert "WINDOW (D50): called_on in [2024-10-01, 2026-10-01) — 80 of 160 rows kept" in out
+    assert "+0.60R" in out
+
+    # The same file, judged on the earlier window, must FAIL — otherwise the
+    # filter is not doing anything.
+    assert run_check(path, extra=["--since", "2022-10-01", "--until", "2024-10-01"]) == 1
+
+
+def test_without_a_window_the_header_says_it_is_not_a_certification(tmp_path, capsys):
+    """A run judged over its whole span cannot be a D50 certification, and the
+    header says so rather than leaving the reader to notice."""
+    run_check(write_run(tmp_path))
+    assert "not a D50 certification" in capsys.readouterr().out
+
+
+def test_a_window_that_keeps_nothing_cannot_adopt(tmp_path, capsys):
+    assert run_check(write_run(tmp_path), extra=["--since", "2030-01-01"]) == 1
+    assert "0 of 80 rows kept" in capsys.readouterr().out

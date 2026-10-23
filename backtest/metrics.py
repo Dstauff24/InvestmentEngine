@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from datetime import date
 
 from core import config
 
@@ -378,6 +379,9 @@ class CsvTrade:
     regime: str
     outcome: str
     symbol: str
+    called_on: date | None
+    """When the plan was formed. D50 windows are cut on THIS, not on the exit:
+    a trade belongs to the window that produced the decision."""
     risk_reward: float | None
     entry: float | None
     gross_r: float | None
@@ -424,6 +428,7 @@ def load_csv(path) -> CsvRun:
                     regime=row["regime"],
                     outcome=row["outcome"],
                     symbol=row["symbol"],
+                    called_on=_date(row.get("called_on")),
                     risk_reward=_float(row.get("risk_reward")),
                     entry=_float(row.get("entry")),
                     gross_r=_float(row.get("gross_r")),
@@ -432,6 +437,15 @@ def load_csv(path) -> CsvRun:
                 )
             )
     return CsvRun(trades=rows, start="(from csv)", end="(from csv)", symbols=len(symbols))
+
+
+def _date(value) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def _float(value) -> float | None:
