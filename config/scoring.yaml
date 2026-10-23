@@ -345,6 +345,15 @@ recipes:
     # companies beat a quarter while year-over-year growth is negative and the
     # proxy refused all of those. No number here, so no [OPEN] tag — a named
     # test pins it instead.
+    #
+    # CITATION REFRESHED 2026-10-23 on the fixed price basis (the mixed-basis
+    # defect, O13): run `1625c95` / scoring-config hash `a2fae6823605`, the
+    # same pre-registered criteria applied by script. All three cuts still
+    # favour `verified` (+0.27R vs +0.16R, +0.43 vs +0.29, +0.67 vs +0.34), and
+    # on D50's later window ALONE (2024-10..2026-10) so do they (+0.22 vs
+    # +0.16, +0.40 vs +0.30, +0.59 vs +0.36 on 107 closed). Not a re-decision:
+    # the numbers moved by hundredths, and the refresh exists so the citation
+    # names a config that still exists.
     beat_source: verified
     require_raised_guidance: true
     # D46: adopted at the D43 sweep's measured p75. The shipped 2.0% gave 96
