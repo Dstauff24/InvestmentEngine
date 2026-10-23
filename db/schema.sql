@@ -779,7 +779,7 @@ CREATE INDEX IF NOT EXISTS ix_positions_latest ON positions (as_of_date DESC, ac
 -- is what makes drift readable over time, and a single mutable row would lose
 -- the only history that shows a sleeve drifting.
 --
--- **`tax_type` IS NOT POPULATED BY THE SYNC.** Schwab's account `type` says
+-- **`tax_type` NEVER COMES FROM THE PAYLOAD.** Schwab's account `type` says
 -- CASH or MARGIN, which is a settlement mode and tells you nothing about tax
 -- treatment; a taxable brokerage and a Roth IRA both come back as CASH. So the
 -- tax type is OPERATOR-SUPPLIED configuration, and it is NULL until somebody
@@ -787,6 +787,14 @@ CREATE INDEX IF NOT EXISTS ix_positions_latest ON positions (as_of_date DESC, ac
 -- (D52: a guess in this layer is advice). The adviser REFUSES to recommend a
 -- sale in an account whose tax type it does not know, rather than assuming the
 -- cheaper answer.
+--
+-- Amended Oct 23 2026 (migration 018 kept the original wording, which said the
+-- sync populates nothing): the sync now STAMPS the operator's stated type from
+-- `accounts.single_account_tax_type`, and ONLY when exactly one account comes
+-- back. More than one REFUSES rather than stamping the second with the first
+-- one's treatment, which is also the tripwire that un-defers O17's
+-- multi-account work. The column is COALESCED on update, never assigned, so an
+-- evening that cannot say leaves a hand-set value in place.
 --
 -- `account_hash` is Schwab's own hash, which is what the API returns. The plain
 -- account number is never fetched and therefore cannot be stored.

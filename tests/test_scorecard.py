@@ -8,10 +8,12 @@ a week it cannot see.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
 from alerts import scorecard
+from decision import performance
 from shadow_book.analytics import Cell
 
 AS_OF = date(2026, 10, 23)  # a Friday
@@ -444,3 +446,56 @@ def test_a_step_that_failed_is_still_reported_before_the_run_is_due():
     _, body = scorecard.render(early)
     assert "WEEK IS PARTIAL" in body
     assert "TODAY'S RUN IS NOT DUE YET" not in body, "a failure outranks the schedule"
+
+
+# ── O17: the core layer's own scoreboard ────────────────────────────────────
+
+
+def test_the_account_section_prints_even_before_the_series_exists():
+    """The first Friday after the sync is deployed has one snapshot at most, so
+    there is no return to chain. Saying that is useful; omitting the section
+    would read as the engine having nothing to say about the account."""
+    _, body = scorecard.render(scorecard.build(as_of=AS_OF, week_start=MONDAY, now=AFTER_THE_RUN))
+    assert "RETURN ON CAPITAL" in body
+    assert "not measurable yet" in body
+
+
+def test_the_account_section_is_INDEPENDENT_of_the_shadow_book():
+    """D52 splits the engine in two, and this is where the split shows: the
+    core layer has a result whether or not the sleeve ever surfaces an idea, so
+    an empty book must not suppress it."""
+    card = scorecard.build(as_of=AS_OF, week_start=MONDAY, now=AFTER_THE_RUN)
+    assert card.book_is_empty
+    _, body = scorecard.render(card)
+    assert "THE SHADOW BOOK IS EMPTY" in body
+    assert "RETURN ON CAPITAL" in body
+
+
+def test_the_account_section_leads_with_the_time_weighted_number():
+    """A scorecard that printed balance growth as the headline would report a
+    deposit as a good week."""
+    account = performance.measure(
+        [
+            {
+                "as_of_date": MONDAY,
+                "account_hash": "ACC",
+                "total_value": Decimal("1000"),
+                "cash": Decimal("0"),
+            },
+            {
+                "as_of_date": AS_OF,
+                "account_hash": "ACC",
+                "total_value": Decimal("1100"),
+                "cash": Decimal("100"),
+            },
+        ],
+        [
+            {"as_of_date": MONDAY, "symbol": "VTI", "quantity": Decimal("10")},
+            {"as_of_date": AS_OF, "symbol": "VTI", "quantity": Decimal("10")},
+        ],
+    )
+    _, body = scorecard.render(
+        scorecard.build(as_of=AS_OF, week_start=MONDAY, now=AFTER_THE_RUN, account=account)
+    )
+    assert "time-weighted return   +0.00%" in body
+    assert "raw balance growth     +10.00%" in body

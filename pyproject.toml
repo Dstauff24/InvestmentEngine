@@ -48,6 +48,7 @@ ignore = [
 "backtest/sweep.py" = ["T20"]   # has a `python -m backtest.sweep` CLI
 "backtest/metrics.py" = ["T20"] # has a `python -m backtest.metrics` re-render CLI
 "shadow_book/analytics.py" = ["T20"]  # has a `python -m shadow_book.analytics` CLI
+"decision/performance.py" = ["T20"]   # has a `python -m decision.performance` CLI
 # ARG is unavoidable in tests: a pytest fixture requested for its side effect
 # but unused in the body trips ARG001 and CANNOT be renamed to `_name` without
 # breaking fixture resolution, and a stub's (*a, **k) signature has to match the

@@ -51,6 +51,7 @@ from datetime import date, datetime, timedelta
 
 from alerts import digest, notify
 from core import clock, db
+from decision import performance
 from shadow_book import analytics
 from shadow_book.outcome_tracker import in_call_basis
 
@@ -58,6 +59,12 @@ log = logging.getLogger(__name__)
 
 JOB_NAME = "weekly_scorecard"
 MAX_IDEAS_LISTED = 5
+
+# How far back the account's return is measured. A year is a REPORTING window,
+# not a strategy parameter: the series starts the first evening the positions
+# sync runs and the report prints its real first date, so this only bounds the
+# query rather than deciding what counts.
+PERFORMANCE_WINDOW_DAYS = 365
 
 __all__ = [
     "JOB_NAME",
@@ -179,6 +186,11 @@ class Scorecard:
     stats: list[dict] = field(default_factory=list)
     top_ideas: list[dict] = field(default_factory=list)
     incomplete: list[dict] = field(default_factory=list)
+    account: performance.Performance | None = None
+    """O17's return ON CAPITAL for the real account — the CORE layer's own
+    scoreboard, which D52 calls the primary product. Deliberately NOT part
+    of `book_is_empty`: the core layer has a result whether or not the
+    sleeve ever surfaces an idea, and that is the point of the split."""
 
     @property
     def book_is_empty(self) -> bool:
@@ -324,6 +336,7 @@ def collect(*, as_of: date | None = None) -> Scorecard:
             CANDIDATES_SQL, {"since": since, "as_of": day, "limit": MAX_IDEAS_LISTED}
         ),
         incomplete=incomplete,
+        account=performance.performance(day - timedelta(days=PERFORMANCE_WINDOW_DAYS)),
     )
 
 
@@ -369,12 +382,26 @@ def render(card: Scorecard) -> tuple[str, str]:
         lines += _closed_section(card)
         lines += _expectancy_section(card)
 
+    lines += _account_section(card)
+
     lines += [
         "",
         "Shadow Book: tracked, NOT actionable unless the recipe's ladder",
         "state says otherwise (D40).",
     ]
     return subject, "\n".join(lines)
+
+
+def _account_section(card: Scorecard) -> list[str]:
+    """The core layer's result, which is a different question from the sleeve's.
+
+    It is here rather than in the daily digest because a return on a single
+    day is noise, and because the weekly is where a saver looks. It prints
+    even before the series exists — "not measurable yet" is a true and useful
+    statement on the first Friday, where a missing section would read as the
+    engine having nothing to say about the account.
+    """
+    return ["", *performance.render(card.account).splitlines()]
 
 
 def _empty_book(card: Scorecard) -> list[str]:
