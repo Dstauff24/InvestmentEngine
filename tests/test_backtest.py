@@ -1073,12 +1073,14 @@ def test_an_even_plateau_takes_the_lower_middle():
 
 
 def test_equal_width_plateaus_are_broken_by_their_weakest_member():
-    """A plateau is only as good as the cell you might land on by accident."""
+    """A plateau is only as good as the cell you might land on by accident.
+    Both runs clear the expectancy floor here, so the tie-break is what decides
+    it rather than qualification."""
     chosen = sweep.plateau_choice(
         _points(
-            (0.05, +0.05, 40),
-            (0.10, +0.06, 45),
-            (0.20, +0.05, 50),
+            (0.05, +0.12, 40),
+            (0.10, +0.13, 45),
+            (0.20, +0.12, 50),
             (0.30, -0.50, 60),
             (0.40, +0.30, 70),
             (0.50, +0.31, 80),
@@ -1087,6 +1089,97 @@ def test_equal_width_plateaus_are_broken_by_their_weakest_member():
     )
     assert chosen.members == (0.40, 0.50, 0.60)
     assert chosen.chosen == pytest.approx(0.50)
+
+
+def test_a_plateau_flat_at_zero_is_refused_on_MAGNITUDE():
+    """D50'S AMENDMENT (2026-10-23), prompted by O13's table. Testing the SIGN
+    of expectancy without its magnitude cannot tell a ridge from a floor: six
+    all-positive, all-well-sampled candidates formed a 6-wide plateau that was
+    flat at zero, and the original rule adopted its centre."""
+    chosen = sweep.plateau_choice(
+        _points(
+            (0.01, +0.04, 76),
+            (0.04, +0.00, 157),
+            (0.09, +0.04, 262),
+            (0.16, +0.04, 360),
+            (0.24, +0.05, 458),
+            (0.34, +0.05, 561),
+        )
+    )
+    assert chosen.chosen is None
+    assert chosen.kind == sweep.NO_PLATEAU
+    assert "no judgeable candidate LOSES money" in chosen.reason
+    assert "cannot reach the expectancy that would promote the recipe" in chosen.reason
+    assert "best +0.05R" in chosen.reason
+
+
+def test_the_o13_selection_table_as_measured_refuses():
+    """The real numbers, pinned: full universe, 2022-10-27..2024-10-01, squeeze
+    axis, `base_breakout` enabled. A regression test on the one table that
+    moved the rule."""
+    measured = sweep.plateau_choice(
+        _points(
+            (0.01, +0.04, 76),
+            (0.04, +0.00, 157),
+            (0.09, +0.04, 262),
+            (0.16, +0.04, 360),
+            (0.24, +0.05, 458),
+            (0.34, +0.05, 561),
+        )
+    )
+    assert measured.chosen is None, (
+        "the unamended rule chose 0.09 from this table; it must not choose anything"
+    )
+
+
+def test_the_floor_is_d40s_promotion_bar_not_a_number_of_its_own():
+    """Read from `scoring.promotion.shadow_to_paper.min_expectancy_r`: if the
+    bar for promoting a recipe moves, the bar for adopting a gate for that
+    recipe moves with it."""
+    assert sweep.expectancy_floor() == pytest.approx(
+        config.scoring().promotion.shadow_to_paper.min_expectancy_r
+    )
+
+    table = _points(
+        (0.05, -0.10, 40),
+        (0.10, +0.06, 45),
+        (0.20, +0.07, 50),
+        (0.30, +0.06, 60),
+        (0.40, -0.05, 70),
+        (0.50, +0.40, 80),
+    )
+    assert sweep.plateau_choice(table, floor_r=0.10).chosen is None
+    assert sweep.plateau_choice(table, floor_r=0.05).chosen == pytest.approx(0.20)
+
+
+def test_the_amendment_can_only_refuse_never_adopt():
+    """Why it is admissible post-hoc: a tighter qualification can remove
+    candidates from a plateau but never add one, so it cannot manufacture a
+    result. Checked over the tables in this file rather than argued."""
+    tables = [
+        _points(
+            (0.05, -0.10, 40),
+            (0.10, +0.20, 45),
+            (0.20, +0.30, 50),
+            (0.30, +0.15, 60),
+            (0.40, -0.05, 70),
+            (0.50, +0.40, 80),
+        ),
+        _points(
+            (0.01, +0.04, 76),
+            (0.04, +0.00, 157),
+            (0.09, +0.04, 262),
+            (0.16, +0.04, 360),
+            (0.24, +0.05, 458),
+            (0.34, +0.05, 561),
+        ),
+    ]
+    for table in tables:
+        lenient = sweep.plateau_choice(table, floor_r=0.0001)
+        strict = sweep.plateau_choice(table, floor_r=0.10)
+        if strict.chosen is not None:
+            assert lenient.chosen is not None, "the floor invented a plateau"
+            assert set(strict.members) <= set(lenient.members)
 
 
 def test_too_few_candidates_cannot_answer_the_question():

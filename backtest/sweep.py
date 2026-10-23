@@ -22,12 +22,25 @@ Two guards, both mechanical, because a human reading a sweep table picks the
 best cell and a best cell is often noise:
 
   1. **Centre of the widest positive plateau** (`plateau_choice`). A swept value
-     qualifies on positive expectancy AND D39(2)'s 30 closed trades; the chosen
-     value must have a QUALIFYING NEIGHBOUR ON EACH SIDE, so a lone spike —
-     one good cell between two bad ones — disqualifies itself. No plateau means
-     no value is picked, and for a dormant recipe that means it stays dormant.
-     A plateau is a claim that the result survives the gate being slightly
-     wrong, which is the only kind of result worth shipping.
+     qualifies on D39(2)'s 30 closed trades AND an expectancy at or above
+     D40's `shadow_to_paper.min_expectancy_r`; the chosen value must have a
+     QUALIFYING NEIGHBOUR ON EACH SIDE, so a lone spike — one good cell
+     between two bad ones — disqualifies itself. No plateau means no value is
+     picked, and for a dormant recipe that means it stays dormant. A plateau is
+     a claim that the result survives the gate being slightly wrong, which is
+     the only kind of result worth shipping.
+
+     **The expectancy floor was added after O13's selection table** (2026-10-23)
+     showed the original rule's gap: `base_breakout`'s six candidates were all
+     positive and all well sampled, forming a 6-wide "plateau" that was FLAT AT
+     ZERO (+0.00R to +0.05R while the trade count moved 7.5x), and the rule
+     adopted its centre. Testing the SIGN of expectancy without its MAGNITUDE
+     cannot tell a ridge from a floor. The amendment is admissible post-hoc for
+     two reasons stated rather than assumed: it can only ever REFUSE a value,
+     never adopt one, so it cannot manufacture a result; and its threshold is
+     D40's pre-existing promotion bar rather than a number fitted to this data
+     — a gate whose plateau cannot clear the expectancy that would promote the
+     recipe cannot sensibly be adopted for that recipe.
   2. **Split sample.** Selection runs on an IN-SAMPLE window and the adoption
      criteria are then applied to a LATER, non-overlapping one. `--start` and
      `--end` must be given explicitly: without them this module REFUSES to
@@ -73,6 +86,7 @@ __all__ = [
     "Plateau",
     "Point",
     "axes_from",
+    "expectancy_floor",
     "measure",
     "param_sets_for",
     "plateau_choice",
@@ -181,13 +195,18 @@ class Point:
     expectancy_r: float | None
     closed: int
 
-    @property
-    def qualifies(self) -> bool:
-        """Positive expectancy on a population D39(2) will look at."""
+    def well_sampled(self) -> bool:
+        """A population D39(2) will look at. Separate from `qualifies` because
+        "too few trades to judge" and "judged and not good enough" are
+        different facts and the refusal has to name which."""
+        return self.closed >= metrics_min_sample()
+
+    def qualifies(self, floor_r: float) -> bool:
+        """Well sampled AND worth adopting: expectancy at or above D40's
+        shadow->paper bar. The sign alone is not enough — see the module
+        docstring on O13's flat plateau."""
         return (
-            self.expectancy_r is not None
-            and self.expectancy_r > 0
-            and self.closed >= metrics_min_sample()
+            self.well_sampled() and self.expectancy_r is not None and self.expectancy_r >= floor_r
         )
 
 
@@ -233,13 +252,24 @@ def metrics_min_sample() -> int:
     return MIN_SAMPLE
 
 
-def plateau_choice(points: list[Point]) -> Plateau:
+def expectancy_floor(cfg=None) -> float:
+    """D40's shadow->paper expectancy, reused as D50's adoption floor.
+
+    Read from config rather than restated, because it is the SAME number: if
+    the bar for promoting a recipe moves, the bar for adopting a gate for that
+    recipe moves with it.
+    """
+    return float((cfg or config.scoring()).promotion.shadow_to_paper.min_expectancy_r)
+
+
+def plateau_choice(points: list[Point], *, floor_r: float | None = None) -> Plateau:
     """D50's selection rule, applied mechanically.
 
     The centre of the WIDEST run of consecutive qualifying values, where
-    qualifying is positive expectancy with at least D39(2)'s 30 closed trades.
-    A run must be at least three values long, which is what makes "both
-    neighbours qualify" true of its centre and what disqualifies a lone spike.
+    qualifying is D39(2)'s 30 closed trades AND an expectancy at or above
+    D40's shadow->paper floor. A run must be at least three values long, which
+    is what makes "both neighbours qualify" true of its centre and what
+    disqualifies a lone spike.
 
     The tie-breaks are stated rather than left to list order, because a rule
     whose answer depends on iteration order is not a rule:
@@ -251,6 +281,7 @@ def plateau_choice(points: list[Point]) -> Plateau:
     """
     ordered = sorted(points, key=lambda p: p.value)
     counts = tuple((p.value, p.closed) for p in ordered)
+    floor = expectancy_floor() if floor_r is None else floor_r
     if len(ordered) < MIN_AXIS_VALUES:
         return Plateau(
             None,
@@ -264,13 +295,13 @@ def plateau_choice(points: list[Point]) -> Plateau:
     # CONSECUTIVE candidates whose populations D39(2) will look at. Without
     # them the axis is unjudged rather than judged and rejected — the recipe is
     # rare, not bad, and the answer is to measure more.
-    floor = metrics_min_sample()
-    judgeable = _longest_run(ordered, lambda p: p.closed >= floor)
+    sample_floor = metrics_min_sample()
+    judgeable = _longest_run(ordered, Point.well_sampled)
     if judgeable < 3:
         total = sum(p.closed for p in ordered)
         return Plateau(
             None,
-            f"the longest run of candidates with >= {floor} closed trades is "
+            f"the longest run of candidates with >= {sample_floor} closed trades is "
             f"{judgeable}, so no three adjacent values can be compared at all "
             f"({total} closed across the whole axis). Not a verdict on the gate: "
             f"widen the universe or the window",
@@ -281,7 +312,7 @@ def plateau_choice(points: list[Point]) -> Plateau:
     runs: list[list[Point]] = []
     current: list[Point] = []
     for point in ordered:
-        if point.qualifies:
+        if point.qualifies(floor):
             current.append(point)
         else:
             if current:
@@ -294,13 +325,33 @@ def plateau_choice(points: list[Point]) -> Plateau:
     if not usable:
         best = max((len(r) for r in runs), default=0)
         spike = " (a lone spike, which D50 disqualifies)" if best in (1, 2) else ""
-        thin = sum(1 for p in ordered if p.closed < floor)
+        thin = sum(1 for p in ordered if not p.well_sampled())
         note = (
-            f"; {thin} candidate(s) were under the {floor}-trade floor and could not be "
-            f"judged, so part of the axis is unmeasured rather than rejected"
+            f"; {thin} candidate(s) were under the {sample_floor}-trade floor and could "
+            f"not be judged, so part of the axis is unmeasured rather than rejected"
             if thin
             else ""
         )
+        # THE O13 CASE, named rather than folded into the generic refusal: every
+        # judgeable candidate is positive and none clears the floor, so the
+        # answer is about MAGNITUDE and the reader should not go looking for a
+        # sign problem that is not there.
+        judged = [p for p in ordered if p.well_sampled() and p.expectancy_r is not None]
+        # `>= 0` rather than `> 0`: O13's own table had a candidate at exactly
+        # +0.00R, and a message that refused to recognise its own motivating
+        # case because one cell was flat rather than fractionally positive
+        # would be useless where it matters most.
+        if judged and all(p.expectancy_r >= 0 for p in judged):
+            peak = max(p.expectancy_r for p in judged)
+            return Plateau(
+                None,
+                f"no judgeable candidate LOSES money and none clears D40's "
+                f"{floor:+.2f}R shadow->paper floor (best {peak:+.2f}R). A gate whose "
+                f"plateau cannot reach the expectancy that would promote the recipe "
+                f"cannot be adopted for it{note}",
+                kind=NO_PLATEAU,
+                counts=counts,
+            )
         return Plateau(
             None,
             f"the longest run of qualifying values is {best}{spike}, and the centre of "
@@ -319,8 +370,8 @@ def plateau_choice(points: list[Point]) -> Plateau:
         middle.value,
         f"centre of a {len(chosen_run)}-wide plateau "
         f"({', '.join(f'{p.value:g}' for p in chosen_run)}), weakest member "
-        f"{min(p.expectancy_r or 0.0 for p in chosen_run):+.2f}R, "
-        f"{min(p.closed for p in chosen_run)}+ closed each",
+        f"{min(p.expectancy_r or 0.0 for p in chosen_run):+.2f}R against a "
+        f"{floor:+.2f}R floor, {min(p.closed for p in chosen_run)}+ closed each",
         kind=CHOSEN,
         members=tuple(p.value for p in chosen_run),
         counts=tuple((p.value, p.closed) for p in ordered),
@@ -647,7 +698,10 @@ def render(
                 + ("" if item.sufficient else "  (n<30)")
             )
     lines.append("")
-    lines.append("D50 SELECTION (centre of the widest positive plateau, >=30 closed each)")
+    lines.append(
+        f"D50 SELECTION (centre of the widest plateau: >=30 closed AND "
+        f">={expectancy_floor():+.2f}R each)"
+    )
     lines.append("-" * 100)
     if not pinned:
         lines.append(
