@@ -388,7 +388,12 @@ def candidate_rows(run: UniverseRun, *, day: date, cfg=None) -> list[dict]:
         and refused.get(item.symbol, None) is not None
         and refused[item.symbol].stage != "plan"
     ]
-    top = [*top, *near_misses]
+    # AND EVERY ACCEPTED IDEA, wherever it ranks. On 2026-10-21 the one idea
+    # that passed every stage sat at rank 51, so a cut at the top N by rank
+    # would have left the day's only call out of the table whose whole purpose
+    # is relating a composite to what happened next.
+    accepted = [item for item in ranked if item.surfaced and item.symbol not in kept]
+    top = [*top, *near_misses, *accepted]
 
     gates = {
         "tier_a_min_composite": scoring_cfg.tiers.a.min_composite,

@@ -243,3 +243,20 @@ def test_the_job_never_writes_to_the_shadow_book():
     assert "shadow_book" not in source.replace(
         "D40's ladder count CLOSED SHADOW BOOK IDEAS", ""
     ).lower().replace("shadow book", "")
+
+
+def test_an_accepted_idea_is_recorded_wherever_it_ranks():
+    """On 2026-10-21 the one idea that passed every stage sat at RANK 51. A cut
+    at the top N by rank would leave the day's only call out of the table whose
+    purpose is relating a composite to what happened next."""
+    items = [scored(f"S{i}", 95.0 - i) for i in range(20)]
+    rank_universe(items, CFG)
+    deep = items[12]
+    deep.surfaced = True
+
+    rows = runner.candidate_rows(UniverseRun(scored=items), day=AS_OF, cfg=CFG)
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert deep.symbol in by_symbol, "the accepted idea must be in the table"
+    assert by_symbol[deep.symbol]["surfaced"] is True
+    assert by_symbol[deep.symbol]["rank"] == 13
+    assert by_symbol[deep.symbol]["refused_stage"] is None, "it was not refused"
