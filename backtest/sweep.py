@@ -474,7 +474,10 @@ def run(
     baseline = baseline_with(overrides)
     # The distributions are measured over the SAME window the walk uses, so the
     # percentiles that place the candidates describe the data being judged.
-    measure_years = years if start is None else max(1, round((today - start).days / 365))
+    # Over the WALK'S window, not back from today: the percentiles that place
+    # the candidates must describe the data being judged, and a window reaching
+    # past `end` would place them using data the walk cannot see.
+    measure_years = years if start is None else max(1, round(((end or today) - start).days / 365))
     measured = distributions or measure(
         symbols=universe, as_of=end or today, years=measure_years, sample=None
     )
