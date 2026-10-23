@@ -138,6 +138,31 @@ circuit_breaker:
 # marked `timeout` at day 45 when it actually expired, or a multi-year hold
 # marked `timeout` every six weeks, would corrupt the expectancy-per-recipe
 # numbers D13 exists to produce.
+# ── Accounts (O17 lean, Oct 23 2026) ────────────────────────────────────────
+# SCALED TO THE ACCOUNT THAT EXISTS: one taxable brokerage account, one
+# position, about $200. A target allocation with one line in it is still a
+# target, and drift against one line is still drift.
+accounts:
+  # OPERATOR-SUPPLIED tax treatment, applied by the sync ONLY when exactly one
+  # account comes back. Schwab reports CASH or MARGIN, which is a settlement
+  # mode: a taxable brokerage and a Roth IRA both come back as CASH, so this
+  # cannot be inferred. More than one account makes the sync REFUSE to apply it
+  # rather than mislabel — which is also the tripwire that un-defers
+  # multi-account handling.
+  single_account_tax_type: taxable
+
+  # The ONE line the target is measured against while the account is small.
+  # `null` until the symbol is stated, and the target logic REFUSES rather than
+  # guessing: a drift report against an ETF nobody chose is advice about
+  # somebody else's portfolio.
+  core_etf: null
+
+  # D55: the sleeve trades real capital only when a strategy is past SHADOW and
+  # PAPER *and* the account can fund this much. Below it, 2.5% of the sleeve is
+  # a few dollars and the position cannot express the decision it represents —
+  # the sizing is not conservative, it is meaningless.
+  minimum_sleeve_usd: 5000    # [OPEN] #85
+
 exits:
   # Directional equity swings.
   swing:

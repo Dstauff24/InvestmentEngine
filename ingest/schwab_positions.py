@@ -36,7 +36,7 @@ import sys
 from datetime import date
 from typing import Any
 
-from core import clock, db
+from core import clock, config, db
 from core.jobs import job_run
 from ingest.schwab_client import SchwabClient, from_schwab_symbol
 
@@ -44,7 +44,15 @@ log = logging.getLogger(__name__)
 
 JOB_NAME = "schwab_positions"
 
-__all__ = ["JOB_NAME", "parse_account", "parse_positions", "run", "store"]
+__all__ = [
+    "JOB_NAME",
+    "bucket_for",
+    "parse_account",
+    "parse_positions",
+    "run",
+    "store",
+    "tax_type_for",
+]
 
 ASSET_TYPES = {
     "EQUITY": "EQUITY",
@@ -59,12 +67,12 @@ ASSET_TYPES = {
 
 POSITION_UPSERT = """
     INSERT INTO positions (
-        as_of, as_of_date, account_hash, symbol, asset_type, quantity,
+        as_of, as_of_date, account_hash, symbol, asset_type, bucket, quantity,
         average_price, market_value, cost_basis, unrealized_pl, unrealized_pl_pct,
         day_pl, underlying_symbol, expiration, strike, put_call, source
     ) VALUES (
         %(as_of)s, %(as_of_date)s, %(account_hash)s, %(symbol)s, %(asset_type)s,
-        %(quantity)s, %(average_price)s, %(market_value)s, %(cost_basis)s,
+        %(bucket)s, %(quantity)s, %(average_price)s, %(market_value)s, %(cost_basis)s,
         %(unrealized_pl)s, %(unrealized_pl_pct)s, %(day_pl)s,
         %(underlying_symbol)s, %(expiration)s, %(strike)s, %(put_call)s, 'schwab'
     )
@@ -74,6 +82,9 @@ POSITION_UPSERT = """
         quantity          = EXCLUDED.quantity,
         average_price     = EXCLUDED.average_price,
         market_value      = EXCLUDED.market_value,
+        -- COALESCE: a bucket the operator set by hand must survive a sync that
+        -- has nothing to say about it (`core_etf` unset, or a different symbol).
+        bucket            = COALESCE(EXCLUDED.bucket, positions.bucket),
         cost_basis        = EXCLUDED.cost_basis,
         unrealized_pl     = EXCLUDED.unrealized_pl,
         unrealized_pl_pct = EXCLUDED.unrealized_pl_pct,
@@ -82,12 +93,12 @@ POSITION_UPSERT = """
 
 ACCOUNT_UPSERT = """
     INSERT INTO account_snapshots (
-        as_of_date, account_hash, account_type, total_value, cash,
+        as_of_date, account_hash, account_type, tax_type, total_value, cash,
         long_market_value, buying_power, cash_available, source
     ) VALUES (
-        %(as_of_date)s, %(account_hash)s, %(account_type)s, %(total_value)s,
-        %(cash)s, %(long_market_value)s, %(buying_power)s, %(cash_available)s,
-        'schwab'
+        %(as_of_date)s, %(account_hash)s, %(account_type)s, %(tax_type)s,
+        %(total_value)s, %(cash)s, %(long_market_value)s, %(buying_power)s,
+        %(cash_available)s, 'schwab'
     )
     ON CONFLICT (as_of_date, account_hash) DO UPDATE SET
         account_type      = EXCLUDED.account_type,
@@ -96,10 +107,12 @@ ACCOUNT_UPSERT = """
         long_market_value = EXCLUDED.long_market_value,
         buying_power      = EXCLUDED.buying_power,
         cash_available    = EXCLUDED.cash_available,
+        -- COALESCE, never assignment: the sync may STATE a tax type it knows
+        -- (one account, config says so) and must never un-state one that is
+        -- already there — an evening that returned two accounts would
+        -- otherwise blank what somebody set by hand.
+        tax_type          = COALESCE(EXCLUDED.tax_type, account_snapshots.tax_type),
         updated_at        = now()
-        -- `tax_type` is ABSENT from this list on purpose: it is
-        -- operator-supplied, and a sync that overwrote it with NULL every
-        -- evening would silently un-state what somebody stated once.
 """
 
 
@@ -110,6 +123,43 @@ def _f(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def tax_type_for(accounts: list[dict], *, cfg=None) -> str | None:
+    """The operator-stated tax type, applied ONLY to a single-account setup.
+
+    **MORE THAN ONE ACCOUNT MAKES THIS REFUSE RATHER THAN MISLABEL**, and that
+    refusal is the tripwire that un-defers multi-account handling (O17): a
+    second account arriving should fail loudly, not be quietly stamped with the
+    first one's tax treatment. Schwab cannot help here — it reports CASH or
+    MARGIN, a settlement mode, and a taxable brokerage and a Roth IRA both come
+    back as CASH.
+    """
+    stated = (cfg or config.risk()).accounts.single_account_tax_type
+    if len(accounts) != 1:
+        log.warning(
+            "%d accounts returned, so `accounts.single_account_tax_type` (%s) is NOT "
+            "applied — state each account's tax type explicitly before the adviser "
+            "recommends a sale in any of them (O17's deferred multi-account work)",
+            len(accounts),
+            stated,
+        )
+        return None
+    return stated
+
+
+def bucket_for(symbol: str, *, cfg=None) -> str | None:
+    """D17's bucket, for the one case the engine can know: the core ETF.
+
+    A position's bucket is a statement of INTENT and the broker has no idea
+    which — so everything else stays NULL for the operator. The core ETF is the
+    exception because the operator has already stated it in config, and while
+    `core_etf` is `null` nothing is marked at all.
+    """
+    core = (cfg or config.risk()).accounts.core_etf
+    if core and symbol.upper() == core.strip().upper():
+        return "etf"
+    return None
 
 
 def parse_account(payload: dict, *, as_of_date: date) -> dict | None:
@@ -137,7 +187,7 @@ def parse_account(payload: dict, *, as_of_date: date) -> dict | None:
     }
 
 
-def parse_positions(payload: dict, *, as_of_date: date, as_of) -> list[dict]:
+def parse_positions(payload: dict, *, as_of_date: date, as_of, cfg=None) -> list[dict]:
     """Every position in one account, as the broker reports it.
 
     SHORT QUANTITIES ARE SIGNED, not dropped: `shortQuantity` becomes a
@@ -188,8 +238,9 @@ def parse_positions(payload: dict, *, as_of_date: date, as_of) -> list[dict]:
                 "expiration": None,
                 "strike": _f(instrument.get("strikePrice")),
                 "put_call": (instrument.get("putCall") or None),
-                # `bucket` stays NULL: see the module docstring. Intent is the
-                # operator's, and the heat cap depends on it.
+                # `bucket` is NULL except for the stated core ETF: intent is
+                # the operator's, and the heat cap depends on it.
+                "bucket": bucket_for(from_schwab_symbol(str(raw_symbol)), cfg=cfg),
             }
         )
     return out
@@ -211,6 +262,9 @@ def run(*, as_of: date | None = None, record: bool = True) -> int:
 
     payloads = client.accounts_with_positions() or []
     accounts = [a for a in (parse_account(p, as_of_date=day) for p in payloads) if a]
+    stated = tax_type_for(accounts)
+    for account in accounts:
+        account["tax_type"] = stated
     positions: list[dict] = []
     for payload in payloads:
         positions.extend(parse_positions(payload, as_of_date=day, as_of=moment))

@@ -1105,6 +1105,39 @@ class Sleeves(Base):
         return self
 
 
+TaxType = Literal["taxable", "traditional_ira", "roth_ira", "401k", "hsa", "other"]
+
+
+class Accounts(Base):
+    """O17 lean: the account that actually exists, stated rather than inferred.
+
+    One taxable brokerage account, one position, about $200. Every field here
+    is operator-supplied because none of it can be read from the broker:
+    Schwab reports a SETTLEMENT mode (CASH/MARGIN) and not a tax treatment, it
+    has no idea which ETF is somebody's core holding, and it cannot know what
+    size makes a sleeve worth funding.
+    """
+
+    single_account_tax_type: TaxType
+    """Applied by the sync ONLY when exactly one account comes back. More than
+    one makes it refuse rather than mislabel — the tripwire that un-defers
+    multi-account handling."""
+    core_etf: str | None = None
+    """The one line the target is measured against. `null` until stated, and
+    the target logic REFUSES rather than guessing: a drift report against an
+    ETF nobody chose is advice about somebody else's portfolio."""
+    minimum_sleeve_usd: Annotated[float, Field(gt=0)]  # [OPEN] #85 — D55
+
+    @model_validator(mode="after")
+    def _core_etf_looks_like_a_symbol(self):
+        if self.core_etf is not None and not self.core_etf.strip():
+            raise ValueError(
+                "accounts.core_etf is blank. Use `null` to mean 'not chosen yet' — an "
+                "empty string would read as a symbol everywhere downstream"
+            )
+        return self
+
+
 class RiskConfig(Base):
     version: PositiveInt
     percent_basis: Literal["current_account_value", "high_water_mark"]
@@ -1125,6 +1158,7 @@ class RiskConfig(Base):
     sleeves: Sleeves
     dividends: Dividends
     cash: Cash
+    accounts: Accounts
 
     @model_validator(mode="after")
     def _caps_are_mutually_reachable(self):

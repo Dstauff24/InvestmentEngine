@@ -1,9 +1,11 @@
 """O17's read-only positions sync. Fixtures only — no DB, no network.
 
 The parser's job is to write what the broker says and derive nothing it
-cannot see. Two columns it must leave alone are the point of most of these
-tests: `bucket` (D17's intent, the operator's) and `tax_type` (tax treatment,
-which Schwab does not report).
+cannot see. Two columns are the point of most of these tests: `bucket` (D17's
+intent) and `tax_type` (tax treatment, which Schwab does not report). Both are
+the OPERATOR's answer, so each is filled in exactly the one case where the
+operator has already given it — the stated core ETF, and a single-account
+setup — and left NULL everywhere else.
 """
 
 from __future__ import annotations
@@ -12,10 +14,19 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from core import config
 from ingest import schwab_positions as sp
 
 DAY = date(2026, 10, 23)
 MOMENT = datetime(2026, 10, 23, 20, 0, tzinfo=UTC)
+
+
+def _with_core_etf(symbol: str | None):
+    """The shipped risk config with one field moved, so these tests do not
+    depend on whether `core_etf` has been answered yet."""
+    base = config.risk().model_dump()
+    base["accounts"] = {**base["accounts"], "core_etf": symbol}
+    return config.RiskConfig(**base)
 
 
 def account_payload(**kw) -> dict:
@@ -61,23 +72,48 @@ def test_an_account_snapshot_records_what_the_broker_reports():
     assert row["cash_available"] == pytest.approx(11_500.00)
 
 
-def test_the_sync_never_sets_a_tax_type():
+def test_schwab_cannot_supply_the_tax_type_so_the_parser_does_not():
     """Schwab reports CASH or MARGIN — a SETTLEMENT mode. A taxable brokerage
-    and a Roth IRA both come back as CASH, so the tax type is operator-supplied
-    and NULL until stated: the adviser refuses to recommend a sale in an
-    account whose tax treatment it does not know rather than assuming the
-    cheaper answer (D52 — a guess in this layer is advice)."""
+    and a Roth IRA both come back as CASH, so the tax type cannot come from the
+    payload: the adviser refuses to recommend a sale in an account whose tax
+    treatment it does not know rather than assuming the cheaper answer (D52 — a
+    guess in this layer is advice). `tax_type_for` supplies the operator's
+    answer afterwards, and only for a single-account setup."""
     row = sp.parse_account(account_payload(type="MARGIN"), as_of_date=DAY)
     assert "tax_type" not in row
-    # An ASSIGNMENT, not a mention: the SQL explains in a comment why the
-    # column is absent, and a test that tripped on the explanation would push
-    # somebody to delete the explanation.
+
+
+def test_the_stated_tax_type_applies_to_a_single_account():
+    """O17 is scaled to the account that exists: one taxable brokerage. The
+    operator states its tax type once in config, because nothing in the feed
+    carries it."""
+    accounts = [sp.parse_account(account_payload(), as_of_date=DAY)]
+    assert sp.tax_type_for(accounts) == config.risk().accounts.single_account_tax_type
+
+
+def test_a_second_account_refuses_the_stated_tax_type_rather_than_mislabel_it():
+    """THE DEFERRAL TRIPWIRE. O17 defers multi-account handling on the stated
+    fact that there is one account; the day a second appears, stamping it with
+    the first one's tax treatment would turn that deferral into a wrong answer
+    — an IRA labelled taxable invites a sale decision taken for tax reasons
+    that do not apply to it. Refusing leaves the column NULL, which the adviser
+    already knows how to decline on."""
+    accounts = [
+        sp.parse_account(account_payload(hashValue="ONE"), as_of_date=DAY),
+        sp.parse_account(account_payload(hashValue="TWO"), as_of_date=DAY),
+    ]
+    assert sp.tax_type_for(accounts) is None
+
+
+def test_the_sync_never_overwrites_a_tax_type_somebody_stated():
+    """COALESCE, not assignment: the sync may STATE a type it knows and must
+    never un-state one already there — an evening that returned two accounts
+    would otherwise blank what somebody set by hand."""
     import re
 
     updates = sp.ACCOUNT_UPSERT.split("DO UPDATE SET")[1]
-    assert not re.search(r"^\s*tax_type\s*=", updates, re.MULTILINE), (
-        "an evening sync must not overwrite a tax type somebody stated once"
-    )
+    [assignment] = re.findall(r"^\s*tax_type\s*=(.*)$", updates, re.MULTILINE)
+    assert "COALESCE" in assignment and "account_snapshots.tax_type" in assignment
 
 
 def test_an_envelope_without_an_identifier_is_skipped_not_guessed():
@@ -107,9 +143,38 @@ def test_the_bucket_is_left_for_the_operator():
     """D17's bucket is a statement of INTENT — the same ETF is a core holding
     in one account and a tactical trade in another, and the broker has no idea
     which. Guessing it would put a position into the heat cap, or out of it, on
-    the engine's assumption rather than a decision."""
-    [row] = sp.parse_positions(account_payload(positions=[equity()]), as_of_date=DAY, as_of=MOMENT)
-    assert "bucket" not in row
+    the engine's assumption rather than a decision. While `core_etf` is unset,
+    nothing is marked at all."""
+    cfg = _with_core_etf(None)
+    [row] = sp.parse_positions(
+        account_payload(positions=[equity()]), as_of_date=DAY, as_of=MOMENT, cfg=cfg
+    )
+    assert row["bucket"] is None
+
+
+def test_the_stated_core_etf_is_the_one_bucket_the_engine_can_know():
+    """The exception to the rule above, and only because the operator already
+    stated it: `accounts.core_etf` IS the core sleeve (D35), so a position in
+    it is `etf` by the operator's own definition. Everything else stays NULL."""
+    cfg = _with_core_etf("VTI")
+    rows = sp.parse_positions(
+        account_payload(positions=[equity(symbol="VTI"), equity(symbol="MSFT")]),
+        as_of_date=DAY,
+        as_of=MOMENT,
+        cfg=cfg,
+    )
+    assert {r["symbol"]: r["bucket"] for r in rows} == {"VTI": "etf", "MSFT": None}
+
+
+def test_a_hand_set_bucket_survives_a_sync_that_has_nothing_to_say():
+    """The upsert COALESCEs the bucket, so an evening that parses NULL leaves
+    the operator's answer in place. Assignment would erase every bucket
+    somebody set, nightly and silently."""
+    import re
+
+    updates = sp.POSITION_UPSERT.split("DO UPDATE SET")[1]
+    [assignment] = re.findall(r"^\s*bucket\s*=(.*)$", updates, re.MULTILINE)
+    assert "COALESCE" in assignment and "positions.bucket" in assignment
 
 
 def test_a_short_quantity_is_signed_rather_than_dropped():

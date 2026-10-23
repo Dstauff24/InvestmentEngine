@@ -1033,8 +1033,8 @@ def retired_parameters() -> set[int]:
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
 
 
-def test_the_doc_lists_exactly_82_live_parameters_and_two_tombstones():
-    assert len(documented_parameters()) == 82
+def test_the_doc_lists_exactly_83_live_parameters_and_two_tombstones():
+    assert len(documented_parameters()) == 83
     # #12 retired by D49 (max_days_since_earnings), #8 by O13's redesign
     # (range_contraction_ratio). Numbers are never reused.
     assert retired_parameters() == {8, 12}
@@ -1069,8 +1069,8 @@ def test_the_tag_numbering_is_contiguous_across_live_and_retired_rows():
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 82
-    assert len(tagged_parameters()) + len(retired_parameters()) == 84
+    assert len(tagged_parameters()) == 83
+    assert len(tagged_parameters()) + len(retired_parameters()) == 85
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1160,7 +1160,22 @@ def test_the_shipped_config_still_runs_the_v1_geometry():
 
 
 def _unread_config_fields() -> dict[str, list[str]]:
-    """{model: [fields that nothing outside core/config.py reads by name]}."""
+    """{model: [fields nothing reads]}, where READ has a deliberate definition.
+
+    A field counts as read when something accesses it BY NAME — `.field` or
+    `["field"]` — either outside `core/config.py` or inside a function body
+    within it. The second arm is not a loophole: a validator that refuses a
+    contradictory ladder, or an accessor like `certification_of`, IS the rule
+    being in force, and that is what the guard is asking about.
+
+    A BARE QUOTED LITERAL DOES NOT COUNT, and the reason is a bug this guard
+    had. It used to accept `"field"` anywhere in the tree, so `return "etf"` in
+    the positions sync — a `positions.bucket` VALUE that merely shares a word
+    with `BucketTargets.etf` — read as a config access, and the whole bucket
+    block went quiet because its field names are short common words. Matching
+    only the access forms costs nothing real: a dict-shaped config is still
+    read by subscript.
+    """
     import ast
 
     root = Path(__file__).resolve().parent.parent
@@ -1183,6 +1198,16 @@ def _unread_config_fields() -> dict[str, list[str]]:
         if path.name != "config.py"
     )
     tree = ast.parse((root / "core" / "config.py").read_text())
+    enforced = "\n".join(
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    )
+
+    def is_read(name: str) -> bool:
+        access = rf"""\.{name}\b|\[["']{name}["']\]"""
+        return bool(re.search(access, source) or re.search(access, enforced))
+
     out: dict[str, list[str]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
@@ -1193,62 +1218,67 @@ def _unread_config_fields() -> dict[str, list[str]]:
             ):
                 continue
             name = statement.target.id
-            if name.startswith("_"):
-                continue
-            if f".{name}" not in source and f'"{name}"' not in source:
+            if not name.startswith("_") and not is_read(name):
                 out.setdefault(node.name, []).append(name)
     return out
 
 
-# Config blocks whose READER DOES NOT EXIST YET. Every one is a rule from the
-# decision log written down ahead of the layer that will enforce it, which is a
-# legitimate state and a measurable one: 60-odd parameters of D17/D18/D35 risk
-# and allocation discipline are declared and inert, and D52 calls that layer
-# the primary product. The reason is the open item that will read them.
+# Config fields whose READER DOES NOT EXIST YET, each against the open item
+# that will read it. Every one is a rule from the decision log written down
+# ahead of the layer that will enforce it, which is a legitimate state and a
+# measurable one: 35 parameters of D17/D18/D35 risk and allocation discipline
+# are declared and inert, and D52 calls that layer the primary product.
+#
+# PER FIELD, not per block, because the blocks are mixed. `Accounts` holds two
+# fields the positions sync reads tonight and one that waits on a sleeve that
+# does not exist; `ScoringConfig.certification` decides D53's gate on every
+# idea while `sentiment_reinstatement` waits on O18. Exempting either block
+# whole would have hidden the live field behind the inert one, and a list that
+# can hide a live rule is worse than no list.
 PENDING_LAYERS = {
-    # O17, the portfolio-adviser layer: heat, buckets, sleeves, the ratchet,
-    # drift, concentration, the circuit breaker, dividend handling.
-    "Heat": "O17",
-    "StableBuckets": "O17",
-    "BucketTargets": "O17",
-    "AllocationTargets": "O17",
-    "Sleeve": "O17",
-    "Sleeves": "O17",
-    "Ratchet": "O17",
-    "Dividends": "O17",
-    "Cash": "O17",
-    "CircuitBreaker": "O17",
-    "CircuitBreakerAction": "O17",
-    "TierBBudget": "O17",
-    "Pyramiding": "O17",
-    "OptionsRisk": "O17",
-    "OptionExits": "O17",
-    "VehicleByIVRank": "O17",
-    "RiskConfig": "O17",
+    # O17, the portfolio-adviser layer: heat release, buckets, sleeves, the
+    # ratchet, drift, the circuit breaker, dividend handling.
+    "AllocationTargets.drift_alert_pct": "O17",
+    "AllocationTargets.risk_off_vix_above": "O17",
+    "Cash.has_risk_profile": "O17",
+    "CircuitBreaker.on_trip": "O17",
+    "CircuitBreaker.resets_after": "O17",
+    "CircuitBreakerAction.pause_tier_b": "O17",
+    "CircuitBreakerAction.tier_a_size_multiplier": "O17",
+    "Dividends.dividend_adjusted_stops": "O17 (D19 at the position level)",
+    "Dividends.core_etf_drip": "O17",
+    "Dividends.hold_dividends_to_cash_bucket": "O17",
+    "Heat.release_on_exit": "O17",
+    "Heat.zero_risk_after_stop_at_breakeven": "O17",
+    "OptionExits.early_exit_dte": "O17",
+    "OptionsRisk.assignment_risk_check": "O17 (D19's short-call check)",
+    "OptionsRisk.assignment_extrinsic_buffer": "O17",
+    "Ratchet.cadence": "O17",
+    "Ratchet.trigger_excess_points": "O17",
+    "RiskConfig.percent_basis": "O17",
+    "RiskConfig.pyramiding": "O17 (D37's adds)",
+    "RiskConfig.sleeves": "O17 (D35's two scoreboards)",
+    "Sleeve.benchmark": "O17",
+    "Sleeves.ratchet": "O17",
+    "StableBuckets.thesis_review_drawdown_pct": "O17",
+    "StableBuckets.dividend_cut_triggers_review": "O17",
+    "TierBBudget.measured_as": "O17 (the month-to-date Tier B tracker)",
+    "VehicleByIVRank.check_binary_events_in_expiration": "O17",
+    # D55: the sleeve cannot be funded until a strategy is past PAPER, so the
+    # minimum is stated now and enforced by the layer that will size the sleeve.
+    "Accounts.minimum_sleeve_usd": "D55, enforced when the sleeve is funded (O17)",
     # O18, the research lab: reinstating a demoted pillar needs the calibration
     # work, and ranking alternatives need the forward-return tables.
-    "SentimentReinstatement": "O18",
-    "Ranking": "O18",
-    "ScoringConfig": "O18",
-    "PaperToLive": "O18 (the calibration curve, D39(1))",
-    # Recipe shapes not yet built: the reversal-candle condition recipe 1 never
-    # implemented, and the insider-cluster derivative exclusion (stored
-    # unfiltered on purpose, D25).
-    "PullbackRecipe": "a condition recipe 1 never implemented",
-    "InsiderCluster": "D25 stores rows unfiltered; the filter reads code, not this flag",
-    "UniverseSources": "the watchlist path is resolved by the universe builder's own default",
-    "OptionChainScope": "aggregate IV is derived in schwab_chains without reading the flag",
-    # O20 WIRES MOST OF THIS. `runner_trail: ma_20` has been the framework's
-    # answer since the beginning and nothing has ever trailed anything; v3's
-    # geometry reads it and `trim_at_target_1`, whose fraction is what makes
-    # D12's amended 1.0R gate mean "cannot lose money once TP1 is hit".
-    # `trim_at_target_2` stays inert after that: v3 has no TP2, and the
-    # position-level accounting a fixed-target trim needs is O17's.
-    # `runner_trail` is READ now (v3 parses it into a window). The two trim
-    # FRACTIONS are not: the tracker uses `move_stop_to_breakeven_at` but
-    # measures R on the whole position, so modelling a trim needs the
-    # position-level accounting that is O17's.
-    "SwingExits": "the trim fractions need position-level accounting (O17)",
+    "Ranking.rank_within_universe": "O18",
+    "ScoringConfig.sentiment_reinstatement": "O18",
+    "SentimentReinstatement.min_sentiment_score": "O18",
+    "SentimentReinstatement.min_sample": "O18",
+    "SentimentReinstatement.restore_toward": "O18",
+    "PaperToLive.max_calibration_error_pct": "O18 (the calibration curve, D39(1))",
+    # Shapes not yet built.
+    "PullbackRecipe.require_reversal_candle": "a condition recipe 1 never implemented",
+    "OptionChainScope.aggregate_iv": "aggregate IV is derived in schwab_chains "
+    "without reading the flag",
 }
 
 
@@ -1265,29 +1295,29 @@ def test_no_config_field_is_unread_in_a_layer_that_exists():
     believe a rule is in force when it is not" — the decision log's words about
     the retired key, and this is the guard that would have caught all three.
 
-    Blocks whose reader does not exist yet are listed in `PENDING_LAYERS` with
+    Fields whose reader does not exist yet are listed in `PENDING_LAYERS` with
     the open item that will read them. That is not an exemption list to grow
     casually: adding a name means admitting a rule is inert, and the list
     shrinks as the layers land.
     """
     unread = {
-        model: fields
-        for model, fields in _unread_config_fields().items()
-        if model not in PENDING_LAYERS
-    }
-    assert unread == {}, (
-        f"these config fields are loaded and read by nothing: {unread} — wire them, "
-        f"retire them, or add the BLOCK to PENDING_LAYERS with the open item that will"
+        f"{model}.{field}" for model, fields in _unread_config_fields().items() for field in fields
+    } - set(PENDING_LAYERS)
+    assert unread == set(), (
+        f"these config fields are loaded and read by nothing: {sorted(unread)} — wire "
+        f"them, retire them, or add each one to PENDING_LAYERS with the open item that will"
     )
 
 
-def test_the_pending_layers_list_only_names_blocks_that_are_really_inert():
-    """The other direction: a block that HAS been wired must leave the list, or
+def test_the_pending_layers_list_only_names_fields_that_are_really_inert():
+    """The other direction: a field that HAS been wired must leave the list, or
     the list becomes a place where live rules hide."""
-    unread = _unread_config_fields()
-    wired = [model for model in PENDING_LAYERS if model not in unread]
+    unread = {
+        f"{model}.{field}" for model, fields in _unread_config_fields().items() for field in fields
+    }
+    wired = sorted(set(PENDING_LAYERS) - unread)
     assert wired == [], (
-        f"these blocks are in PENDING_LAYERS but something now reads them: {wired} — "
+        f"these fields are in PENDING_LAYERS but something now reads them: {wired} — "
         f"remove them from the list"
     )
 
