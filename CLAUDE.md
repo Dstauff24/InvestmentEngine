@@ -1,9 +1,23 @@
 # CLAUDE.md — Investment Decision Engine (Rebuild, Oct 2026)
 
 ## What this is
-A personal investment decision-support engine for a Schwab brokerage account (swings, long holds, options). It ingests quant + qual data, scores tickers through a 4-pillar confluence model, surfaces complete trade plans (entry/stop/TP1/TP2/R:R/size) in two tiers, tracks every idea in a Shadow Book, and sends a daily email digest. **The human makes every final decision.** Phase 1 = the brain, no UI.
+A personal investment decision-support engine for a Schwab brokerage account. **TWO LAYERS, and the first one is the product (D52).**
 
-**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D49, open items O1–O14).
+**The CORE layer — portfolio discipline — is the primary deliverable**: allocation against target, drift, fund quality, concentration, and opportunity-cost reviews. It earns its keep without predicting anything, because it enforces decisions already made. It is never put at risk by the sleeve, and **capital flows INTO core and never back out** — no rebalance, sweep or top-up may move capital from core into growth, at any drawdown.
+
+**The GROWTH sleeve is the experiment.** It ingests quant + qual data, scores tickers through a 4-pillar confluence model, surfaces complete trade plans (entry/stop/TP1/TP2/R:R/size) in two tiers, tracks every idea in a Shadow Book, and sends a daily digest. It runs on D40's ladder, and **it has a stopping rule (D51)**: six months from the first lab-derived strategy entering shadow, the sleeve must show >=30 closed Shadow Book calls at >=+0.05R live expectancy, or it is SHELVED and the engine runs as the core layer alone. The date the clock starts goes in the decision log on the day it happens, or the rule has no start.
+
+**The human makes every final decision.** No UI in Phase 1; read-only broker access, no order placement anywhere.
+
+**Context:** this repo is a REBUILD. A prior build completed all 7 scaffold steps (411 tests, live-validated against Schwab and FMP) and was lost when an unpushed Codespace auto-deleted on 2026-10-20. Nothing here is speculative: every convention and finding below was implemented and verified once already. `docs/REBUILD_KICKOFF.md` is the work order; `docs/engine-decisions-and-todo.md` is the authoritative decision log (D1–D52, open items O1–O19).
+
+## Build order (set Oct 23 2026, after D51/D52)
+1. **Finish the in-flight verdicts**: pullback v1-vs-v2 (certified, adoption call outstanding — see O15) and D46's out-of-sample gap test.
+2. **The portfolio-adviser layer (O17)** — Schwab read-only positions/balances sync, actual-vs-target allocation with drift and concentration alerts in the digest, and a holdings review report. **Before the lab**, because the primary product must not wait on the experiment.
+3. **The signal research lab (O18)** — univariate forward-return tables with out-of-sample and regime splits, then confluence tests, then strategy candidates; a momentum/theme hypothesis family in scope; an extended SCANNING universe of ~1,000 liquid US names, with the D14 trading universe unchanged and a named test keeping scan-only names out of `v_active_universe` (the `is_benchmark` mechanism).
+4. **Data backfills, in order (O19)** — price history to 2008+, EDGAR Form 4 history, FINRA short interest (O11), market internals.
+
+**Everything new enters at `shadow` (D40), backtest or no backtest.**
 
 ## Non-negotiable process rule (D30)
 **Commit and push to GitHub at the end of every working session, and after every completed step. No exceptions.** The repo on GitHub is the system of record; a Codespace is disposable. Never report a step complete without naming the commit that was pushed.
@@ -137,7 +151,7 @@ scripts/         fmp_probe.py (endpoint reachability), field_probe.py (live fiel
                  .env.example, deploy-enforced), test_counts.py (the measured status line),
                  adoption_check.py (pre-registered criteria + citation)
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)
-docs/            engine-decisions-and-todo.md (canonical log, D1-D49 + O1-O14),
+docs/            engine-decisions-and-todo.md (canonical log, D1-D52 + O1-O19),
                  open-parameters.md (79 live rows + 2 tombstones), REBUILD_KICKOFF.md
 ```
 
