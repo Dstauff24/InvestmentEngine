@@ -264,11 +264,28 @@ geometry:
   min_stop_atr: 0.5           # [OPEN] #70
 
   pullback_to_trend:
+    # WHICH GEOMETRY. `v1` is what shipped and what every number on record was
+    # measured under. `v2` moves the stop onto the pullback's OWN low and
+    # anchors TP2 on the recovered leg instead of on today's close — the two
+    # suspects behind v1 being timeout-dominated (1,570 of 1,820 closed on the
+    # clock, median R:R 0.85). A MODE, not a number: it moves on a decision
+    # with both arms backtested side by side, never on taste.
+    variant: v1
     # Window for the prior swing high a pullback is expected to reclaim (TP1).
+    # READ BY THE MEASUREMENT as of 2026-10-23: it was configured and never
+    # read before that, agreeing with `price_structure`'s own default of 60, so
+    # changing it moved nothing.
     swing_lookback_days: 60   # [OPEN] #71
-    # TP2 as a multiple of the TP1 distance — the measured move beyond the
-    # reclaim. A multiple of a STRUCTURAL distance, not of risk.
+    # v1 only. TP2 as a multiple of the distance from TODAY'S CLOSE to the
+    # swing high — which is why a deeper pullback gets a farther target.
     tp2_measured_move: 1.6    # [OPEN] #72
+    # v2 only. The window the pullback's own low is taken over. Must be shorter
+    # than the swing lookback or the two lows are one measurement twice.
+    pullback_low_lookback_days: 10   # [OPEN] #82
+    # v2 only. The recovered leg (swing high minus pullback low) projected
+    # beyond the reclaim. Structure the market made, independent of where price
+    # sits today.
+    tp2_leg_multiple: 1.0            # [OPEN] #83
 
   base_breakout:
     # TP1 = entry + base depth (the classic measured move). TP2 extends it.

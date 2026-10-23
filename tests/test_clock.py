@@ -86,3 +86,28 @@ def test_there_is_no_holiday_calendar():
     apart from "the feed is broken" — but until then nothing should pretend to.
     """
     assert clock.is_weekday(date(2026, 12, 25)) is True  # Christmas, a Friday
+
+
+# ── when the pipeline is due ────────────────────────────────────────────────
+
+
+def test_the_pipeline_is_due_half_an_hour_after_the_close():
+    """Expressed as a DELAY FROM THE CLOSE rather than a second copy of
+    "16:30", so the constant and the README's crontab cannot drift apart."""
+    from datetime import timedelta
+
+    day = date(2026, 10, 23)
+    due = clock.pipeline_due_utc(day)
+    assert due == clock.session_close_utc(day) + timedelta(minutes=30)
+    assert clock.pipeline_is_due(day, now=due) is True
+    assert clock.pipeline_is_due(day, now=due - timedelta(seconds=1)) is False
+
+
+def test_a_session_before_its_run_time_is_not_due():
+    """ "Not yet run" and "did not complete" are different facts: at noon there
+    are no job rows because nothing was supposed to have happened."""
+    day = date(2026, 10, 23)
+    noon_et = datetime(2026, 10, 23, 16, 0, tzinfo=UTC)  # 12:00 ET
+    assert clock.pipeline_is_due(day, now=noon_et) is False
+    evening_et = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)  # 17:00 ET
+    assert clock.pipeline_is_due(day, now=evening_et) is True

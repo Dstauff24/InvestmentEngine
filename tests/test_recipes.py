@@ -48,6 +48,7 @@ def tech(**kw) -> TechnicalFeatures:
         **{
             "swing_high": 120.0,
             "swing_low": 94.0,
+            "pullback_low": 97.0,
             "base_high": 120.0,
             "base_low": 100.0,
             "base_depth_pct": 16.7,
@@ -607,7 +608,7 @@ def test_a_range_that_is_not_coiled_does_not_fire():
 
 
 def test_an_unmeasurable_squeeze_refuses_rather_than_assuming():
-    """"Cannot establish" is not "not coiled". A percentile needs a year of
+    """ "Cannot establish" is not "not coiled". A percentile needs a year of
     history, and a young listing has no reading rather than a bad one — the
     standing `features/` convention, enforced at the gate."""
     result = breakout.evaluate(breakout_tech(squeeze_percentile=None), cfg=ENABLED_CFG)
@@ -761,3 +762,101 @@ def test_the_surprise_comes_from_the_most_recent_REPORTED_quarter():
     surprise = last_earnings_surprise(events, as_of=date(2026, 10, 21))
     assert surprise.reported_on == date(2026, 10, 18)
     assert surprise.eps_beat is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Recipe 1's geometry: v1 vs v2 (the stop and the targets, not the entry)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _with_geometry(**kw) -> config.ScoringConfig:
+    geometry = {**CFG.geometry.pullback_to_trend.model_dump(), **kw}
+    return config.ScoringConfig.model_validate(
+        {
+            **CFG.model_dump(),
+            "geometry": {**CFG.geometry.model_dump(), "pullback_to_trend": geometry},
+        }
+    )
+
+
+V1 = _with_geometry(variant="v1")
+V2 = _with_geometry(variant="v2")
+
+
+def test_v1_hangs_the_stop_on_the_sixty_day_low():
+    """What shipped, pinned before it is compared to anything. ATR is 2.0 and
+    `stop_atr_buffer` is 0.5, so the stop is the swing low minus 1.0."""
+    plan = pullback.evaluate(tech(), cata(), cfg=V1).plan
+    assert plan.stop == pytest.approx(94.0 - 1.0)
+    assert plan.target_1 == pytest.approx(120.0)
+    assert plan.target_2 == pytest.approx(100.0 + (120.0 - 100.0) * 1.6)
+
+
+def test_v2_hangs_the_stop_on_the_low_the_pullback_itself_made():
+    """The 60-day low on a trending stock is a level from a different episode.
+    The pullback's own low is the one the thesis actually breaks at."""
+    plan = pullback.evaluate(tech(), cata(), cfg=V2).plan
+    assert plan.stop == pytest.approx(97.0 - 1.0)
+    assert plan.risk < pullback.evaluate(tech(), cata(), cfg=V1).plan.risk
+
+
+def test_v2_projects_the_recovered_leg_beyond_the_reclaim():
+    plan = pullback.evaluate(tech(), cata(), cfg=V2).plan
+    assert plan.target_1 == pytest.approx(120.0)
+    assert plan.target_2 == pytest.approx(120.0 + (120.0 - 97.0) * 1.0)
+
+
+def test_v1s_target_moves_with_todays_close_and_v2s_does_not():
+    """THE DEFECT, PINNED. v1's TP2 is anchored on the distance from TODAY'S
+    CLOSE to the swing high, so a DEEPER pullback gets a FARTHER target: the
+    trades carrying the most risk are handed the most ambitious target, which
+    is how a recipe becomes timeout-dominated. v2's TP2 is structure the market
+    made and does not know where price sits today."""
+    shallow = tech(close=105.0)
+    deep = tech(close=99.0)
+
+    v1_shallow = pullback.evaluate(shallow, cata(), cfg=V1).plan
+    v1_deep = pullback.evaluate(deep, cata(), cfg=V1).plan
+    assert v1_deep.target_2 > v1_shallow.target_2, "deeper pullback, farther target"
+
+    v2_shallow = pullback.evaluate(shallow, cata(), cfg=V2).plan
+    v2_deep = pullback.evaluate(deep, cata(), cfg=V2).plan
+    assert v2_deep.target_2 == pytest.approx(v2_shallow.target_2)
+
+
+def test_v2_improves_the_r_to_r_on_the_same_structure():
+    """Not a claim that v2 is better — that is the backtest's question. Only
+    that the geometry change does what it says: the same setup, measured the
+    same way, produces a plan whose reward is a larger multiple of its risk."""
+    v1 = pullback.evaluate(tech(), cata(), cfg=V1).plan
+    v2 = pullback.evaluate(tech(), cata(), cfg=V2).plan
+    assert v2.risk_reward > v1.risk_reward
+    assert v2.risk_reward_tp1 > v1.risk_reward_tp1
+
+
+def test_v2_refuses_rather_than_falling_back_to_the_swing_low():
+    """A variant that silently used v1's level would report v1's geometry under
+    v2's name, and the backtest comparing them would compare nothing."""
+    result = pullback.evaluate(tech(structure={"pullback_low": None}), cata(), cfg=V2)
+    assert not result.triggered
+    assert "will not fall back to the swing low" in result.reason
+
+
+def test_the_variant_changes_nothing_about_the_entry_conditions():
+    """The measured problem is the geometry, so the RSI band, the MA stack, the
+    dry-up and the earnings exclusion must read identically under both."""
+    for refusal in (
+        tech(rsi=70.0),
+        tech(ma={"stacked": False}),
+        tech(relative_volume=1.8),
+    ):
+        first = pullback.evaluate(refusal, cata(), cfg=V1)
+        second = pullback.evaluate(refusal, cata(), cfg=V2)
+        assert first.reason == second.reason
+        assert first.triggered == second.triggered is False
+
+
+def test_the_plan_says_which_geometry_produced_it():
+    """Two arms in one Shadow Book would otherwise be indistinguishable."""
+    assert "[v1]" in pullback.evaluate(tech(), cata(), cfg=V1).reason
+    assert "[v2]" in pullback.evaluate(tech(), cata(), cfg=V2).reason

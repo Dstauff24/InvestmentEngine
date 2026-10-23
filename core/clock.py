@@ -9,7 +9,7 @@ and ruff's DTZ rules exist to stop anyone reaching for `date.today()` instead.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
@@ -57,6 +57,30 @@ def to_utc(moment: datetime) -> datetime:
 def session_close_utc(day: date) -> datetime:
     """The 16:00 ET close of `day` as a UTC instant. The `ts` on daily bars."""
     return datetime.combine(day, MARKET_CLOSE, tzinfo=EASTERN).astimezone(UTC)
+
+
+# The pipeline starts half an hour after the close (README's crontab: 16:30
+# ET), which gives the close time to settle. Expressed as a DELAY FROM THE
+# CLOSE rather than a second copy of "16:30", so the two cannot drift apart.
+PIPELINE_DELAY_AFTER_CLOSE = timedelta(minutes=30)
+
+
+def pipeline_due_utc(day: date) -> datetime:
+    """When `day`'s post-close run is due, as a UTC instant."""
+    return session_close_utc(day) + PIPELINE_DELAY_AFTER_CLOSE
+
+
+def pipeline_is_due(day: date, *, now: datetime | None = None) -> bool:
+    """Has `day`'s run time passed?
+
+    **"NOT YET RUN" AND "DID NOT COMPLETE" ARE DIFFERENT FACTS.** Before 16:30
+    ET a session has no job rows because nothing was supposed to have happened,
+    and reporting that as incomplete makes a report rendered at lunchtime read
+    like a broken engine — which is the same confusion, one level up, as the
+    2026-10-22 digest that could not tell a quiet market from a dead step.
+    """
+    moment = now or utc_now()
+    return moment >= pipeline_due_utc(day)
 
 
 def is_weekday(day: date) -> bool:

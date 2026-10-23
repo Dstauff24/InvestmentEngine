@@ -18,9 +18,17 @@ def evaluate(
 ) -> RecipeResult:
     """An uptrend that has pulled back to a rising MA with RSI reset.
 
-    The trade: buy the pullback, stop below the swing low that the pullback
-    made, target the prior swing high it should reclaim, then the measured move
-    beyond it.
+    The trade: buy the pullback, stop below the low the pullback made, target
+    the prior swing high it should reclaim, then the measured move beyond it.
+
+    **TWO GEOMETRIES, BEHIND `geometry.pullback_to_trend.variant`.** The entry
+    conditions are identical in both — the MA stack, the RSI band, the dry-up,
+    the earnings exclusion — because the measured problem is not there. v1 hung
+    the stop on `swing_low`, the lowest low of the whole 60-day lookback, which
+    on a trending stock is a level from a different episode, and anchored TP2
+    on the distance from TODAY'S CLOSE, so a deeper pullback got a farther
+    target. v2 hangs the stop on `pullback_low` and projects the recovered leg
+    beyond the reclaim. See `config.PullbackGeometry` for the numbers behind it.
 
     EARNINGS INSIDE THE WINDOW IS A HARD REFUSAL, not a score penalty. A
     2-15 day swing horizon that straddles an earnings date is a coin flip
@@ -118,11 +126,33 @@ def evaluate(
             checks,
         )
 
+    if geometry.variant == "v2":
+        # The pullback's OWN low, not the 60-day low. None REFUSES rather than
+        # falling back: silently using `swing_low` would make v2 report v1's
+        # geometry under v2's name, which is the one thing a variant must never
+        # do — the backtest comparing them would then compare nothing.
+        if structure.pullback_low is None:
+            return no_setup(
+                NAME,
+                f"no pullback low over the last "
+                f"{geometry.pullback_low_lookback_days} session(s) — v2 hangs the "
+                f"stop on it and will not fall back to the swing low",
+                checks,
+            )
+        structural_stop = structure.pullback_low
+        # The recovered leg, projected beyond the reclaim. Structure the market
+        # made; it does not move with where price sits today.
+        leg = reclaim - structure.pullback_low
+        target_2 = reclaim + leg * geometry.tp2_leg_multiple
+    else:
+        structural_stop = structure.swing_low
+        target_2 = technical.close + distance * geometry.tp2_measured_move
+
     plan, why = build_plan(
         entry_reference=technical.close,
-        structural_stop=structure.swing_low,
+        structural_stop=structural_stop,
         target_1=reclaim,
-        target_2=technical.close + distance * geometry.tp2_measured_move,
+        target_2=target_2,
         features=technical,
         horizon_days=tuple(recipe.horizon_days),
         cfg=scoring_cfg,
@@ -135,7 +165,7 @@ def evaluate(
         triggered=True,
         reason=(
             f"uptrend pullback to the {recipe.ma_fast}MA, RSI {technical.rsi:.1f} reset, "
-            f"reclaim {reclaim:.2f}"
+            f"reclaim {reclaim:.2f} [{geometry.variant}]"
         ),
         plan=plan,
         checks=checks,

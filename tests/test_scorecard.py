@@ -7,7 +7,7 @@ a week it cannot see.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -16,6 +16,11 @@ from shadow_book.analytics import Cell
 
 AS_OF = date(2026, 10, 23)  # a Friday
 MONDAY = date(2026, 10, 19)
+# 17:00 ET on the report day: after the 16:30 pipeline, so every session in the
+# week counts as DUE. Pinned rather than taken from the wall clock, or these
+# assertions would read differently depending on the hour the suite runs.
+AFTER_THE_RUN = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
+BEFORE_THE_RUN = datetime(2026, 10, 23, 16, 0, tzinfo=UTC)  # 12:00 ET
 
 
 def open_row(**kw) -> dict:
@@ -94,7 +99,7 @@ def stats_row(**kw) -> dict:
 
 
 def card(**kw) -> scorecard.Scorecard:
-    base = {"as_of": AS_OF, "week_start": MONDAY}
+    base = {"as_of": AS_OF, "week_start": MONDAY, "now": AFTER_THE_RUN}
     base.update(kw)
     return scorecard.build(**base)
 
@@ -368,3 +373,39 @@ def test_the_documented_cron_entry_grants_no_network_consent():
     flag appearing here would mean someone misunderstood what it does — the
     same class of mistake `deploy.sh`'s test guards against."""
     assert "ALLOW_LIVE_CALLS" not in _scorecard_cron_line()
+
+
+# ── a session that is not due yet is not a session that failed ──────────────
+
+
+def test_a_run_that_is_not_due_yet_reads_as_not_due_not_as_incomplete():
+    """Rendered at lunchtime — the dry run an operator does before trusting the
+    cron — nothing was supposed to have happened yet, and a report that called
+    that a failure would be crying wolf on its own schedule."""
+    early = card(now=BEFORE_THE_RUN, stats=[stats_row()])
+    assert early.today_is_due is False
+    assert early.week_partial is False
+    _, body = scorecard.render(early)
+    assert "TODAY'S RUN IS NOT DUE YET (16:30 ET)" in body
+    assert "Nothing here is a failure" in body
+    assert "WEEK IS PARTIAL" not in body
+
+
+def test_a_session_not_due_is_left_out_of_the_coverage_count():
+    """Otherwise "scoring ran on 4 of 5" is the permanent reading of a healthy
+    Friday lunchtime."""
+    assert card(now=BEFORE_THE_RUN).weekday_sessions == 4
+    assert card(now=AFTER_THE_RUN).weekday_sessions == 5
+
+
+def test_a_step_that_failed_is_still_reported_before_the_run_is_due():
+    """The exemption is for ABSENCE, not for errors: a step that failed at
+    15:00 failed, whatever the schedule says."""
+    early = card(
+        now=BEFORE_THE_RUN,
+        incomplete=[{"job_name": "outcome_tracker", "status": "failed", "error": "boom"}],
+    )
+    assert early.week_partial is True
+    _, body = scorecard.render(early)
+    assert "WEEK IS PARTIAL" in body
+    assert "TODAY'S RUN IS NOT DUE YET" not in body, "a failure outranks the schedule"

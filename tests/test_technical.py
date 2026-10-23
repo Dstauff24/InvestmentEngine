@@ -868,3 +868,52 @@ def test_only_named_modules_read_raw_bars_and_each_says_why():
         f"add the module to the allowlist WITH ITS REASON, or read bars via "
         f"features.technical.load_bars"
     )
+
+
+def test_the_pullback_low_is_the_short_windows_low_not_the_swings():
+    """`swing_low` is the 60-day low; on a trending stock that is a level from
+    a different episode. The pullback's own low is what its thesis breaks at."""
+    closes = [*ps.rising(50, start=100.0), *ps.falling(6, start=150.0, step=2.0)]
+    bars = ps.frame(closes)
+    structure = tech.price_structure(bars, swing_lookback=60, pullback_lookback=10)
+    assert structure.pullback_low == pytest.approx(min(bars["low"].iloc[-10:]))
+    assert structure.swing_low == pytest.approx(min(bars["low"]))
+    assert structure.pullback_low > structure.swing_low
+
+
+def test_the_pullback_low_is_none_when_the_window_is_not_covered():
+    """A "pullback low" from three bars would be today's low under another
+    name."""
+    bars = ps.frame(ps.flat(6))
+    assert tech.price_structure(bars, pullback_lookback=10).pullback_low is None
+    assert tech.price_structure(bars, pullback_lookback=5).pullback_low is not None
+
+
+def test_the_configured_swing_lookback_actually_moves_the_measurement():
+    """#71 WAS CONFIGURED AND NEVER READ until 2026-10-23: `price_structure`
+    used its own default of 60 while the config said 60 too, so the duplication
+    was invisible and changing the config moved nothing."""
+    bars = ps.frame(ps.rising(120, start=100.0))
+    short = tech.price_structure(bars, swing_lookback=20)
+    long = tech.price_structure(bars, swing_lookback=100)
+    assert short.swing_low > long.swing_low, "a shorter window sees a higher low"
+
+    from core import config
+
+    features = tech.compute(
+        "TEST",
+        bars,
+        geometry_cfg=config.ScoringConfig.model_validate(
+            {
+                **config.scoring().model_dump(),
+                "geometry": {
+                    **config.scoring().geometry.model_dump(),
+                    "pullback_to_trend": {
+                        **config.scoring().geometry.pullback_to_trend.model_dump(),
+                        "swing_lookback_days": 20,
+                    },
+                },
+            }
+        ).geometry.pullback_to_trend,
+    )
+    assert features.structure.swing_low == pytest.approx(short.swing_low)

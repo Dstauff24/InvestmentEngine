@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 from alerts import notify
 from core import clock, config, db
@@ -93,12 +93,27 @@ OPEN_CALLS = """
 """
 
 
-def incomplete_steps(day: date, jobs: tuple[str, ...]) -> list[dict]:
-    """Which of `jobs` did NOT succeed today. A step that never ran counts.
+def incomplete_steps(
+    day: date, jobs: tuple[str, ...], *, now: datetime | None = None
+) -> list[dict]:
+    """Which of `jobs` did NOT succeed on `day`. A step that never ran counts.
 
     Read from `job_runs` rather than inferred from empty content, because an
     empty list is exactly what both a quiet market and a dead step produce.
+
+    **A SESSION WHOSE RUN TIME HAS NOT PASSED IS NOT INCOMPLETE.** Before 16:30
+    ET nothing was supposed to have happened yet, so there are no rows, and
+    calling that "never ran" makes a report rendered at lunchtime read like a
+    broken engine. `clock.pipeline_is_due` draws the line, and a step that
+    FAILED is still reported whenever it failed — the exemption is for absence,
+    not for errors.
     """
+    if not clock.pipeline_is_due(day, now=now):
+        rows = {
+            r["job_name"]: r for r in db.fetch_all(STEP_STATUS, {"day": day, "jobs": list(jobs)})
+        }
+        return [r for r in rows.values() if r["status"] not in ("success", "running")]
+
     rows = {r["job_name"]: r for r in db.fetch_all(STEP_STATUS, {"day": day, "jobs": list(jobs)})}
     out = []
     for job in jobs:

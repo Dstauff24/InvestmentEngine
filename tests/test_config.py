@@ -1033,8 +1033,8 @@ def retired_parameters() -> set[int]:
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
 
 
-def test_the_doc_lists_exactly_79_live_parameters_and_two_tombstones():
-    assert len(documented_parameters()) == 79
+def test_the_doc_lists_exactly_81_live_parameters_and_two_tombstones():
+    assert len(documented_parameters()) == 81
     # #12 retired by D49 (max_days_since_earnings), #8 by O13's redesign
     # (range_contraction_ratio). Numbers are never reused.
     assert retired_parameters() == {8, 12}
@@ -1069,8 +1069,8 @@ def test_the_tag_numbering_is_contiguous_across_live_and_retired_rows():
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 79
-    assert len(tagged_parameters()) + len(retired_parameters()) == 81
+    assert len(tagged_parameters()) == 81
+    assert len(tagged_parameters()) + len(retired_parameters()) == 83
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1123,3 +1123,32 @@ def test_the_tag_scanner_can_see_a_parameter_name_with_a_digit():
     assert TAG.match("  rsi_period: 14              # [OPEN] #4")
     # ...and the shipped config actually contains such names.
     assert any(any(ch.isdigit() for ch in name) for name in tagged_parameters().values())
+
+
+def test_an_unknown_pullback_geometry_variant_is_rejected(tmp_path):
+    """A mode, like `beat_source`: a typo must fail the loader rather than
+    silently selecting the default geometry."""
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["geometry", "pullback_to_trend", "variant"], "v3"),
+        "variant",
+    )
+
+
+def test_a_pullback_low_window_as_long_as_the_swing_window_is_rejected(tmp_path):
+    """At or above the swing lookback the pullback's low and the swing low are
+    the same measurement twice — which is the v1 geometry v2 exists to
+    replace, wearing v2's name."""
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["geometry", "pullback_to_trend", "pullback_low_lookback_days"], 60),
+        "must be SHORTER than",
+    )
+
+
+def test_the_shipped_config_still_runs_the_v1_geometry():
+    """Every number on record was measured under v1, so the flag may not drift
+    to v2 without a decision and a side-by-side backtest (D43/D50)."""
+    assert cfg.scoring().geometry.pullback_to_trend.variant == "v1"

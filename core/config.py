@@ -253,9 +253,52 @@ class DriftRecipe(Base):
         return self
 
 
+PullbackVariant = Literal["v1", "v2"]
+
+
 class PullbackGeometry(Base):
+    """Where recipe 1's stop and targets go — in TWO shapes, behind a flag.
+
+    `v1` is what shipped: the stop sits below `swing_low`, the LOWEST LOW of
+    the whole swing lookback, and TP2 is a multiple of the distance from
+    TODAY'S CLOSE to the swing high. Measured over 2022-10..2024-10 that is
+    timeout-dominated — 1,570 of 1,820 closed on the clock at a median R:R of
+    0.85 — and the mechanism is visible in the geometry itself: on a trending
+    stock the 60-day low is a level from a different episode, so risk is huge,
+    while TP2 ANCHORED ON TODAY'S PRICE means a DEEPER pullback gets a FARTHER
+    target. The trades carrying the most risk are handed the most ambitious
+    target, and neither level is reached inside the horizon.
+
+    `v2` changes exactly those two things, and nothing about the RSI band or
+    any other entry condition: the stop hangs on `pullback_low` (the low the
+    pullback itself made, over a short window), and TP2 is the recovered leg
+    projected beyond the reclaim — `swing_high + (swing_high - pullback_low) *
+    tp2_leg_multiple` — which is structure the market made and does not move
+    with where price happens to sit today.
+
+    A MODE, not a number: untagged by `[OPEN]`, switched by a decision, with
+    the two backtested side by side first (D43/D50).
+    """
+
+    variant: PullbackVariant = "v1"
     swing_lookback_days: PositiveInt  # [OPEN] #71
-    tp2_measured_move: float  # [OPEN] #72
+    tp2_measured_move: float  # [OPEN] #72 — v1 only
+    pullback_low_lookback_days: PositiveInt  # [OPEN] #82 — v2 only
+    tp2_leg_multiple: float  # [OPEN] #83 — v2 only
+
+    @model_validator(mode="after")
+    def _coherent(self):
+        if self.pullback_low_lookback_days >= self.swing_lookback_days:
+            raise ValueError(
+                f"pullback_to_trend.pullback_low_lookback_days "
+                f"({self.pullback_low_lookback_days}) must be SHORTER than "
+                f"swing_lookback_days ({self.swing_lookback_days}); at or above it the "
+                f"pullback's low and the swing low are the same measurement twice, "
+                f"which is the v1 geometry this variant exists to replace"
+            )
+        if self.tp2_leg_multiple <= 0 or self.tp2_measured_move <= 0:
+            raise ValueError("pullback_to_trend TP2 multiples must be positive")
+        return self
 
 
 class BreakoutGeometry(Base):

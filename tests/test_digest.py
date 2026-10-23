@@ -6,7 +6,7 @@ is edge source #1 (D1), and the digest has to read like a decision.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -482,3 +482,31 @@ def test_two_steps_failing_together_key_stably_whatever_the_order():
 
 def test_the_key_is_scoped_to_the_session_date():
     assert clean_content(day=DAY).dedupe_key != clean_content(day=date(2026, 10, 22)).dedupe_key
+
+
+def test_a_session_whose_run_is_not_due_has_no_incomplete_steps(monkeypatch):
+    """The same rule as the scorecard's: before 16:30 ET nothing was supposed
+    to have happened, so an absent row is not a failed step. A report rendered
+    at lunchtime must not read like a broken engine."""
+    monkeypatch.setattr(digest.db, "fetch_all", lambda *a, **k: [])
+    noon_et = datetime(2026, 10, 23, 16, 0, tzinfo=UTC)
+    evening_et = datetime(2026, 10, 23, 21, 0, tzinfo=UTC)
+    day = date(2026, 10, 23)
+
+    assert digest.incomplete_steps(day, ("scoring_pass",), now=noon_et) == []
+    after = digest.incomplete_steps(day, ("scoring_pass",), now=evening_et)
+    assert [r["status"] for r in after] == ["never ran"]
+
+
+def test_a_failed_step_is_reported_even_before_the_run_is_due(monkeypatch):
+    """The exemption is for ABSENCE, not for errors."""
+    monkeypatch.setattr(
+        digest.db,
+        "fetch_all",
+        lambda *a, **k: [
+            {"job_name": "scoring_pass", "status": "failed", "error": "boom", "finished_at": None}
+        ],
+    )
+    noon_et = datetime(2026, 10, 23, 16, 0, tzinfo=UTC)
+    [row] = digest.incomplete_steps(date(2026, 10, 23), ("scoring_pass",), now=noon_et)
+    assert row["status"] == "failed"

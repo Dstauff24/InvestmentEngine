@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from alerts import digest, notify
 from core import clock, db
@@ -164,6 +164,9 @@ class OpenPosition:
 class Scorecard:
     as_of: date
     week_start: date
+    now: datetime | None = None
+    """The instant the report is being made, for deciding which sessions were
+    DUE. Injectable so a test is not at the mercy of the wall clock."""
     open_positions: list[OpenPosition] = field(default_factory=list)
     closed: list[dict] = field(default_factory=list)
     cells: list[analytics.Cell] = field(default_factory=list)
@@ -190,11 +193,25 @@ class Scorecard:
 
     @property
     def weekday_sessions(self) -> int:
-        """Weekdays from Monday through the report day. Not a market calendar:
-        a holiday shows up as a session with no stats row, which is visible
-        and harmless — the alternative is a holiday table nobody maintains."""
+        """Weekdays whose RUN TIME HAS PASSED, Monday through the report day.
+
+        A session that is not due yet is not a session the engine failed to
+        score, so counting it would make "scoring ran on 4 of 5" the permanent
+        reading of a healthy Friday lunchtime. Not a market calendar either: a
+        holiday shows up as a due session with no stats row, which is visible
+        and harmless — the alternative is a holiday table nobody maintains.
+        """
         days = (self.as_of - self.week_start).days + 1
-        return sum(1 for i in range(days) if (self.week_start + timedelta(days=i)).weekday() < 5)
+        return sum(
+            1
+            for i in range(days)
+            if (self.week_start + timedelta(days=i)).weekday() < 5
+            and clock.pipeline_is_due(self.week_start + timedelta(days=i), now=self.now)
+        )
+
+    @property
+    def today_is_due(self) -> bool:
+        return clock.pipeline_is_due(self.as_of, now=self.now)
 
     @property
     def sessions_scored(self) -> int:
@@ -287,10 +304,12 @@ def collect(*, as_of: date | None = None) -> Scorecard:
         for row in db.fetch_all(SPLITS_SQL, {"symbols": symbols, "since": oldest, "as_of": day}):
             splits.setdefault(row["symbol"], []).append(row)
 
-    incomplete = digest.incomplete_steps(day, digest.IDEA_STEPS + digest.OUTCOME_STEPS)
+    now = clock.utc_now()
+    incomplete = digest.incomplete_steps(day, digest.IDEA_STEPS + digest.OUTCOME_STEPS, now=now)
     return Scorecard(
         as_of=day,
         week_start=since,
+        now=now,
         open_positions=open_positions(open_rows, bars, splits, as_of=day),
         closed=db.fetch_all(CLOSED_SQL, {"since": since, "as_of": day}),
         cells=analytics.cells(as_of=day),
@@ -319,6 +338,15 @@ def render(card: Scorecard) -> tuple[str, str]:
             "WEEK IS PARTIAL: these steps did not complete today —",
             f"  {names}",
             "so what follows describes less than the week did.",
+            "",
+        ]
+    elif not card.today_is_due:
+        # NOT a fault. Rendered before 16:30 ET — the dry run an operator does
+        # at lunchtime, or a manual check — and the day's own numbers simply do
+        # not exist yet.
+        lines += [
+            f"TODAY'S RUN IS NOT DUE YET (16:30 ET), so {card.as_of:%b %d} is not",
+            "in anything below. Nothing here is a failure.",
             "",
         ]
 

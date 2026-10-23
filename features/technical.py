@@ -431,7 +431,12 @@ class PriceStructure:
     swing_high: float | None = None
     """Highest high in the lookback — the level a pullback would reclaim."""
     swing_low: float | None = None
-    """Lowest low — where a long's thesis breaks."""
+    """Lowest low over the SAME long lookback. On a trending stock this is far
+    below price, which is why `pullback_low` exists beside it."""
+    pullback_low: float | None = None
+    """Lowest low over a SHORT recent window — the low the pullback itself
+    made. `swing_low` is the 60-day low, which for an uptrend that pulled back
+    three days ago is a level from a different episode entirely."""
     base_high: float | None = None
     base_low: float | None = None
     base_depth_pct: float | None = None
@@ -448,6 +453,7 @@ def price_structure(
     bars: pd.DataFrame,
     *,
     swing_lookback: int = 60,
+    pullback_lookback: int = 10,
     base_lookback: int = 120,
     max_base_depth_pct: float = 25.0,
     min_base_sessions: int = 20,
@@ -477,6 +483,10 @@ def price_structure(
 
     swing = highs.iloc[-swing_lookback:] if len(highs) >= 2 else highs
     swing_lows = lows.iloc[-swing_lookback:] if len(lows) >= 2 else lows
+    # THE PULLBACK'S OWN LOW, over a short window. None rather than a shorter
+    # window's low when the history does not cover it: a "pullback low" from
+    # three bars would be today's low under another name.
+    recent_lows = lows.iloc[-pullback_lookback:] if len(lows) >= pullback_lookback else None
 
     # THE BASE IS WHAT PRICE DID BEFORE TODAY. `_detect_base` walks backward
     # from the last bar it is given, so handing it today's bar makes
@@ -507,6 +517,7 @@ def price_structure(
     return PriceStructure(
         swing_high=float(swing.max()) if len(swing) else None,
         swing_low=float(swing_lows.min()) if len(swing_lows) else None,
+        pullback_low=None if recent_lows is None else float(recent_lows.min()),
         base_high=base_high,
         base_low=base_low,
         base_depth_pct=depth,
@@ -849,6 +860,7 @@ def compute(
     sector_closes: pd.Series | None = None,
     cfg: config.PullbackRecipe | None = None,
     structure_cfg: config.BreakoutRecipe | None = None,
+    geometry_cfg: config.PullbackGeometry | None = None,
     reported_on: date | None = None,
     release_time: str = "unknown",
 ) -> TechnicalFeatures:
@@ -864,6 +876,11 @@ def compute(
     knowable — deciding that twice is how the beat and the price reaction end
     up describing different quarters.
 
+    `geometry_cfg` carries the two windows the STRUCTURE is measured over —
+    the swing lookback (#71) and the pullback-low lookback (#82) — for the same
+    reason `structure_cfg` exists: they are read by the measurement, so a sweep
+    over them has to recompute the features.
+
     `structure_cfg` exists for D43's sweep. `min_base_weeks` and
     `max_base_depth_pct` are read by the MEASUREMENT as well as by the gate, so
     sweeping them means recomputing the features — passing them in is what lets
@@ -871,6 +888,7 @@ def compute(
     """
     recipe = cfg or config.scoring().recipes.pullback_to_trend
     breakout = structure_cfg or config.scoring().recipes.base_breakout
+    geometry = geometry_cfg or config.scoring().geometry.pullback_to_trend
     _require_ascending(bars)
 
     # EVERY reading below comes off ONE basis. See `on_adjusted_basis`: taking
@@ -897,6 +915,14 @@ def compute(
         # this function's defaults silently disagreeing with the gate.
         structure=price_structure(
             frame,
+            # #71 WAS CONFIGURED AND NEVER READ. `price_structure` used its own
+            # default of 60 while `geometry.pullback_to_trend
+            # .swing_lookback_days` said 60 too, so the duplication was
+            # invisible: changing the config moved nothing. A key that loads
+            # while nothing reads it is how an operator comes to believe a
+            # setting is in force when it is not.
+            swing_lookback=geometry.swing_lookback_days,
+            pullback_lookback=geometry.pullback_low_lookback_days,
             max_base_depth_pct=breakout.max_base_depth_pct,
             min_base_sessions=int(breakout.min_base_weeks * 5),
         ),

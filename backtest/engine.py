@@ -96,6 +96,7 @@ class ParamSet:
         appear here, which is what makes most of a sweep nearly free."""
         pullback = self.cfg.recipes.pullback_to_trend
         breakout = self.cfg.recipes.base_breakout
+        geometry = self.cfg.geometry.pullback_to_trend
         return (
             pullback.ma_fast,
             pullback.ma_mid,
@@ -103,6 +104,10 @@ class ParamSet:
             pullback.rsi_period,
             breakout.min_base_weeks,
             breakout.max_base_depth_pct,
+            # Read by the MEASUREMENT (`price_structure`), not just by a gate,
+            # so two arms that differ here cannot share a feature pass.
+            geometry.swing_lookback_days,
+            geometry.pullback_low_lookback_days,
         )
 
     @property
@@ -339,6 +344,10 @@ def walk_symbol(
                 sector_closes=sector_slice,
                 cfg=sets[0].cfg.recipes.pullback_to_trend,
                 structure_cfg=sets[0].cfg.recipes.base_breakout,
+                # Grouped by `structure_key`, which includes both geometry
+                # windows — so every set in this group measures the same
+                # structure and taking the first one's config is exact.
+                geometry_cfg=sets[0].cfg.geometry.pullback_to_trend,
                 reported_on=anchor[0],
                 release_time=anchor[1],
             )
