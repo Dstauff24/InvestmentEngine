@@ -238,7 +238,7 @@ def test_the_floor_is_opt_in_so_it_cannot_rewrite_an_earlier_adoption(tmp_path, 
     assert run_check(path, extra=["--floor"]) == 1
     out = capsys.readouterr().out
     assert "floor MISSED" in out
-    assert "every cut clears the absolute +0.10R floor      : False" in out
+    assert "that cut clears the absolute +0.10R floor      : False" in out
 
 
 def test_the_bare_floor_uses_d40s_promotion_bar():
@@ -296,14 +296,14 @@ def test_a_difference_inside_one_standard_error_is_not_a_win(tmp_path, capsys):
 
     assert run_check(path, extra=["--margin-se"]) == 1
     out = capsys.readouterr().out
-    assert "by >1 SE on all three cuts : False" in out
+    assert "by >1 SE on every cut : False" in out
     assert "1SE" in out
 
 
 def test_a_difference_well_outside_the_spread_still_wins(tmp_path, capsys):
     path = _dispersed_run(tmp_path, baseline_mean=0.0, arm_mean=1.2, spread=0.2)
     assert run_check(path, extra=["--margin-se"]) == 0
-    assert "by >1 SE on all three cuts : True" in capsys.readouterr().out
+    assert "by >1 SE on every cut : True" in capsys.readouterr().out
 
 
 def test_the_margin_multiple_is_configurable(tmp_path, capsys):
@@ -342,3 +342,86 @@ def test_the_spread_of_the_difference_is_the_conservative_one(tmp_path):
     combined = adoption_check.margin_se(base, arm)
     assert combined == pytest.approx((base.standard_error_r**2 + arm.standard_error_r**2) ** 0.5)
     assert combined > base.standard_error_r
+
+
+# ── which cut carries which criterion ───────────────────────────────────────
+
+
+def test_a_cut_the_criteria_did_not_name_cannot_fail_the_adoption(tmp_path, capsys):
+    """APPLYING A STRICTER RULE THAN THE ONE WRITTEN DOWN is the same failure
+    as a looser one and harder to notice: it refuses an adoption the
+    pre-registered criteria would have accepted."""
+    lines = [HEADER]
+    # The arm wins the ungated population (+0.55R against +0.30R) and LOSES
+    # the gated cuts (+0.40R against +0.60R).
+    for _ in range(40):
+        lines.append(row("baseline", hash_=OTHER, net_r=0.00, rr=1.0))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.70, rr=1.0))
+        lines.append(row("baseline", hash_=OTHER, net_r=0.60, rr=4.0))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.40, rr=4.0))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    assert run_check(path) == 1, "it loses a cut, so D48's every-cut rule refuses"
+    capsys.readouterr()
+
+    assert run_check(path, extra=["--beats-cut", "all", "--sample-cut", "all"]) == 0
+    out = capsys.readouterr().out
+    assert "on the all plans cut" in out
+    assert "(not a beat criterion)" in out, "the cuts it does not name are marked"
+
+
+def test_the_sample_and_floor_move_to_the_named_cut(tmp_path, capsys):
+    """Recipe 1's criteria put them on the R:R >= 2 cut, because that is the
+    population the engine would actually trade."""
+    lines = [HEADER]
+    for _ in range(40):
+        lines.append(row("baseline", hash_=OTHER, net_r=0.01, rr=2.5))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.30, rr=2.5))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    # On the Tier B cut there are no trades at all (every R:R is 2.5), so the
+    # sample criterion cannot be met there.
+    assert run_check(path, extra=["--beats-cut", "all", "--sample-cut", "tier_b"]) == 1
+    capsys.readouterr()
+    assert run_check(path, extra=["--beats-cut", "all", "--sample-cut", "tier_a", "--floor"]) == 0
+    out = capsys.readouterr().out
+    assert "its R:R >= 2 cut has >= 30 closed : True (40)" in out
+    assert "floor OK" in out
+
+
+def test_reachability_is_its_own_criterion(tmp_path, capsys):
+    """ "Did it earn more" and "can the engine trade it" are separate
+    questions. v1's plans clear 2:1 only 3% of the time, so a variant that
+    earns more while remaining unreachable has not fixed anything."""
+    lines = [HEADER]
+    for _ in range(40):
+        # Both arms earn the same; only the arm's plans can clear the gate.
+        lines.append(row("baseline", hash_=OTHER, net_r=0.20, rr=1.2))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.30, rr=2.4))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    assert (
+        run_check(path, extra=["--beats-cut", "all", "--sample-cut", "all", "--reachability"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "baseline 0% -> verified 100%" in out
+    assert "its Tier A reachability exceeds the baseline's  : True" in out
+
+
+def test_an_unreachable_variant_fails_even_when_it_earns_more(tmp_path, capsys):
+    lines = [HEADER]
+    for _ in range(40):
+        lines.append(row("baseline", hash_=OTHER, net_r=0.10, rr=1.2))
+        lines.append(row("verified", hash_=SHIPPED, net_r=0.60, rr=1.3))
+    path = tmp_path / "run.csv"
+    path.write_text("\n".join(lines) + "\n")
+
+    assert (
+        run_check(path, extra=["--beats-cut", "all", "--sample-cut", "all", "--reachability"]) == 1
+    )
+    out = capsys.readouterr().out
+    assert "baseline 0% -> verified 0%" in out
+    assert "reachability exceeds the baseline's  : False" in out

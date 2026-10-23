@@ -50,6 +50,21 @@ D50:
      adoption was judged against, which is the whole reason D48's criteria
      were pre-registered.
 
+  6. **WHICH CUT CARRIES WHICH CRITERION** (`--beats-cut`, `--sample-cut`).
+     Criteria differ between decisions and have to be expressible EXACTLY: a
+     script applying a stricter rule than the one pre-registered could refuse
+     an adoption the criteria would have accepted, which is the same failure as
+     a looser one and harder to notice. Both default to D48's semantics (beat
+     on EVERY cut; sample and floor on the Tier B cut), so an older check
+     reproduces unchanged.
+
+  7. **`--reachability`**, for a criterion about what the engine may ACT on.
+     `metrics.reachability` measures the share of an arm's PLANS clearing each
+     R:R gate; with this flag the arm must beat the baseline's Tier A share.
+     Recipe 1's v2 exists because v1's plans reach 2:1 only 3% of the time, so
+     "did it earn more" and "can the engine trade it" are separate questions
+     and the second deserves its own line.
+
 So every hash is printed next to the arm that produced it, the shipped config
 is compared to the named arm by value, loudly, and the window is stated.
 
@@ -144,6 +159,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", help="ISO date; keep trades CALLED on or after it (D50)")
     parser.add_argument("--until", help="ISO date; keep trades CALLED strictly before it")
     parser.add_argument(
+        "--beats-cut",
+        choices=("every", "all", "tier_a", "tier_b"),
+        default="every",
+        help="which cut the arm must BEAT the baseline on: every (default, D48's rule), "
+        "all (the ungated population only), tier_a, or tier_b",
+    )
+    parser.add_argument(
+        "--sample-cut",
+        choices=("all", "tier_a", "tier_b"),
+        default="tier_b",
+        help="which cut must clear the 30-closed floor — and --floor's expectancy, when "
+        "given. Default tier_b (D48's rule)",
+    )
+    parser.add_argument(
+        "--reachability",
+        action="store_true",
+        help="require the arm's share of plans clearing the Tier A R:R gate to exceed "
+        "the baseline's (metrics.reachability)",
+    )
+    parser.add_argument(
         "--margin-se",
         dest="margin",
         nargs="?",
@@ -213,17 +248,20 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 78)
     criteria_ok = True
     floor_ok = True
-    tier_b = None
-    for label, rr in (
-        ("all plans", None),
-        (f"R:R >= {gates.tier_a:g}", gates.tier_a),
-        (f"R:R >= {gates.tier_b:g}", gates.tier_b),
-    ):
+    sample_target = None
+    labels = {
+        "all": "all plans",
+        "tier_a": f"R:R >= {gates.tier_a:g}",
+        "tier_b": f"R:R >= {gates.tier_b:g}",
+    }
+    for key, rr in (("all", None), ("tier_a", gates.tier_a), ("tier_b", gates.tier_b)):
+        label = labels[key]
         base = cut(run, args.against, args.recipe, rr, since=since, until=until)
         arm = cut(run, args.arm, args.recipe, rr, since=since, until=until)
         base_r = base.expectancy_r if base else None
         arm_r = arm.expectancy_r if arm else None
         better = arm_r is not None and base_r is not None and arm_r > base_r
+        counts_for_beating = args.beats_cut in ("every", key)
         gap_note = ""
         if margin is not None:
             spread = margin_se(base, arm)
@@ -238,36 +276,54 @@ def main(argv: list[str] | None = None) -> int:
                 delta = (arm_r or 0.0) - (base_r or 0.0)
                 better = better and delta > needed
                 gap_note = f"  d {delta:+.2f} vs {margin:g}SE {needed:.2f}"
-        criteria_ok &= better
-        if floor is not None:
-            clears = arm_r is not None and arm_r >= floor
-            floor_ok &= clears
-        if rr == gates.tier_b:
-            tier_b = arm
+        # A cut the pre-registered criteria did not name cannot fail the
+        # adoption: applying a stricter rule than the one written down is the
+        # same failure as a looser one, and harder to notice.
+        criteria_ok &= better or not counts_for_beating
         suffix = ""
-        if floor is not None:
-            suffix = f"  floor {'OK' if arm_r is not None and arm_r >= floor else 'MISSED'}"
+        if key == args.sample_cut:
+            sample_target = arm
+            if floor is not None:
+                floor_ok = arm_r is not None and arm_r >= floor
+                suffix = f"  floor {'OK' if floor_ok else 'MISSED'}"
+        if not counts_for_beating:
+            suffix += "  (not a beat criterion)"
         print(
             f"{label:<16} {_r(base_r):>14} {base.closed if base else 0:>8} "
             f"{_r(arm_r):>18} {arm.closed if arm else 0:>8}  {better}{gap_note}{suffix}"
         )
 
-    sample_ok = bool(tier_b) and tier_b.closed >= metrics.MIN_SAMPLE
-    positive_ok = bool(tier_b) and (tier_b.expectancy_r or 0) > 0
+    sample_ok = bool(sample_target) and sample_target.closed >= metrics.MIN_SAMPLE
+    positive_ok = bool(sample_target) and (sample_target.expectancy_r or 0) > 0
+
+    reach_ok = True
+    if args.reachability:
+        windowed = within(run.trades, since=since, until=until)
+        shares: dict[str, float | None] = {}
+        for name in (args.against, args.arm):
+            rows = [t for t in windowed if t.param_set == name and t.recipe == args.recipe]
+            found = metrics.reachability(rows)
+            shares[name] = found[0].share_tier_a if found else None
+        base_share, arm_share = shares[args.against], shares[args.arm]
+        reach_ok = arm_share is not None and base_share is not None and arm_share > base_share
+        print()
+        print(
+            f"reachability (share of PLANS clearing R:R >= {gates.tier_a:g}): "
+            f"{args.against} {_share(base_share)} -> {args.arm} {_share(arm_share)}"
+        )
     print()
-    beats = (
-        f"beats {args.against} by >{margin:g} SE on all three cuts"
-        if margin is not None
-        else f"beats {args.against} on all three cuts"
-    )
-    print(f"(1) {args.arm} {beats} : {criteria_ok}")
+    scope = "every cut" if args.beats_cut == "every" else f"the {labels[args.beats_cut]} cut"
+    margin_text = f" by >{margin:g} SE" if margin is not None else ""
+    print(f"(1) {args.arm} beats {args.against}{margin_text} on {scope} : {criteria_ok}")
     print(
-        f"(2) its R:R >= {gates.tier_b:g} cut has >= {metrics.MIN_SAMPLE} closed "
-        f": {sample_ok} ({tier_b.closed if tier_b else 0})"
+        f"(2) its {labels[args.sample_cut]} cut has >= {metrics.MIN_SAMPLE} closed "
+        f": {sample_ok} ({sample_target.closed if sample_target else 0})"
     )
     print(f"    ...and positive expectancy                      : {positive_ok}")
     if floor is not None:
-        print(f"(3) every cut clears the absolute {floor:+.2f}R floor      : {floor_ok}")
+        print(f"(3) that cut clears the absolute {floor:+.2f}R floor      : {floor_ok}")
+    if args.reachability:
+        print(f"(4) its Tier A reachability exceeds the baseline's  : {reach_ok}")
 
     # ── the citation ─────────────────────────────────────────────────────────
     cited = sorted(arms[args.arm]["config_hash"])[0]
@@ -287,13 +343,17 @@ def main(argv: list[str] | None = None) -> int:
             f"   other arms in this run: {other}"
         )
 
-    verdict = criteria_ok and sample_ok and positive_ok and floor_ok
+    verdict = criteria_ok and sample_ok and positive_ok and floor_ok and reach_ok
     print()
     print(f"CRITERIA: {'ADOPT' if verdict else 'DO NOT ADOPT'}")
     print(f"CITATION: {'OK' if citation_ok else 'MISMATCH'}")
     if problems:
         print("EVIDENCE: NOT CERTIFYING — nothing above may be cited")
     return 0 if (verdict and citation_ok and not problems) else 1
+
+
+def _share(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0%}"
 
 
 def _r(value: float | None) -> str:
