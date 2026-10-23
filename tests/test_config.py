@@ -1290,3 +1290,57 @@ def test_the_pending_layers_list_only_names_blocks_that_are_really_inert():
         f"these blocks are in PENDING_LAYERS but something now reads them: {wired} — "
         f"remove them from the list"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D53: certification, and the citation the loader insists on
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_shipped_certification_matches_the_evidence_on_record():
+    """Only `post_earnings_drift` has ever passed a pre-registered certifying
+    run out of sample (D48 refreshed, D46's gap tested). v1 was never
+    certified, v2 was refused under O15, and `base_breakout` is disabled."""
+    certification = cfg.scoring().certification
+    assert certification["post_earnings_drift"].status == "certified"
+    assert certification["post_earnings_drift"].min_risk_reward == pytest.approx(2.0)
+    assert "1625c95" in certification["post_earnings_drift"].evidence
+    assert certification["pullback_to_trend"].status == "uncertified"
+    assert certification["base_breakout"].status == "uncertified"
+
+
+def test_certified_without_a_citation_is_refused(tmp_path):
+    """'Certified' with no commit and config hash is an opinion, and this is
+    the one flag in the repo that can let a plan past a gate."""
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate("scoring.yaml", ["certification", "pullback_to_trend"], {"status": "certified"}),
+        "min_risk_reward",
+    )
+    expect_error(
+        tmp_path,
+        "scoring.yaml",
+        mutate(
+            "scoring.yaml",
+            ["certification", "pullback_to_trend"],
+            {"status": "certified", "min_risk_reward": 2.0},
+        ),
+        "evidence",
+    )
+
+
+def test_a_recipe_with_no_certification_entry_is_refused(tmp_path):
+    """A recipe defaulting to `uncertified` would look like the safe choice and
+    would hide that nobody has decided; defaulting to `certified` would undo
+    D53 in silence. So neither default exists."""
+    raw_config = copy.deepcopy(raw("scoring.yaml"))
+    del raw_config["certification"]["base_breakout"]
+    expect_error(tmp_path, "scoring.yaml", raw_config, "no D53 certification entry")
+
+
+def test_a_certification_for_a_recipe_that_does_not_exist_is_refused(tmp_path):
+    """A typo here would leave a real recipe uncovered."""
+    raw_config = copy.deepcopy(raw("scoring.yaml"))
+    raw_config["certification"]["pullback_to_trends"] = {"status": "uncertified"}
+    expect_error(tmp_path, "scoring.yaml", raw_config, "not a recipe")

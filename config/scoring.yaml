@@ -303,6 +303,46 @@ geometry:
     tp1_gap_multiple: 1.0     # [OPEN] #75
     tp2_gap_multiple: 2.0     # [OPEN] #76
 
+# ── D53: certification ──────────────────────────────────────────────────────
+# Has this recipe's EDGE been certified, and on what evidence? A DIFFERENT axis
+# from D40's ladder: certification says a pre-registered certifying run passed
+# out of sample; the ladder says what the engine may do with it. A recipe can be
+# certified and still `shadow`.
+#
+# **A CERTIFIED RECIPE'S PLAN IS NOT GATED BY THE COMPOSITE.** Until O18 shows
+# the composite carries information about recipe outcomes, it is a conviction
+# upgrade: the plan surfaces on its own `min_risk_reward` plus every risk stage,
+# is sized at TIER B, and reaches TIER A size only by also clearing the
+# composite Tier A gate. The forcing evidence: of 310 tier-qualifying ideas on
+# 2026-10-21, five produced a plan and the only one that passed every stage sat
+# at rank 51 — the recipes fire where the composite does not look.
+#
+# The loader REFUSES a recipe with no entry here, and refuses the word
+# "certified" without `min_risk_reward` and `evidence`. An entry is the one flag
+# in this repo that can let a plan past a gate.
+certification:
+  post_earnings_drift:
+    status: certified
+    # The cut its own evidence certified: D48's criteria held on the later
+    # window ALONE at R:R >= 2 (+0.40R on 271 closed) and R:R >= 3 (+0.59R on
+    # 107). 2.0 is therefore measured rather than chosen, and D46's gap
+    # threshold survived its own out-of-sample test (0.57 kept; the 2.0
+    # challenger failed to beat it by even one standard error).
+    min_risk_reward: 2.0
+    evidence: "1625c95 / a2fae6823605 (D48 refreshed; D46 OOS)"
+
+  pullback_to_trend:
+    # UNCERTIFIED. v1 was never certified, v2 was REFUSED under O15 (it passed
+    # its criteria and broke two conventions they presuppose), and v3 is being
+    # walked now. Until something passes, the composite gate stands for it —
+    # where there is no evidence, the old conservatism is the right default.
+    status: uncertified
+
+  base_breakout:
+    # UNCERTIFIED and disabled (O13): its geometry bounds R:R below 1.8, so no
+    # plan it produces can pass D12's 2:1 gate at all.
+    status: uncertified
+
 # ── Phase 1 recipes ─────────────────────────────────────────────────────────
 # Parameters for the three setups in the decision log, in implementation order.
 # Nothing here is scoring logic — these are the inputs that logic will read.

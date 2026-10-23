@@ -45,6 +45,7 @@ INSERT = """
         proj_entry_low, proj_entry_high, proj_stop, proj_target_1, proj_target_2,
         proj_risk_reward, proj_confidence, proj_horizon_days,
         proj_trail_ma, proj_trail_confirm_closes,
+        composite_tier, composite_gate_passed,
         was_taken, outcome,
         status_at_call, regime_at_call, scored_pillars, pillars_scored,
         sentiment_scorer, gates_in_force,
@@ -55,6 +56,7 @@ INSERT = """
         %(proj_target_1)s, %(proj_target_2)s, %(proj_risk_reward)s,
         %(proj_confidence)s, %(proj_horizon_days)s,
         %(proj_trail_ma)s, %(proj_trail_confirm_closes)s,
+        %(composite_tier)s, %(composite_gate_passed)s,
         FALSE, 'open',
         %(status_at_call)s, %(regime_at_call)s, %(scored_pillars)s, %(pillars_scored)s,
         %(sentiment_scorer)s, %(gates_in_force)s,
@@ -159,6 +161,10 @@ def log_idea(
             # The remainder's exit rule, frozen with the call (O20).
             "proj_trail_ma": getattr(idea, "trail_ma", None),
             "proj_trail_confirm_closes": getattr(idea, "trail_confirm", None),
+            # D53: what the composite alone said. The flag ships WITH the change
+            # that stopped gating on it, or the change erases its own evidence.
+            "composite_tier": getattr(idea, "composite_tier", None),
+            "composite_gate_passed": getattr(idea, "composite_gate_passed", None),
             "status_at_call": idea.status,
             "regime_at_call": regime if regime is not None else regime_at(day),
             "scored_pillars": idea.mask,

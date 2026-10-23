@@ -628,3 +628,78 @@ def test_a_watch_only_idea_does_not_consume_an_actionable_slot():
     assert [idea.symbol for idea in assignment.accepted] == ["E1", "E2", "T1"]
     assert [idea.symbol for idea in assignment.watch_only] == ["E3"]
     assert run.scored[2].surfaced is False, "watch-only is not a Shadow Book call"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# D53: the composite is a conviction upgrade for a certified recipe
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _with_certification(recipe: str, **kw) -> object:
+    entry = {"status": "certified", "min_risk_reward": 2.0, "evidence": "abc1234 / deadbeef"}
+    entry.update(kw)
+    return config.ScoringConfig.model_validate(
+        {
+            **SCORING.model_dump(),
+            "certification": {
+                **{k: v.model_dump() for k, v in SCORING.certification.items()},
+                recipe: entry,
+            },
+        }
+    )
+
+
+CERTIFIED = _with_certification("pullback_to_trend")
+
+
+def test_a_certified_recipes_plan_surfaces_with_no_composite_tier_at_all():
+    """D53'S WHOLE POINT. The forcing evidence: of 310 tier-qualifying ideas on
+    2026-10-21, five produced a plan and the only one that passed every stage
+    sat at rank 51. A filter nobody has certified must not veto a recipe
+    somebody has."""
+    built = build(scored=scored(tier=None, composite=41.0), cfg=CERTIFIED)
+    assert isinstance(built, Idea), built
+    assert built.tier == "B", "sized at Tier B by default"
+    assert built.composite_tier is None
+    assert built.composite_gate_passed is False
+    assert any("conviction upgrade" in note for note in built.notes)
+
+
+def test_the_composite_tier_a_gate_upgrades_the_SIZE():
+    a = build(scored=scored(tier="A"), cfg=CERTIFIED)
+    b = build(scored=scored(tier="B", composite=62.0), cfg=CERTIFIED)
+    assert a.tier == "A" and b.tier == "B"
+    assert a.risk_pct > b.risk_pct, "Tier A size is the upgrade the composite earns"
+    assert a.composite_tier == "A" and b.composite_tier == "B"
+    assert a.composite_gate_passed is True and b.composite_gate_passed is True
+
+
+def test_a_certified_recipe_is_gated_on_ITS_OWN_r_to_r():
+    """Not the tier's. A Tier-B-sized plan under D53 would otherwise face Tier
+    B's 3:1 gate, which is calibrated to a tier and not to this recipe's
+    evidence."""
+    thin = result(plan=plan(target_2=104.0))  # R:R ~0.8
+    refused = build(scored=scored(tier=None), result=thin, cfg=CERTIFIED)
+    assert isinstance(refused, Rejection)
+    assert refused.stage == "risk_reward"
+    assert "certified minimum for pullback_to_trend" in refused.reason
+
+    ok = build(scored=scored(tier=None), result=result(plan=plan(target_2=125.0)), cfg=CERTIFIED)
+    assert isinstance(ok, Idea), "2.4:1 clears the recipe's 2.0 even with no tier"
+
+
+def test_an_uncertified_recipe_keeps_the_composite_gate():
+    """Where there is no evidence, the old conservatism stands."""
+    refused = build(scored=scored(tier=None, composite=41.0))
+    assert isinstance(refused, Rejection)
+    assert refused.stage == "tier"
+
+
+def test_every_idea_records_what_the_composite_alone_said():
+    """The flag ships WITH the change that stopped gating on it, or the change
+    erases its own evidence. Expectancy split on it IS O18's answer."""
+    for tier, expected in (("A", "A"), ("B", "B"), (None, None)):
+        built = build(scored=scored(tier=tier, composite=82.0 if tier else 41.0), cfg=CERTIFIED)
+        assert isinstance(built, Idea), built
+        assert built.composite_tier == expected
+        assert built.composite_gate_passed is (expected is not None)

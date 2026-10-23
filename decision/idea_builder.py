@@ -87,6 +87,16 @@ class Idea:
     vehicle: str
     vehicle_note: str
     notes: list[str] = field(default_factory=list)
+    composite_tier: str | None = None
+    """What the COMPOSITE alone said: A, B, or None (D53). Recorded on every
+    Shadow Book row so the forward record answers O18's question — whether the
+    composite adds anything to a recipe signal — instead of the change
+    destroying the evidence it depends on."""
+    composite_gate_passed: bool = True
+    """Would the OLD existence gate have passed? Derivable from
+    `composite_tier`, and stored anyway: this is the question D53 poses, and a
+    reader splitting expectancy on it should not have to know that NULL meant
+    refused."""
     watch_only: bool = False
     """D38's excess: the sector is at its limit, so the idea SURFACES as
     information and is not a position. It takes a digest slot and reserves no
@@ -387,23 +397,42 @@ def build_idea(
     notes: list[str] = []
     watch_only = False
 
-    if scored.tier is None:
+    # ── D53: is the COMPOSITE an existence gate for this recipe? ───────────
+    certification = scoring_cfg.certification_of(result.recipe)
+    certified = certification.status == "certified"
+    composite_tier = scored.tier
+
+    if not certified and composite_tier is None:
+        # UNCERTIFIED: the old rule stands. Nothing has shown this recipe's
+        # plans are worth surfacing on their own, so where there is no evidence
+        # the old conservatism is the right default.
         return Rejection(scored.symbol, scored.tier_reason or "no tier", "tier")
     if result.plan is None:
         return Rejection(scored.symbol, f"{result.recipe}: {result.reason}", "tier")
 
     plan = result.plan
-    tier = scored.tier
+    # THE SIZE TIER. For a certified recipe the composite decides size and not
+    # existence: Tier B by default, Tier A only when the composite Tier A gate
+    # also passes (D53). For an uncertified one it is the composite's tier, as
+    # D12 has always had it.
+    tier = ("A" if composite_tier == "A" else "B") if certified else composite_tier
 
-    # ── D12: the R:R gate ───────────────────────────────────────────────────
-    required = (
-        scoring_cfg.tiers.a.min_risk_reward if tier == "A" else scoring_cfg.tiers.b.min_risk_reward
-    )
+    # ── The R:R gate: the recipe's own when certified, D12's tier gate otherwise
+    if certified:
+        required = certification.min_risk_reward
+        gate_name = f"the {required:g}:1 certified minimum for {result.recipe}"
+    else:
+        required = (
+            scoring_cfg.tiers.a.min_risk_reward
+            if tier == "A"
+            else scoring_cfg.tiers.b.min_risk_reward
+        )
+        gate_name = f"the {required:g}:1 Tier {tier} minimum (D12)"
     if plan.risk_reward < required:
         return Rejection(
             scored.symbol,
-            f"R:R {plan.risk_reward:.2f} below the {required:g}:1 Tier {tier} minimum "
-            f"(D12) — the structure does not pay enough for the risk",
+            f"R:R {plan.risk_reward:.2f} below {gate_name} — the structure does not "
+            f"pay enough for the risk",
             "risk_reward",
         )
 
@@ -494,6 +523,17 @@ def build_idea(
 
     # D41: the mask is printed on every card, because a composite of 72 from
     # two pillars is not the claim 72 from four is.
+    if certified and composite_tier != "A":
+        notes.append(
+            f"sized at TIER B under D53: {result.recipe} is certified "
+            f"({certification.evidence}), so the composite is a conviction upgrade "
+            f"and not a gate — "
+            + (
+                f"the composite reached Tier {composite_tier} only"
+                if composite_tier
+                else "the composite cleared no tier at all"
+            )
+        )
     if scored.pillars_scored < 4:
         notes.append(
             f"composite rests on {scored.pillars_scored} of 4 pillars "
@@ -530,4 +570,6 @@ def build_idea(
         vehicle_note=vehicle_note,
         notes=notes,
         watch_only=watch_only,
+        composite_tier=composite_tier,
+        composite_gate_passed=composite_tier is not None,
     )

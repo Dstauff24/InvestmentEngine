@@ -370,6 +370,56 @@ class Recipes(Base):
 StrategyStatus = Literal["shadow", "paper", "live"]
 
 
+CertificationStatus = Literal["certified", "uncertified"]
+
+
+class RecipeCertification(Base):
+    """D53: has this recipe's EDGE been certified, and on what evidence?
+
+    A different axis from D40's ladder. `status` answers "did a pre-registered
+    certifying run pass on an out-of-sample window", while `promotion.status`
+    answers "what is the engine allowed to do with it". A recipe can be
+    certified and still `shadow`.
+
+    **A CERTIFIED RECIPE'S PLAN IS NOT GATED BY THE COMPOSITE.** Until O18
+    shows the composite carries information about recipe outcomes, it is a
+    conviction upgrade: the plan surfaces on `min_risk_reward` plus the risk
+    stages, is sized at Tier B, and reaches Tier A size only by also clearing
+    the composite Tier A gate.
+
+    **CERTIFICATION REQUIRES A CITATION, enforced here.** "Certified" with no
+    commit and config hash is an opinion, and this is the one flag in the repo
+    that can let a plan past a gate — so the loader refuses the word without
+    the evidence behind it.
+    """
+
+    status: CertificationStatus
+    min_risk_reward: Annotated[float, Field(gt=0)] | None = None
+    """The R:R gate the recipe's OWN evidence certified. Required when
+    certified; meaningless otherwise, because an uncertified recipe is gated by
+    its tier (D12) as before."""
+    evidence: str | None = None
+    """Commit and config hash of the certifying run, e.g.
+    `1625c95 / a2fae6823605`. Required when certified."""
+
+    @model_validator(mode="after")
+    def _certified_means_evidenced(self):
+        if self.status != "certified":
+            return self
+        if self.min_risk_reward is None:
+            raise ValueError(
+                "a certified recipe needs its own `min_risk_reward`: under D53 that "
+                "gate is what lets its plan past the composite, so it cannot be absent"
+            )
+        if not (self.evidence or "").strip():
+            raise ValueError(
+                "a certified recipe needs `evidence` — the commit and config hash of "
+                "the certifying run. 'Certified' without a citation is an opinion, and "
+                "this is the one flag that can let a plan past a gate"
+            )
+        return self
+
+
 class PromotionStatus(Base):
     """D40: one status per recipe. A promotion is a one-line diff."""
 
@@ -587,6 +637,40 @@ class ScoringConfig(Base):
     ranking: Ranking
     sentiment_reinstatement: SentimentReinstatement
     recipes: Recipes
+    certification: dict[str, RecipeCertification]
+    """D53, one entry per recipe. A MAPPING rather than three named fields so
+    the validator below can insist the two sets match exactly: a recipe with no
+    entry must fail the loader, because a recipe silently defaulting to
+    `uncertified` would be the safe-looking answer and a recipe defaulting to
+    `certified` would undo D53 in silence."""
+
+    @model_validator(mode="after")
+    def _every_recipe_has_a_certification(self):
+        recipes = set(type(self.recipes).model_fields)
+        certified = set(self.certification)
+        missing = recipes - certified
+        extra = certified - recipes
+        if missing:
+            raise ValueError(
+                f"no D53 certification entry for recipe(s) {sorted(missing)}. Add them "
+                f"to scoring.certification: a new recipe is `uncertified` until a "
+                f"pre-registered certifying run says otherwise, and that has to be "
+                f"written down rather than defaulted"
+            )
+        if extra:
+            raise ValueError(
+                f"scoring.certification names {sorted(extra)}, which is not a recipe. "
+                f"A certification for a recipe that does not exist is a typo that would "
+                f"leave a real recipe uncovered"
+            )
+        return self
+
+    def certification_of(self, recipe: str) -> RecipeCertification:
+        """The certification for a recipe, raising rather than defaulting."""
+        try:
+            return self.certification[recipe]
+        except KeyError as exc:
+            raise ConfigError(f"no D53 certification configured for recipe {recipe!r}") from exc
 
     @model_validator(mode="after")
     def _gates_are_reachable(self):

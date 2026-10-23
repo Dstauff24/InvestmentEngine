@@ -29,6 +29,7 @@ MIGRATIONS_DIR = DB_DIR / "migrations"
 # schema.sql, so the orchestrator's preflight cannot silently pass on a
 # half-built database.
 EXPECTED_TABLES = [
+    "account_snapshots",
     "alerts",
     "api_budget",
     "corporate_actions",

@@ -205,6 +205,22 @@ class SchwabClient:
     def quotes(self, symbols: list[str]) -> dict:
         return self._call("get_quotes", [to_schwab_symbol(s) for s in symbols])
 
+    def accounts_with_positions(self) -> list[dict]:
+        """Every linked account with its positions and balances. READ-ONLY.
+
+        **THE ONLY ACCOUNT ENDPOINT THIS REPO WILL EVER CALL.** D52 makes the
+        core layer the product and the mandate is read-only in every phase: no
+        order placement, no order preview, no transfer, not behind a flag. The
+        account identifier Schwab returns here is already a HASH — the plain
+        account number lives in a different endpoint that nothing here calls,
+        so the engine cannot store one it never fetched.
+
+        `schwab-py` returns a LIST of accounts, each wrapped in a
+        `securitiesAccount` envelope; the parser unwraps it rather than this
+        method, so a shape change is visible in one place.
+        """
+        return self._call("get_accounts", fields=self.raw.Account.Fields.POSITIONS)
+
 
 def to_schwab_symbol(symbol: str) -> str:
     """Canonical form -> Schwab's slash form. BRK-B -> BRK/B.

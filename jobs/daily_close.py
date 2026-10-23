@@ -51,6 +51,7 @@ from ingest import (
     fmp_events,
     fmp_fundamentals,
     schwab_chains,
+    schwab_positions,
     schwab_prices,
 )
 from ingest.fmp_estimates import EstimatesPlanBlocked
@@ -177,6 +178,16 @@ def build_plan() -> list[Step]:
             # which is a day slower rather than wrong.
             depends_on=("fmp_events",),
             description="earnings release times (bmo/amc) from Finnhub (D49)",
+        ),
+        Step(
+            "schwab_positions",
+            lambda: schwab_positions.run(),
+            # O17/D52's primary product starts accruing here. NON-CRITICAL and
+            # for the same reason as EDGAR's: an account is re-readable at any
+            # time, so a failure costs FRESHNESS rather than history — unlike
+            # the chain and estimate snapshots, which cannot be bought back.
+            # READ-ONLY: one endpoint, no order placement anywhere in this repo.
+            description="read-only positions + account balances (O17, D52)",
         ),
         Step(
             "price_basis_check",

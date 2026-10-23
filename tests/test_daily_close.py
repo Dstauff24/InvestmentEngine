@@ -68,6 +68,7 @@ def test_fundamentals_run_after_events():
 # the ingestion-order tests below define themselves as "everything else", so a
 # new derived step added to one list and not the other would silently move what
 # they assert.
+# Every step that READS what was ingested rather than fetching it.
 DERIVED = {
     "scoring_pass",
     "outcome_tracker",
@@ -468,3 +469,25 @@ def test_the_report_names_unprovisioned_providers():
 @pytest.mark.parametrize("outcome", [12, {"earnings": 3, "splits": 1}, None])
 def test_step_outcomes_are_summarised_without_crashing(outcome):
     assert isinstance(daily_close._describe(outcome), str)
+
+
+def test_the_positions_sync_is_non_critical_and_read_only():
+    """O17/D52. Non-critical for EDGAR's reason, not the snapshots': an account
+    is re-readable at any time, so a failure costs freshness rather than
+    history. And read-only is a mandate — the step exists to accrue account
+    snapshots, never to act."""
+    plan = {s.name: s for s in build_plan()}
+    step = plan["schwab_positions"]
+    assert step.critical is False
+    assert "read-only" in step.description
+    assert step.depends_on == ()
+
+
+def test_the_positions_sync_is_an_ingestion_step_not_a_derived_one():
+    """It reads the broker, so it belongs with the fetchers — and it must not
+    sit after the derived layers, where a failure would look like a scoring
+    problem."""
+    names = [s.name for s in build_plan()]
+    assert "schwab_positions" not in DERIVED
+    first_derived = min(names.index(n) for n in DERIVED)
+    assert names.index("schwab_positions") < first_derived
