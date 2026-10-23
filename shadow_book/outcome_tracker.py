@@ -53,6 +53,7 @@ JOB_NAME = "outcome_tracker"
 __all__ = [
     "Change",
     "TrackResult",
+    "attach_trail_ma",
     "evaluate_call",
     "in_call_basis",
     "run",
@@ -63,7 +64,8 @@ __all__ = [
 OPEN_CALLS = """
     SELECT id, symbol, tier, recipe, strategy, called_on,
            proj_entry_low, proj_entry_high, proj_stop, proj_target_1, proj_target_2,
-           proj_horizon_days, current_stop, stop_to_breakeven_on,
+           proj_horizon_days, proj_trail_ma, proj_trail_confirm_closes,
+           current_stop, stop_to_breakeven_on,
            hit_target_1, hit_target_2, last_evaluated_on,
            max_favorable_excursion, max_adverse_excursion
     FROM   shadow_book
@@ -76,6 +78,17 @@ BARS = """
     FROM   prices_daily
     WHERE  symbol = %s AND session_date > %s AND session_date <= %s
     ORDER  BY session_date
+"""
+
+# The trail's MA needs bars BEFORE the evaluation window. Read separately and
+# used only to seed the average: evaluating them again would re-walk days
+# `last_evaluated_on` already settled, which is what makes this job idempotent.
+LEADING_BARS = """
+    SELECT session_date, open, high, low, close
+    FROM   prices_daily
+    WHERE  symbol = %s AND session_date <= %s
+    ORDER  BY session_date DESC
+    LIMIT  %s
 """
 
 DIVIDENDS = """
@@ -111,6 +124,7 @@ UPDATE = """
         actual_exit             = %(actual_exit)s,
         actual_exit_at          = %(actual_exit_at)s,
         r_multiple              = %(r_multiple)s,
+        trimmed_r_multiple      = %(trimmed_r_multiple)s,
         return_pct              = %(return_pct)s,
         days_held               = %(days_held)s,
         closed_at               = %(closed_at)s,
@@ -155,6 +169,17 @@ class TrackResult:
     actual_exit: float | None = None
     actual_exit_at: date | None = None
     r_multiple: float | None = None
+    """WHOLE-POSITION R: the final exit against the entry, on the original
+    risk. Unchanged, and deliberately so — every decision already made reads
+    this number, and a column that changed meaning would make D48's citation
+    and O15's refusal unreadable."""
+    trimmed_r: float | None = None
+    """R as the WEIGHTED SUM OF THE LEGS (O20): the trim at TP1 plus the
+    remainder at whatever closed it, both on the ORIGINAL risk. The strategy as
+    DEFINED — a trade that trims a third at TP1 and trails the rest is not the
+    trade a whole-position R describes."""
+    legs: list[tuple[float, float, str]] = field(default_factory=list)
+    """(fraction, exit price, why) per leg, in the order they happened."""
     return_pct: float | None = None
     days_held: int | None = None
     changes: list[Change] = field(default_factory=list)
@@ -210,6 +235,32 @@ def in_call_basis(
     return rebased_bars, rebased_dividends
 
 
+def attach_trail_ma(bars: list[dict], window: int) -> list[dict]:
+    """Add `trail_ma` (the simple moving average of closes) to every bar.
+
+    **ONE IMPLEMENTATION, because two callers must not disagree.** The live
+    tracker and `backtest/resolve.py` both need the trail's MA, and a backtest
+    whose MA was computed differently from the tracker's would report an
+    expectancy the Shadow Book could never reproduce — the same reason D39(4)
+    makes them share the fill function at all.
+
+    `trail_ma` is None on a bar without `window` closes behind it IN THIS LIST,
+    so the caller must hand over the leading bars. None means "cannot compute",
+    and the trail simply does not fire on such a bar — never a zero, which
+    would read as an MA below every price and exit the runner immediately.
+    """
+    out: list[dict] = []
+    closes: list[float] = []
+    for bar in bars:
+        row = dict(bar)
+        close = bar.get("close")
+        if close is not None:
+            closes.append(float(close))
+        row["trail_ma"] = sum(closes[-window:]) / window if len(closes) >= window >= 1 else None
+        out.append(row)
+    return out
+
+
 def evaluate_call(
     call: dict, bars: list[dict], dividends: list[dict], *, as_of: date
 ) -> TrackResult:
@@ -224,7 +275,12 @@ def evaluate_call(
     entry_low = float(call["proj_entry_low"])
     entry_high = float(call["proj_entry_high"])
     target_1 = float(call["proj_target_1"])
-    target_2 = float(call["proj_target_2"])
+    # None for a TRAILING plan (O20): the runner has no far target, which is
+    # the design rather than a missing value.
+    target_2 = _f(call.get("proj_target_2"))
+    trail_ma = _i(call.get("proj_trail_ma"))
+    trail_confirm = _i(call.get("proj_trail_confirm_closes")) or 1
+    trim_1 = float(exits.swing.trim_at_target_1)
     stop = float(call["current_stop"] or call["proj_stop"])
     horizon = int(call["proj_horizon_days"] or exits.swing.max_holding_days or 45)
 
@@ -235,6 +291,7 @@ def evaluate_call(
     breakeven_on = call.get("stop_to_breakeven_on")
 
     dividend_by_date = {_d(d["ex_date"]): float(d["cash_amount"] or 0) for d in dividends}
+    closes_below_trail = 0
     entry_price = result.actual_entry
     entered_on = _d(call.get("actual_entry_at")) if call.get("actual_entry_at") else None
     mfe = _f(call.get("max_favorable_excursion"))
@@ -291,7 +348,7 @@ def evaluate_call(
 
         touched_stop = low <= stop
         touched_t1 = high >= target_1
-        touched_t2 = high >= target_2
+        touched_t2 = target_2 is not None and high >= target_2
 
         # THE AMBIGUOUS BAR. No intrabar sequence, and the cost is asymmetric:
         # assuming the target came first flatters every result in exactly the
@@ -302,6 +359,8 @@ def evaluate_call(
             result.outcome = "stopped"
             result.actual_exit = stop
             result.actual_exit_at = day
+            # The whole position: the stop came before any trim.
+            result.legs.append((1.0 - _taken(result.legs), stop, "stopped"))
             result.changes.append(
                 Change(
                     call["id"],
@@ -320,6 +379,11 @@ def evaluate_call(
             result.outcome = "target_2"
             result.actual_exit = target_2
             result.actual_exit_at = day
+            # A gap can clear TP2 before TP1 was ever recorded; the trim still
+            # happened on the way through, so it is booked at TP1's price.
+            if not _has_leg(result.legs, "target_1"):
+                result.legs.append((trim_1, target_1, "target_1"))
+            result.legs.append((1.0 - _taken(result.legs), target_2, "target_2"))
             result.changes.append(
                 Change(
                     call["id"],
@@ -334,6 +398,9 @@ def evaluate_call(
 
         if touched_t1 and not result.hit_target_1:
             result.hit_target_1 = True
+            # LEG ONE. `trim_at_target_1` has been in risk.yaml since the
+            # framework was written and nothing read it until O20.
+            result.legs.append((trim_1, target_1, "target_1"))
             result.changes.append(
                 Change(
                     call["id"],
@@ -358,13 +425,47 @@ def evaluate_call(
             result.outcome = "target_1"
             result.actual_exit = stop
             result.actual_exit_at = day
+            result.legs.append((1.0 - _taken(result.legs), stop, "breakeven_stop"))
             break
+
+        # THE TRAIL (O20), on the REMAINDER only: before TP1 the structural
+        # stop governs, and the trail is the runner's rule. A close below the
+        # MA is an exit signal rather than an intrabar touch, so there is no
+        # ambiguous-bar question here — the close is unambiguous by
+        # construction.
+        if trail_ma is not None and result.hit_target_1:
+            level = bar.get("trail_ma")
+            if level is None:
+                # Cannot compute the MA for this bar: the trail does not fire.
+                # Never treated as "below", which would exit on ignorance.
+                closes_below_trail = 0
+            else:
+                close = float(bar["close"])
+                closes_below_trail = closes_below_trail + 1 if close < float(level) else 0
+                if closes_below_trail >= trail_confirm:
+                    result.outcome = "trailed"
+                    result.actual_exit = close
+                    result.actual_exit_at = day
+                    result.legs.append((1.0 - _taken(result.legs), close, "trailed"))
+                    result.changes.append(
+                        Change(
+                            call["id"],
+                            call["symbol"],
+                            call["recipe"],
+                            call["tier"],
+                            "trailed",
+                            f"closed {closes_below_trail} day(s) under the "
+                            f"{trail_ma}MA, out at {close:.2f}",
+                        )
+                    )
+                    break
 
         held = (day - (entered_on or day)).days
         if held >= horizon and _has_timeout(call["strategy"], exits):
             result.outcome = "timeout"
             result.actual_exit = float(bar["close"])
             result.actual_exit_at = day
+            result.legs.append((1.0 - _taken(result.legs), result.actual_exit, "timeout"))
             result.changes.append(
                 Change(
                     call["id"],
@@ -400,6 +501,12 @@ def evaluate_call(
     risk = entry_price - float(call["proj_stop"])
     if result.actual_exit is not None and risk > 0:
         result.r_multiple = (result.actual_exit - entry_price) / risk
+        # THE LEGS, on the ORIGINAL risk — the denominator never changes as the
+        # stop moves, or a trade whose stop reached breakeven would report an
+        # infinite R.
+        result.trimmed_r = sum(
+            fraction * (price - entry_price) / risk for fraction, price, _ in result.legs
+        )
         result.return_pct = (result.actual_exit - entry_price) / entry_price * 100.0
         result.days_held = (_d(result.actual_exit_at) - (entered_on or _d(call["called_on"]))).days
     return result
@@ -437,6 +544,17 @@ def track_open_calls(*, as_of: date | None = None) -> list[Change]:
                 called_on,
             )
         bars, dividends = in_call_basis(bars, dividends, splits)
+
+        # THE TRAIL'S MA, on the call's basis and computed once (O20). The
+        # leading bars are rebased with the rest and then dropped: they exist
+        # to seed the average, not to be re-evaluated.
+        window = _i(call.get("proj_trail_ma"))
+        if window and bars:
+            leading = db.fetch_all(LEADING_BARS, (call["symbol"], since, window * 3))
+            leading, _ = in_call_basis(list(reversed(leading)), [], splits)
+            seeded = attach_trail_ma([*leading, *bars], window)
+            bars = seeded[len(leading) :]
+
         result = evaluate_call(call, bars, dividends, as_of=day)
 
         db.execute(
@@ -464,6 +582,7 @@ def track_open_calls(*, as_of: date | None = None) -> list[Change]:
                     else None
                 ),
                 "r_multiple": result.r_multiple,
+                "trimmed_r_multiple": result.trimmed_r,
                 "return_pct": result.return_pct,
                 "days_held": result.days_held,
                 "closed_at": (clock.session_close_utc(day) if result.outcome != "open" else None),
@@ -496,6 +615,19 @@ def _has_timeout(strategy: str | None, exits) -> bool:
     # trigger, so neither gets a day-count clock (a second clock would fire
     # before the thesis had a chance).
     return False
+
+
+def _taken(legs: list[tuple[float, float, str]]) -> float:
+    """How much of the position has already left."""
+    return sum(fraction for fraction, _, _ in legs)
+
+
+def _has_leg(legs: list[tuple[float, float, str]], why: str) -> bool:
+    return any(reason == why for _, _, reason in legs)
+
+
+def _i(value) -> int | None:
+    return None if value is None else int(value)
 
 
 def _f(value) -> float | None:

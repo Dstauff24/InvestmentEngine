@@ -286,6 +286,11 @@ geometry:
     # beyond the reclaim. Structure the market made, independent of where price
     # sits today.
     tp2_leg_multiple: 1.0            # [OPEN] #83
+    # v3 only. Closes below the trail MA before the runner leaves. 1 is "exit
+    # on the first close below"; 2 asks for confirmation and gives back a day
+    # to get it. The trail ITSELF is `exits.swing.runner_trail` in risk.yaml,
+    # which has said ma_20 since the framework was written.
+    trail_confirm_closes: 1          # [OPEN] #84
 
   base_breakout:
     # TP1 = entry + base depth (the classic measured move). TP2 extends it.

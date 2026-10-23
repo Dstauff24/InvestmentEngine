@@ -24,7 +24,7 @@ import pandas as pd
 
 from backtest.costs import CostModel, Vehicle
 from scoring.recipes.base import TradePlan
-from shadow_book.outcome_tracker import TrackResult, evaluate_call
+from shadow_book.outcome_tracker import TrackResult, attach_trail_ma, evaluate_call
 
 __all__ = ["SimFill", "resolve_plan"]
 
@@ -52,6 +52,11 @@ class SimFill:
     exit_on: date | None
     gross_r: float | None
     net_r: float | None
+    trimmed_r: float | None
+    """R as the weighted sum of the legs on the original risk (O20): the trim at
+    TP1 plus the remainder at whatever closed it. GROSS of friction, like
+    `gross_r` — charging slippage per leg needs a per-leg share count, which is
+    position accounting (O17) rather than resolution."""
     return_pct: float | None
     days_held: int | None
     mfe: float | None
@@ -70,7 +75,12 @@ class SimFill:
 
 
 def _call_dict(
-    *, symbol: str, recipe: str, plan: TradePlan, called_on: date, horizon_days: int
+    *,
+    symbol: str,
+    recipe: str,
+    plan: TradePlan,
+    called_on: date,
+    horizon_days: int,
 ) -> dict:
     """The shape `evaluate_call` reads, exactly as the SQL returns it.
 
@@ -91,6 +101,10 @@ def _call_dict(
         "proj_target_1": plan.target_1,
         "proj_target_2": plan.target_2,
         "proj_horizon_days": horizon_days,
+        # The remainder's exit rule travels with the call, exactly as it does
+        # in `shadow_book` (O20). A trailing plan has no TP2 above.
+        "proj_trail_ma": plan.trail_ma,
+        "proj_trail_confirm_closes": plan.trail_confirm,
         "current_stop": plan.stop,
         "stop_to_breakeven_on": None,
         "hit_target_1": False,
@@ -116,7 +130,9 @@ def bar_columns(bars: pd.DataFrame) -> dict[str, str]:
     return {field: (f"adj_{field}" if f"adj_{field}" in bars.columns else field) for field in OHLC}
 
 
-def forward_bars(bars: pd.DataFrame, *, after: date, horizon_days: int) -> list[dict]:
+def forward_bars(
+    bars: pd.DataFrame, *, after: date, horizon_days: int, trail_ma: int | None = None
+) -> list[dict]:
     """Bars STRICTLY AFTER the call, which is what next-day entry means.
 
     A plan is formed on the close of the day that produced it, so the first bar
@@ -136,19 +152,34 @@ def forward_bars(bars: pd.DataFrame, *, after: date, horizon_days: int) -> list[
         return []
 
     columns = bar_columns(bars)
-    frame = window[["session_date", *columns.values()]].rename(
-        columns={source: field for field, source in columns.items()}
-    )
-    return [
-        {
-            "session_date": row["session_date"],
-            "open": float(row["open"]),
-            "high": float(row["high"]),
-            "low": float(row["low"]),
-            "close": float(row["close"]),
-        }
-        for row in frame.to_dict("records")
-    ]
+
+    def rows_from(frame) -> list[dict]:
+        named = frame[["session_date", *columns.values()]].rename(
+            columns={source: field for field, source in columns.items()}
+        )
+        return [
+            {
+                "session_date": row["session_date"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            }
+            for row in named.to_dict("records")
+        ]
+
+    forward = rows_from(window)
+    if not trail_ma:
+        return forward
+
+    # THE TRAIL'S MA NEEDS BARS BEFORE THE CALL, and it must be the same
+    # average the live tracker computes — so the leading bars go through the
+    # tracker's own `attach_trail_ma` rather than a pandas rolling mean here.
+    # Two implementations of one average is how a backtest comes to report an
+    # expectancy the Shadow Book can never reproduce (D39(4)).
+    leading = rows_from(bars[bars["session_date"] <= after].tail(trail_ma * 3))
+    seeded = attach_trail_ma([*leading, *forward], trail_ma)
+    return seeded[len(leading) :]
 
 
 def resolve_plan(
@@ -166,7 +197,7 @@ def resolve_plan(
 ) -> SimFill:
     """Hand one plan to the tracker's rules and price the result."""
     horizon = horizon_days or plan.horizon_days[1]
-    rows = forward_bars(bars, after=called_on, horizon_days=horizon)
+    rows = forward_bars(bars, after=called_on, horizon_days=horizon, trail_ma=plan.trail_ma)
     if not rows:
         # No forward bars at all: the plan was made on the last session we hold.
         # Not a trade, and NOT a loss — counting it either way would invent an
@@ -175,7 +206,11 @@ def resolve_plan(
 
     result: TrackResult = evaluate_call(
         _call_dict(
-            symbol=symbol, recipe=recipe, plan=plan, called_on=called_on, horizon_days=horizon
+            symbol=symbol,
+            recipe=recipe,
+            plan=plan,
+            called_on=called_on,
+            horizon_days=horizon,
         ),
         rows,
         dividends,
@@ -199,6 +234,7 @@ def resolve_plan(
         exit_on=result.actual_exit_at,
         gross_r=result.r_multiple,
         net_r=net,
+        trimmed_r=result.trimmed_r,
         return_pct=result.return_pct,
         days_held=result.days_held,
         mfe=result.mfe,
@@ -218,6 +254,7 @@ def _empty(outcome: str) -> SimFill:
         exit_on=None,
         gross_r=None,
         net_r=None,
+        trimmed_r=None,
         return_pct=None,
         days_held=None,
         mfe=None,

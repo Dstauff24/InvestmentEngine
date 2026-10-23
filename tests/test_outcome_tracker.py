@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from shadow_book.outcome_tracker import evaluate_call, in_call_basis
+from shadow_book.outcome_tracker import attach_trail_ma, evaluate_call, in_call_basis
 
 CALLED = date(2026, 10, 1)
 
@@ -325,3 +325,165 @@ def test_a_dividend_after_a_split_is_rebased_with_the_bars():
 def test_several_splits_compound():
     bars, _ = in_call_basis([bar(9, 5.0, 4.0)], [], [_split(3, 2.0), _split(6, 5.0)])
     assert bars[0]["high"] == pytest.approx(50.0)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The trail, and R measured in legs (O20)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def trailing_call(**kw) -> dict:
+    """A v3 call: no TP2, a 3-day MA trail, confirm on one close."""
+    base = call(proj_target_2=None, proj_trail_ma=3, proj_trail_confirm_closes=1)
+    base.update(kw)
+    return base
+
+
+def test_the_trail_needs_the_ma_attached_and_computes_it_once():
+    """ONE IMPLEMENTATION, because two callers must not disagree: a backtest
+    whose MA differed from the tracker's would report an expectancy the Shadow
+    Book could never reproduce."""
+    rows = attach_trail_ma([bar(i, 100 + i, 100 + i, 100 + i) for i in range(5)], 3)
+    assert rows[0]["trail_ma"] is None, "no window behind it yet"
+    assert rows[1]["trail_ma"] is None
+    assert rows[2]["trail_ma"] == pytest.approx((100 + 101 + 102) / 3)
+    assert rows[4]["trail_ma"] == pytest.approx((102 + 103 + 104) / 3)
+
+
+def test_the_runner_leaves_on_a_close_below_the_trail():
+    """v3's defining exit. The trim happened at TP1; the remainder rides until
+    price closes under the MA."""
+    bars = attach_trail_ma(
+        [
+            bar(1, 102, 100.0, 101.0),
+            bar(2, 112, 108.0, 111.0),  # clears TP1 at 110
+            bar(3, 113, 110.0, 112.0),
+            bar(4, 113, 109.0, 109.5),  # closes under the rising MA
+        ],
+        3,
+    )
+    result = evaluate_call(trailing_call(), bars, [], as_of=CALLED + timedelta(days=4))
+    assert result.outcome == "trailed"
+    assert result.hit_target_1 is True
+    assert result.actual_exit == pytest.approx(109.5)
+
+
+def test_the_trail_does_not_fire_before_the_trim():
+    """Before TP1 the STRUCTURAL stop governs; the trail is the runner's rule,
+    and firing it early would exit a position that has not been trimmed."""
+    bars = attach_trail_ma(
+        [bar(1, 102, 100.0, 101.0), bar(2, 101, 99.0, 99.0), bar(3, 100, 98.5, 98.5)],
+        3,
+    )
+    result = evaluate_call(trailing_call(), bars, [], as_of=CALLED + timedelta(days=3))
+    assert result.outcome == "open", "under the MA, but TP1 was never reached"
+
+
+def test_a_bar_with_no_computable_ma_does_not_exit_the_runner():
+    """None means "cannot compute", never "below": exiting on ignorance would
+    close the trade on the first bar of every window."""
+    bars = [
+        dict(bar(1, 102, 100.0, 101.0), trail_ma=None),
+        dict(bar(2, 112, 108.0, 111.0), trail_ma=None),
+    ]
+    result = evaluate_call(trailing_call(), bars, [], as_of=CALLED + timedelta(days=2))
+    assert result.hit_target_1 is True, "filled on bar 1, cleared TP1 on bar 2"
+    assert result.outcome == "open"
+
+
+def test_the_confirmation_count_is_honoured():
+    """`trail_confirm_closes: 2` asks for a second close under the MA and gives
+    back a day to get it."""
+    rows = attach_trail_ma(
+        [
+            bar(1, 102, 100.0, 101.0),  # fills at 100
+            bar(2, 112, 108.0, 111.0),  # clears TP1 at 110
+            bar(3, 113, 109.0, 109.0),  # first close under the 2-day MA (110.0)
+            bar(4, 112, 108.0, 108.0),  # second (MA 108.5)
+        ],
+        2,
+    )
+    once = evaluate_call(trailing_call(proj_trail_ma=2), rows, [], as_of=CALLED + timedelta(days=4))
+    assert once.outcome == "trailed"
+    assert once.actual_exit == pytest.approx(109.0)
+
+    twice = evaluate_call(
+        trailing_call(proj_trail_ma=2, proj_trail_confirm_closes=2),
+        rows,
+        [],
+        as_of=CALLED + timedelta(days=4),
+    )
+    assert twice.outcome == "trailed"
+    assert twice.actual_exit == pytest.approx(108.0), "one day later, as asked"
+
+
+# ── R in legs ───────────────────────────────────────────────────────────────
+
+
+def test_a_stop_before_the_trim_is_one_leg_and_both_r_numbers_agree():
+    """Nothing was trimmed, so the legs are the whole position and the two
+    bases say the same thing. The trimmed number must not quietly differ where
+    there is no trim."""
+    result = evaluate_call(call(), [bar(1, 102, 100.0), bar(2, 101, 94.0)], [], as_of=CALLED)
+    assert result.outcome == "stopped"
+    assert result.r_multiple == pytest.approx(result.trimmed_r)
+    assert result.legs == [(1.0, 95.0, "stopped")]
+
+
+def test_the_trim_pays_for_the_remainder_when_the_stop_comes_back_to_breakeven():
+    """THE CASE THE WHOLE-POSITION NUMBER CANNOT SEE. TP1 at 110 on an entry of
+    100 with a 95 stop is +2R on a third; the remainder then stops at breakeven
+    for nothing. Whole-position R reads 0.0 — the trade "went nowhere" — while
+    the strategy as defined banked a third of a 2R move."""
+    bars = [bar(1, 102, 100.0), bar(2, 112, 108.0), bar(3, 101, 99.0)]
+    result = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=3))
+    assert result.outcome == "target_1"
+    assert result.r_multiple == pytest.approx(0.0, abs=1e-9)
+    assert result.trimmed_r == pytest.approx(0.3333 * 2.0, abs=1e-3)
+
+
+def test_the_legs_are_measured_on_the_ORIGINAL_risk():
+    """The denominator never moves as the stop does. Measured against the
+    breakeven stop, the remainder's R would be infinite."""
+    bars = [
+        bar(1, 102, 100.0, 101.0),  # fills at 100, original risk 100 - 95 = 5
+        bar(2, 112, 108.0, 111.0),  # TP1 at 110: a third off at +2R
+        bar(3, 120, 118.0, 119.0),  # still above the MA
+        bar(4, 119, 111.0, 112.0),  # closes under it: the runner leaves at 112
+    ]
+    result = evaluate_call(
+        trailing_call(proj_trail_ma=2),
+        attach_trail_ma(bars, 2),
+        [],
+        as_of=CALLED + timedelta(days=4),
+    )
+    assert result.outcome == "trailed"
+    assert result.actual_exit == pytest.approx(112.0)
+
+    risk = 100.0 - 95.0
+    expected = 0.3333 * (110.0 - 100.0) / risk + (1 - 0.3333) * (112.0 - 100.0) / risk
+    assert result.trimmed_r == pytest.approx(expected, abs=1e-3)
+    # The whole-position number sees only the final exit.
+    assert result.r_multiple == pytest.approx((112.0 - 100.0) / risk)
+
+
+def test_a_gap_through_both_targets_still_books_the_trim_at_tp1():
+    """A bar that clears TP2 outright passed through TP1 on the way, so the
+    trim happened at TP1's price — not at TP2's, which would pay the trim a
+    price it never got."""
+    bars = [bar(1, 102, 100.0), bar(2, 130, 126.0)]
+    result = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=2))
+    assert result.outcome == "target_2"
+    assert [leg[2] for leg in result.legs] == ["target_1", "target_2"]
+    assert result.legs[0][1] == pytest.approx(110.0)
+    assert result.trimmed_r < result.r_multiple, "the trim took a worse price than TP2"
+
+
+def test_the_accounting_moves_no_exit():
+    """The legs are an ACCOUNTING layer over the same resolution: same fills,
+    same pessimistic ambiguous bar, same timeout. If this ever changes, every
+    past decision's `r_multiple` moves under it."""
+    bars = [bar(1, 102, 100.0), bar(2, 112, 94.0)]  # touches TP1 and the stop
+    result = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=2))
+    assert result.outcome == "stopped", "pessimistic, exactly as before"
+    assert result.r_multiple == pytest.approx(-1.0)

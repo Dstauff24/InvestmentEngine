@@ -647,6 +647,10 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     proj_target_1           NUMERIC(18, 6),
     proj_target_2           NUMERIC(18, 6),
     proj_risk_reward        NUMERIC(10, 4),
+    -- O20: the remainder's exit rule, frozen with the call like proj_stop. A
+    -- trailing plan has NO TP2, which is why proj_target_2 is nullable.
+    proj_trail_ma             SMALLINT,
+    proj_trail_confirm_closes SMALLINT,
     proj_confidence         NUMERIC(6, 2),
     proj_horizon_days       INTEGER,
 
@@ -665,14 +669,20 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     max_adverse_excursion   NUMERIC(18, 6),
 
     r_multiple              NUMERIC(12, 6),   -- realized P&L / initial risk
+    -- R as the WEIGHTED SUM OF THE LEGS on the original risk (O20). Beside
+    -- r_multiple, never replacing it: the whole-position number keeps every
+    -- decision already made on it reproducible, and this one is the strategy
+    -- as defined. Storing both and choosing at read time is D24's principle
+    -- applied to outcomes.
+    trimmed_r_multiple      NUMERIC(10, 4),
     return_pct              NUMERIC(12, 6),
     total_return_pct        NUMERIC(12, 6),   -- D19: includes dividends
     days_held               INTEGER,
 
     outcome                 TEXT NOT NULL DEFAULT 'open'
                             CHECK (outcome IN ('open', 'target_1', 'target_2',
-                                               'stopped', 'timeout', 'invalidated',
-                                               'never_triggered')),
+                                               'trailed', 'stopped', 'timeout',
+                                               'invalidated', 'never_triggered')),
     closed_at               TIMESTAMPTZ,
     notes                   TEXT,
 

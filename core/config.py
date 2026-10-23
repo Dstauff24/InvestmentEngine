@@ -292,6 +292,7 @@ class PullbackGeometry(Base):
     tp2_measured_move: float  # [OPEN] #72 — v1 only
     pullback_low_lookback_days: PositiveInt  # [OPEN] #82 — v2 and v3
     tp2_leg_multiple: float  # [OPEN] #83 — v2 only
+    trail_confirm_closes: PositiveInt  # [OPEN] #84 — v3 only
 
     @model_validator(mode="after")
     def _coherent(self):

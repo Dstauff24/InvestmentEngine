@@ -1033,8 +1033,8 @@ def retired_parameters() -> set[int]:
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
 
 
-def test_the_doc_lists_exactly_81_live_parameters_and_two_tombstones():
-    assert len(documented_parameters()) == 81
+def test_the_doc_lists_exactly_82_live_parameters_and_two_tombstones():
+    assert len(documented_parameters()) == 82
     # #12 retired by D49 (max_days_since_earnings), #8 by O13's redesign
     # (range_contraction_ratio). Numbers are never reused.
     assert retired_parameters() == {8, 12}
@@ -1069,8 +1069,8 @@ def test_the_tag_numbering_is_contiguous_across_live_and_retired_rows():
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 81
-    assert len(tagged_parameters()) + len(retired_parameters()) == 83
+    assert len(tagged_parameters()) == 82
+    assert len(tagged_parameters()) + len(retired_parameters()) == 84
 
 
 # ══════════════════════════════════════════════════════════════════════════

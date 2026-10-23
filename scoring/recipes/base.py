@@ -46,6 +46,11 @@ class TradePlan:
     trail_ma: int | None = None
     """The MA window the runner trails, from `exits.swing.runner_trail`. Set
     means the remainder exits on a trail; None means it exits at TP2."""
+    trail_confirm: int | None = None
+    """Closes below the MA before the runner leaves ([OPEN] #84). Travels WITH
+    the plan rather than being read at resolution time, for the reason
+    `gates_in_force` travels with a call: a later change to the number must not
+    reinterpret an exit that already happened."""
 
     @property
     def entry(self) -> float:
@@ -127,6 +132,7 @@ def build_plan(
     horizon_days: tuple[int, int],
     cfg=None,
     trail_ma: int | None = None,
+    trail_confirm: int | None = None,
 ) -> tuple[TradePlan | None, str]:
     """Assemble a plan from a reference price and structural levels.
 
@@ -184,6 +190,7 @@ def build_plan(
             target_2=target_2,
             horizon_days=horizon_days,
             trail_ma=trail_ma,
+            trail_confirm=trail_confirm,
         ),
         "",
     )

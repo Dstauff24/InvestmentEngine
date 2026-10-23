@@ -141,7 +141,8 @@ class SimTrade:
     entry_high: float
     stop: float
     target_1: float
-    target_2: float
+    target_2: float | None
+    """None for a TRAILING plan (O20): the runner has no far target."""
     risk_reward: float
     outcome: str
     entered_on: date | None
@@ -150,6 +151,10 @@ class SimTrade:
     exit_on: date | None
     gross_r: float | None
     net_r: float | None
+    trimmed_r: float | None
+    """R as the weighted sum of the legs on the original risk (O20). Reported
+    BESIDE the whole-position numbers, never instead of them: every decision
+    already made reads `net_r`, and a trailing recipe is certified on this."""
     days_held: int | None
     mfe: float | None
     mae: float | None
@@ -168,7 +173,7 @@ class SimTrade:
 
     @property
     def closed(self) -> bool:
-        return self.outcome in ("stopped", "target_1", "target_2", "timeout")
+        return self.outcome in ("stopped", "target_1", "target_2", "trailed", "timeout")
 
 
 @dataclass
@@ -426,6 +431,7 @@ def _simulate(
         exit_on=fill.exit_on,
         gross_r=fill.gross_r,
         net_r=fill.net_r,
+        trimmed_r=fill.trimmed_r,
         days_held=fill.days_held,
         mfe=fill.mfe,
         mae=fill.mae,

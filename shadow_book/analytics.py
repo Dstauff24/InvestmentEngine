@@ -52,7 +52,9 @@ __all__ = ["Cell", "LadderVerdict", "cells", "render", "verdict_for"]
 # the same number for the same reason.
 MIN_SAMPLE = 30
 
-CLOSED = ("stopped", "target_1", "target_2", "timeout")
+# `trailed` is a CLOSED outcome: the runner left on its trail, which is a
+# resolution rather than an open position (O20).
+CLOSED = ("stopped", "target_1", "target_2", "trailed", "timeout")
 
 ROWS_SQL = """
     SELECT recipe,

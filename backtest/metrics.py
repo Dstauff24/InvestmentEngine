@@ -68,6 +68,10 @@ class Expectancy:
     scratches: int = 0
     gross_rs: list[float] = field(default_factory=list)
     net_rs: list[float] = field(default_factory=list)
+    trimmed_rs: list[float] = field(default_factory=list)
+    """R as the weighted sum of the legs (O20). Collected for EVERY recipe, so
+    the two bases can always be compared — and the whole-position number stays
+    the basis for every decision already made on it."""
     hold_days: list[int] = field(default_factory=list)
     outcomes: dict[str, int] = field(default_factory=dict)
 
@@ -77,6 +81,16 @@ class Expectancy:
     def expectancy_r(self) -> float | None:
         """Mean NET R per CLOSED trade. The number strategy selection uses."""
         return statistics.fmean(self.net_rs) if self.net_rs else None
+
+    @property
+    def trimmed_expectancy_r(self) -> float | None:
+        """Mean TRIMMED R per closed trade: the strategy as DEFINED.
+
+        None when nothing recorded a trimmed leg, which is not zero — a run
+        from before O20 has no legs at all, and reporting 0.0R for it would
+        invent a flat result where there is no measurement.
+        """
+        return statistics.fmean(self.trimmed_rs) if self.trimmed_rs else None
 
     @property
     def standard_error_r(self) -> float | None:
@@ -141,6 +155,16 @@ class Expectancy:
         """D39(2)'s floor: enough closed trades to justify moving a number."""
         return self.closed >= MIN_SAMPLE
 
+    def expectancy_on(self, basis: str) -> float | None:
+        """The expectancy on the named basis: `whole` or `trimmed`.
+
+        One accessor so a criterion can NAME its basis rather than a caller
+        picking an attribute — the same reason `adoption_check` names its cut.
+        """
+        if basis == "trimmed":
+            return self.trimmed_expectancy_r
+        return self.expectancy_r
+
     def add(self, trade) -> None:
         self.signals += 1
         self.outcomes[trade.outcome] = self.outcomes.get(trade.outcome, 0) + 1
@@ -153,6 +177,8 @@ class Expectancy:
         self.net_rs.append(trade.net_r)
         if trade.gross_r is not None:
             self.gross_rs.append(trade.gross_r)
+        if getattr(trade, "trimmed_r", None) is not None:
+            self.trimmed_rs.append(trade.trimmed_r)
         if trade.days_held is not None:
             self.hold_days.append(trade.days_held)
         # A scratch is its own category: at breakeven after the TP1 trim the
@@ -347,16 +373,22 @@ def by_recipe_and_regime(trades: list) -> dict[str, Expectancy]:
 
 # ── rendering ───────────────────────────────────────────────────────────────
 
+# `trimR` sits beside `expR`, never instead of it (O20). `expR` is the
+# WHOLE-POSITION number every decision already made reads, and `trimR` is the
+# strategy as DEFINED — a third off at TP1, the remainder at whatever closed
+# it. Both printed for every recipe so the two are never confused and never
+# have to be re-derived.
 HEADER = (
-    f"{'population':<46} {'sig':>5} {'fill':>5} {'clsd':>5} {'hit':>6} "
-    f"{'expR':>7} {'grossR':>7} {'frict':>6} {'PF':>6} {'hold':>5}"
+    f"{'population':<42} {'sig':>5} {'fill':>5} {'clsd':>5} {'hit':>6} "
+    f"{'expR':>7} {'trimR':>7} {'grossR':>7} {'frict':>6} {'PF':>6} {'hold':>5}"
 )
 
 
 def _row(item: Expectancy) -> str:
     return (
-        f"{item.label[:46]:<46} {item.signals:>5} {item.filled:>5} {item.closed:>5} "
+        f"{item.label[:42]:<42} {item.signals:>5} {item.filled:>5} {item.closed:>5} "
         f"{_pct(item.hit_rate):>6} {_num(item.expectancy_r):>7} "
+        f"{_num(item.trimmed_expectancy_r):>7} "
         f"{_num(item.gross_expectancy_r):>7} {_num(item.friction_r):>6} "
         f"{_num(item.profit_factor):>6} {_num(item.median_hold_days, 0):>5}"
         + ("" if item.sufficient else "  (n<30)")
@@ -448,9 +480,18 @@ def render_report(result) -> str:
         lines.append(f"  {name:<24} status={status:<7} {verdict}")
     lines.append("")
     lines.append(
-        "expR is mean NET R per closed trade (friction charged); hit counts a "
-        "breakeven scratch separately."
+        "expR is mean NET R per closed trade on the WHOLE position (friction charged); "
+        "hit counts a breakeven scratch separately."
     )
+    lines.append(
+        "trimR is the same trades measured in LEGS (O20) — the trim at TP1 plus the "
+        "remainder at whatever closed it, on the"
+    )
+    lines.append(
+        "ORIGINAL risk, gross of friction. expR stays the basis for every decision "
+        "already made on it; a trailing recipe is"
+    )
+    lines.append("certified on trimR, because that is the strategy as defined.")
     lines.append(
         "Survivorship: the universe is TODAY's constituents, so every delisted "
         "loser is absent. These are upper bounds."
@@ -570,6 +611,7 @@ class CsvTrade:
     entry: float | None
     gross_r: float | None
     net_r: float | None
+    trimmed_r: float | None
     days_held: int | None
 
     @property
@@ -578,7 +620,7 @@ class CsvTrade:
 
     @property
     def closed(self) -> bool:
-        return self.outcome in ("stopped", "target_1", "target_2", "timeout")
+        return self.outcome in ("stopped", "target_1", "target_2", "trailed", "timeout")
 
 
 @dataclass
@@ -617,6 +659,7 @@ def load_csv(path) -> CsvRun:
                     entry=_float(row.get("entry")),
                     gross_r=_float(row.get("gross_r")),
                     net_r=_float(row.get("net_r")),
+                    trimmed_r=_float(row.get("trimmed_r")),
                     days_held=_int(row.get("days_held")),
                 )
             )

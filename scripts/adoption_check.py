@@ -58,7 +58,14 @@ D50:
      on EVERY cut; sample and floor on the Tier B cut), so an older check
      reproduces unchanged.
 
-  7. **`--reachability`**, for a criterion about what the engine may ACT on.
+  7. **`--r-basis trimmed`**, for a recipe whose definition includes partial
+     exits. `whole` (the default) is the position held to one exit, which every
+     decision already made reads; `trimmed` is R as the WEIGHTED SUM OF THE
+     LEGS, which is the strategy a trailing recipe actually defines. The basis
+     is printed in the header, because two numbers in the same units that mean
+     different things are worse than one.
+
+  8. **`--reachability`**, for a criterion about what the engine may ACT on.
      `metrics.reachability` measures the share of an arm's PLANS clearing each
      R:R gate; with this flag the arm must beat the baseline's Tier A share.
      Recipe 1's v2 exists because v1's plans reach 2:1 only 3% of the time, so
@@ -173,6 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         "given. Default tier_b (D48's rule)",
     )
     parser.add_argument(
+        "--r-basis",
+        dest="basis",
+        choices=("whole", "trimmed"),
+        default="whole",
+        help="which R the criteria read: whole-position (default, the basis of every "
+        "decision already made) or trimmed (the legs — the strategy as defined)",
+    )
+    parser.add_argument(
         "--reachability",
         action="store_true",
         help="require the arm's share of plans clearing the Tier A R:R gate to exceed "
@@ -211,6 +226,14 @@ def main(argv: list[str] | None = None) -> int:
     run = metrics.load_csv(args.csv)
     arms = arm_map(run)
     print(f"{args.csv}: {len(run.trades)} rows, {run.symbols} symbols")
+    print(
+        f"R BASIS: {args.basis}"
+        + (
+            "  (the position held to one exit — the basis of every decision already made)"
+            if args.basis == "whole"
+            else "  (the weighted sum of the legs — the strategy as defined, O20)"
+        )
+    )
     if since or until:
         kept = within(run.trades, since=since, until=until)
         print(
@@ -258,8 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         label = labels[key]
         base = cut(run, args.against, args.recipe, rr, since=since, until=until)
         arm = cut(run, args.arm, args.recipe, rr, since=since, until=until)
-        base_r = base.expectancy_r if base else None
-        arm_r = arm.expectancy_r if arm else None
+        base_r = base.expectancy_on(args.basis) if base else None
+        arm_r = arm.expectancy_on(args.basis) if arm else None
         better = arm_r is not None and base_r is not None and arm_r > base_r
         counts_for_beating = args.beats_cut in ("every", key)
         gap_note = ""
@@ -294,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     sample_ok = bool(sample_target) and sample_target.closed >= metrics.MIN_SAMPLE
-    positive_ok = bool(sample_target) and (sample_target.expectancy_r or 0) > 0
+    positive_ok = bool(sample_target) and (sample_target.expectancy_on(args.basis) or 0) > 0
 
     reach_ok = True
     if args.reachability:

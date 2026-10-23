@@ -198,6 +198,7 @@ def evaluate(
         horizon_days=tuple(recipe.horizon_days),
         cfg=scoring_cfg,
         trail_ma=trail_ma,
+        trail_confirm=geometry.trail_confirm_closes if trail_ma else None,
     )
     if plan is None:
         return no_setup(NAME, f"setup fired but the geometry is unusable: {why}", checks)
