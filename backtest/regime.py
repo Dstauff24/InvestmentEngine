@@ -24,7 +24,8 @@ from datetime import date
 
 import pandas as pd
 
-from core import config, db
+from core import config
+from features import technical as technical_features
 
 log = logging.getLogger(__name__)
 
@@ -63,19 +64,21 @@ class RegimeSeries:
         return dict(sorted(out.items()))
 
 
-BENCHMARK_SQL = """
-    SELECT session_date, close
-    FROM   prices_daily
-    WHERE  symbol = %s AND session_date <= %s
-    ORDER  BY session_date
-"""
-
-
 def load_benchmark(*, as_of: date, symbol: str = BENCHMARK) -> pd.DataFrame:
-    rows = db.fetch_all(BENCHMARK_SQL, (symbol, as_of))
-    if not rows:
+    """The benchmark's SPLIT-ADJUSTED closes, through the same door as a symbol.
+
+    It read `prices_daily` directly, which is RAW (D24). SPY has not split
+    inside the stored window, so this was latent rather than wrong — and
+    latent is exactly how the mixed-basis defect reached production elsewhere.
+    A split in the benchmark would put a one-day gap of several hundred percent
+    into the realised-volatility terciles and step the 200-day MA, and the
+    regime tag that came out is STAMPED on every call (D45) and never
+    recomputed, so the error would outlive the data that caused it.
+    """
+    bars = technical_features.load_bars(symbol, as_of=as_of, lookback_days=100_000)
+    if bars.empty:
         return pd.DataFrame(columns=["session_date", "close"])
-    frame = pd.DataFrame(rows)
+    frame = technical_features.on_adjusted_basis(bars)[["session_date", "close"]].copy()
     frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
     return frame.dropna(subset=["close"]).reset_index(drop=True)
 

@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from shadow_book.outcome_tracker import evaluate_call
+from shadow_book.outcome_tracker import evaluate_call, in_call_basis
 
 CALLED = date(2026, 10, 1)
 
@@ -254,3 +254,74 @@ def test_a_fill_on_the_last_day_of_the_horizon_still_counts():
 
     assert r.actual_entry is not None
     assert r.actual_entry_at == CALLED + timedelta(days=15)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# A split changes the UNITS the stored levels are written in
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _split(day_offset: int, ratio: float) -> dict:
+    return {"ex_date": CALLED + timedelta(days=day_offset), "split_ratio": ratio}
+
+
+def test_with_no_splits_the_rows_are_untouched():
+    """The overwhelmingly common case, and the reason this defect is invisible
+    until the day it books a loss that never happened."""
+    bars, dividends = in_call_basis(
+        [bar(1, 102, 100)], [{"ex_date": CALLED, "cash_amount": 0.5}], []
+    )
+    assert bars == [bar(1, 102, 100)]
+    assert dividends == [{"ex_date": CALLED, "cash_amount": 0.5}]
+
+
+def test_a_ten_for_one_split_is_not_a_ninety_percent_loss():
+    """THE CASE THAT WOULD HAVE POISONED THE SHADOW BOOK. `shadow_book` stores
+    absolute levels frozen at the call (D13) and `prices_daily` is raw (D24),
+    so after a 10-for-1 split every bar prints a tenth of what the plan was
+    written in. Compared straight, the first post-split bar is a catastrophic
+    stop-out the market never inflicted — and that row would then count as
+    closed evidence under D40's ladder."""
+    raw = [bar(1, 102, 100), bar(5, 10.4, 10.2), bar(6, 11.0, 10.5)]
+    naive = evaluate_call(call(), raw, [], as_of=CALLED + timedelta(days=6))
+    assert naive.outcome == "stopped", "this is what the bug looked like"
+
+    bars, _ = in_call_basis(raw, [], [_split(5, 10.0)])
+    rebased = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=6))
+    assert rebased.outcome == "open"
+    assert rebased.hit_stop is not True
+
+
+def test_a_reverse_split_does_not_book_a_target():
+    """The mirror image, and the one that flatters: a 1-for-5 makes every later
+    bar print five times the plan's units, which clears TP2 on the first one."""
+    raw = [bar(1, 102, 100), bar(5, 515, 505, close=510)]
+    naive = evaluate_call(call(), raw, [], as_of=CALLED + timedelta(days=5))
+    assert naive.hit_target_2 is True, "this is what the bug looked like"
+
+    bars, _ = in_call_basis(raw, [], [_split(5, 0.2)])
+    rebased = evaluate_call(call(), bars, [], as_of=CALLED + timedelta(days=5))
+    assert rebased.hit_target_2 is not True
+    assert rebased.outcome == "open"
+
+
+def test_the_ex_date_bar_is_already_priced_the_new_way():
+    """Same convention as `features/adjustment.py`: the ex-date bar itself
+    trades post-action, so the ratio applies AT the ex-date, not after it."""
+    bars, _ = in_call_basis([bar(5, 10.4, 10.2), bar(6, 10.6, 10.3)], [], [_split(5, 10.0)])
+    assert bars[0]["high"] == pytest.approx(104.0)
+    assert bars[1]["high"] == pytest.approx(106.0)
+
+
+def test_a_dividend_after_a_split_is_rebased_with_the_bars():
+    """D19(2) lowers the stop BY THE DIVIDEND, so an unrebased amount would
+    subtract pre-split dollars from a post-split price."""
+    _, dividends = in_call_basis(
+        [], [{"ex_date": CALLED + timedelta(days=7), "cash_amount": 0.4}], [_split(5, 10.0)]
+    )
+    assert dividends[0]["cash_amount"] == pytest.approx(4.0)
+
+
+def test_several_splits_compound():
+    bars, _ = in_call_basis([bar(9, 5.0, 4.0)], [], [_split(3, 2.0), _split(6, 5.0)])
+    assert bars[0]["high"] == pytest.approx(50.0)

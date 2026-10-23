@@ -783,3 +783,88 @@ def test_a_rising_tape_never_has_a_base_high_above_todays_high():
     structure = tech.price_structure(bars, max_base_depth_pct=25.0, min_base_sessions=20)
     assert structure.base_high is not None
     assert structure.base_high < float(bars["high"].iloc[-1])
+
+
+def test_structure_atr_and_the_close_a_recipe_reads_are_all_one_basis():
+    """THE WHOLE-CONSUMER ASSERTION. A recipe hangs a plan on three readings —
+    the close it compares, the structural levels it puts the stop and targets
+    on, and the ATR that buffers them (D17 then sizes off that ATR). They must
+    come off ONE price series, or the plan mixes units: before this, `close`
+    was `adj_close` while `price_structure` and `atr` read the raw columns.
+
+    Checked against the promoted frame AND against the raw one, because
+    equality with the adjusted values only proves the basis if the two bases
+    actually differ in the fixture.
+    """
+    frame = _reverse_split_frame()
+    promoted = tech.on_adjusted_basis(frame)
+    features = tech.compute("TEST", frame)
+
+    expected = tech.price_structure(
+        promoted,
+        max_base_depth_pct=25.0,
+        min_base_sessions=4 * 5,
+    )
+    assert features.close == pytest.approx(float(promoted["close"].iloc[-1]))
+    assert features.structure.base_high == pytest.approx(expected.base_high)
+    assert features.structure.base_low == pytest.approx(expected.base_low)
+    assert features.structure.swing_high == pytest.approx(expected.swing_high)
+    assert features.structure.prior_close == pytest.approx(expected.prior_close)
+    assert features.atr == pytest.approx(tech.atr(promoted))
+    assert features.squeeze_percentile == pytest.approx(tech.squeeze_percentile(promoted))
+
+    raw_structure = tech.price_structure(frame, max_base_depth_pct=25.0, min_base_sessions=20)
+    assert features.structure.base_high != pytest.approx(raw_structure.base_high), (
+        "the fixture must actually have two different bases, or this test proves nothing"
+    )
+
+
+def test_only_named_modules_read_raw_bars_and_each_says_why():
+    """The consumer side of the same rule. `prices_daily` is RAW (D24), so a
+    module that queries it and skips the adjustment layer is the bug this
+    section is about — and it is invisible in testing, because it is wrong only
+    for symbols with a split in the window.
+
+    An allowlist with a reason per module, rather than a lint rule: three
+    modules read raw bars legitimately and the reasons are not interchangeable.
+    """
+    import re
+    from pathlib import Path
+
+    # A SQL usage, not a prose mention: `regime.py`'s docstring now explains why
+    # it no longer reads the table, and a guard that fired on the explanation
+    # would push people to delete the explanation.
+    queries = re.compile(r"(?:from|into|update|join)\s+prices_daily", re.IGNORECASE)
+
+    allowed = {
+        # Reads raw, then hands every frame through `adjust_bars` and
+        # `on_adjusted_basis`. The single door for measurement.
+        "features/technical.py",
+        # Reads raw and rebases forward into the CALL's units
+        # (`in_call_basis`), because the stored projections are frozen (D13).
+        "shadow_book/outcome_tracker.py",
+        # Reads raw ON PURPOSE: its whole job is to prove a stored series
+        # STEPS at a split ex-date, which is the only evidence that
+        # `prices_daily` is still raw.
+        "jobs/price_basis_check.py",
+        # Writers. D24 defines the table as raw, so these are what makes it so.
+        "ingest/schwab_prices.py",
+        "ingest/fmp_history.py",
+        "db/init.py",
+        # IS the adjustment layer: it reads raw bars and the action log and
+        # returns the factors. It also hosts `BASIS_CHECK_SQL`, which must see
+        # raw closes to prove the table still holds them.
+        "features/adjustment.py",
+    }
+    root = Path(__file__).resolve().parent.parent
+    offenders = sorted(
+        str(path.relative_to(root))
+        for folder in ("features", "scoring", "decision", "shadow_book", "backtest", "jobs")
+        for path in (root / folder).rglob("*.py")
+        if queries.search(path.read_text()) and str(path.relative_to(root)) not in allowed
+    )
+    assert offenders == [], (
+        f"these query prices_daily without going through the adjustment layer: {offenders} — "
+        f"add the module to the allowlist WITH ITS REASON, or read bars via "
+        f"features.technical.load_bars"
+    )

@@ -24,6 +24,18 @@ ex-date, so the engine does not record a loss the market did not inflict.
 **IDEMPOTENT.** `last_evaluated_on` means re-running a day cannot double-count
 an excursion. A call made today is skipped entirely: it was called at today's
 close and today's bar is the bar it was called on.
+
+**THE BARS ARE READ IN THE CALL'S PRICE BASIS, AND A SPLIT CHANGES THE UNITS.**
+`shadow_book` stores absolute levels — entry zone, stop, targets — frozen at the
+call (D13). `prices_daily` is raw (D24). So a 10-for-1 split while a trade is
+open makes every later bar print a tenth of what the plan was written in, and a
+tracker comparing them straight would see a 90% collapse and book a stop-out
+the market never inflicted; a reverse split would book TP2 the same way. The
+projections must not be rewritten — a projection that drifted toward the
+outcome would measure nothing — so the BARS are rebased instead, forward from
+the call, which is the same read-time principle D24 applies backward from today.
+Dividend amounts are rebased with them, or D19(2)'s stop adjustment would be in
+the wrong units too.
 """
 
 from __future__ import annotations
@@ -38,7 +50,14 @@ log = logging.getLogger(__name__)
 
 JOB_NAME = "outcome_tracker"
 
-__all__ = ["Change", "TrackResult", "evaluate_call", "run", "track_open_calls"]
+__all__ = [
+    "Change",
+    "TrackResult",
+    "evaluate_call",
+    "in_call_basis",
+    "run",
+    "track_open_calls",
+]
 
 
 OPEN_CALLS = """
@@ -63,6 +82,16 @@ DIVIDENDS = """
     SELECT ex_date, cash_amount
     FROM   corporate_actions
     WHERE  symbol = %s AND action_type = 'cash_dividend'
+      AND  ex_date > %s AND ex_date <= %s
+    ORDER  BY ex_date
+"""
+
+# Splits since the CALL, not since the last evaluation: the basis of a stored
+# level is set once, at the call, and every split after it still applies.
+SPLITS_SINCE_CALL = """
+    SELECT ex_date, split_ratio
+    FROM   corporate_actions
+    WHERE  symbol = %s AND action_type = 'split'
       AND  ex_date > %s AND ex_date <= %s
     ORDER  BY ex_date
 """
@@ -129,6 +158,56 @@ class TrackResult:
     return_pct: float | None = None
     days_held: int | None = None
     changes: list[Change] = field(default_factory=list)
+
+
+def in_call_basis(
+    bars: list[dict],
+    dividends: list[dict],
+    splits: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Rebase bars and dividends into the units the call was written in. Pure.
+
+    A split's ex-date bar is the first one priced the new way (the same
+    convention `features/adjustment.py` uses), so a bar is multiplied by every
+    split ratio whose ex-date is at or before it. Forward adjustment, anchored
+    on the call — the mirror of D24's back-adjustment, which anchors on today.
+
+    With no splits the rows come back untouched, which is the overwhelmingly
+    common case and the reason this cannot be "handled later": it is invisible
+    until the day it books a 90% loss that never happened.
+    """
+    if not splits:
+        return bars, dividends
+
+    ordered = sorted(
+        ((_d(s["ex_date"]), float(s["split_ratio"])) for s in splits), key=lambda item: item[0]
+    )
+
+    def factor(day: date) -> float:
+        value = 1.0
+        for ex, ratio in ordered:
+            if ex <= day and ratio > 0:
+                value *= ratio
+        return value
+
+    rebased_bars = []
+    for bar in bars:
+        scale = factor(_d(bar["session_date"]))
+        row = dict(bar)
+        if scale != 1.0:
+            for field_name in ("open", "high", "low", "close"):
+                if row.get(field_name) is not None:
+                    row[field_name] = float(row[field_name]) * scale
+        rebased_bars.append(row)
+
+    rebased_dividends = []
+    for dividend in dividends:
+        scale = factor(_d(dividend["ex_date"]))
+        row = dict(dividend)
+        if scale != 1.0 and row.get("cash_amount") is not None:
+            row["cash_amount"] = float(row["cash_amount"]) * scale
+        rebased_dividends.append(row)
+    return rebased_bars, rebased_dividends
 
 
 def evaluate_call(
@@ -347,6 +426,17 @@ def track_open_calls(*, as_of: date | None = None) -> list[Change]:
         if not bars:
             continue
         dividends = db.fetch_all(DIVIDENDS, (call["symbol"], since, day))
+        called_on = _d(call["called_on"])
+        splits = db.fetch_all(SPLITS_SINCE_CALL, (call["symbol"], called_on, day))
+        if splits:
+            log.warning(
+                "%s has %d split(s) since the call on %s — rebasing the bars into the "
+                "call's units; the stored projections are NOT rewritten (D13)",
+                call["symbol"],
+                len(splits),
+                called_on,
+            )
+        bars, dividends = in_call_basis(bars, dividends, splits)
         result = evaluate_call(call, bars, dividends, as_of=day)
 
         db.execute(
