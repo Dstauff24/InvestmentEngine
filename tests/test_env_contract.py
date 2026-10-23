@@ -76,10 +76,14 @@ def test_a_placeholder_in_an_optional_variable_is_off_by_design(contract):
     state: the feature is off. `core/settings.py` refuses a placeholder at read
     time, so the code that reads it already treats this as absent — failing the
     deploy over it would make an optional feature mandatory."""
-    example = 'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"   # [OPTIONAL] EDGAR skips\n'
+    example = (
+        'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"'
+        "   # [OPTIONAL: EDGAR insiders] EDGAR skips\n"
+    )
     failures, notes = contract(example, 'SEC_EDGAR_USER_AGENT="Engine/0.1 (you@example.com)"\n')
     assert failures == []
-    assert "OFF by design (1 optional, unset or placeholder): SEC_EDGAR_USER_AGENT" in notes[0]
+    assert notes[0].startswith("NOT SET, by design (1 optional")
+    assert notes[1] == "  EDGAR insiders: SEC_EDGAR_USER_AGENT"
 
 
 def test_an_optional_feature_left_off_is_printed_not_passed_in_silence(contract):
@@ -88,15 +92,16 @@ def test_an_optional_feature_left_off_is_printed_not_passed_in_silence(contract)
     two channels, so a blank SMTP block is a configuration, and a configuration
     nobody can see is how an operator comes to believe alerts are arriving."""
     example = (
-        "SMTP_USER=CHANGE_ME        # [OPTIONAL] placeholder = email channel off\n"
-        "SMTP_PASSWORD=CHANGE_ME        # [OPTIONAL] placeholder = email channel off\n"
-        "TELEGRAM_BOT_TOKEN=        # [OPTIONAL] the other channel\n"
+        "SMTP_USER=CHANGE_ME        # [OPTIONAL: email alerts] placeholder = channel off\n"
+        "SMTP_PASSWORD=CHANGE_ME        # [OPTIONAL: email alerts] placeholder = channel off\n"
+        "TELEGRAM_BOT_TOKEN=        # [OPTIONAL: telegram alerts] the other channel\n"
     )
     failures, notes = contract(
         example, "SMTP_USER=CHANGE_ME\nSMTP_PASSWORD=CHANGE_ME\nTELEGRAM_BOT_TOKEN=real-token\n"
     )
     assert failures == []
-    assert notes[0] == "OFF by design (2 optional, unset or placeholder): SMTP_PASSWORD, SMTP_USER"
+    assert notes[0].startswith("NOT SET, by design (2 optional")
+    assert notes[1] == "  email alerts: SMTP_PASSWORD, SMTP_USER"
 
 
 def test_a_placeholder_in_a_required_variable_is_still_a_deploy_failure(contract):
@@ -112,7 +117,7 @@ def test_the_shipped_example_marks_the_email_channel_optional(contract):
     documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
     for name in ("SMTP_USER", "SMTP_PASSWORD", "ALERT_EMAIL_TO", "ALERT_EMAIL_ONFAIL"):
         assert name in documented, f"{name} is not documented in .env.example"
-        assert "[OPTIONAL]" in documented[name][1], (
+        assert env_contract.OPTIONAL.search(documented[name][1]), (
             f"{name} is marked required, but D16 makes email one of two channels — "
             f"a deploy with Telegram alone would fail on it"
         )
@@ -130,7 +135,7 @@ def test_the_shipped_example_marks_the_token_sync_settings_optional():
     documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
     for name in ("ENGINE_HOST", "ENGINE_PATH", "ENGINE_SSH_KEY"):
         assert name in documented, f"{name} is not documented in .env.example"
-        assert "[OPTIONAL]" in documented[name][1], (
+        assert env_contract.OPTIONAL.search(documented[name][1]), (
             f"{name} is marked required, but only sync_token.sh reads it and that "
             f"runs on the laptop — the VM's deploy would fail on a setting it never uses"
         )
@@ -226,3 +231,100 @@ def test_every_variable_settings_reads_is_in_the_example():
         f"core/settings.py reads these and .env.example does not document them: "
         f"{sorted(missing)} — the deploy check can only guard what the example names"
     )
+
+
+# ── the requiredness rule ──────────────────────────────────────────────────
+
+
+def _settings_accessors() -> dict[str, set[str]]:
+    """{variable: {the settings helpers that read it}} from the AST.
+
+    `require("X")` has no default and raises; `get("X", d)` / `get_int` /
+    `get_path` run without the variable. That difference IS the rule, so it is
+    read off the code rather than restated in a list that can drift.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    tree = ast.parse((root / "core" / "settings.py").read_text())
+    read: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        first = node.args[0]
+        if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+            continue
+        if not env_contract.NAME.fullmatch(first.value):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        read.setdefault(first.value, set()).add(name)
+    return read
+
+
+def test_every_required_variable_is_one_the_code_cannot_run_without():
+    """THE RULE, MECHANICALLY: a variable is required only if the engine cannot
+    run its required pipeline without it — in practice only if the accessor
+    calls `require()`, which has no default and raises.
+
+    Enforced in this direction only. The converse does NOT hold: the email
+    accessors all `require()`, and email is optional per D16's amendment,
+    because nothing calls them when the channel is off.
+
+    Two deploys failed on the other direction — ENGINE_PATH, which only the
+    laptop reads, and a half-marked SMTP block — and both were marked
+    case-by-case. A list of exceptions would drift the same way; this cannot.
+    """
+    documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
+    accessors = _settings_accessors()
+    wrongly_required = {
+        name: sorted(accessors.get(name, {"nothing in core/settings.py"}))
+        for name, (_, line) in documented.items()
+        if not env_contract.OPTIONAL.search(line) and "require" not in accessors.get(name, set())
+    }
+    assert wrongly_required == {}, (
+        "these are REQUIRED in .env.example, but core/settings.py runs without them "
+        f"(so a deploy fails on a setting the engine does not need): {wrongly_required}"
+    )
+
+
+def test_every_optional_variable_names_the_feature_it_belongs_to():
+    """`[OPTIONAL]` with no feature is how ENGINE_PATH drifted from its two
+    siblings: nothing tied the group together. The feature name is what the
+    deploy groups by, so an untagged marker is a variable nobody can see the
+    purpose of."""
+    documented = env_contract.parse(Path(__file__).resolve().parent.parent / ".env.example")
+    untagged = [
+        name
+        for name, (_, line) in documented.items()
+        if (found := env_contract.OPTIONAL.search(line)) and not found.group(1)
+    ]
+    assert untagged == [], (
+        f"marked [OPTIONAL] with no feature named: {untagged} — write "
+        f"`# [OPTIONAL: <feature>] <reason>` so the deploy can say what is switched off"
+    )
+
+
+def test_the_report_groups_what_is_off_by_feature(contract):
+    """The operator's question is never "which variables are blank" but "what
+    is switched off on this box"."""
+    example = (
+        "SMTP_USER=CHANGE_ME        # [OPTIONAL: email alerts] placeholder = channel off\n"
+        "ALERT_EMAIL_TO=you@example.com        # [OPTIONAL: email alerts] same\n"
+        "TELEGRAM_BOT_TOKEN=        # [OPTIONAL: telegram alerts] blank runs on email alone\n"
+        "PGDATABASE=investment_engine\n"
+    )
+    failures, notes = contract(example, "SMTP_USER=CHANGE_ME\nPGDATABASE=investment_engine\n")
+    assert failures == []
+    assert notes[0].startswith("NOT SET, by design (3 optional")
+    assert notes[1] == "  email alerts: ALERT_EMAIL_TO, SMTP_USER"
+    assert notes[2] == "  telegram alerts: TELEGRAM_BOT_TOKEN"
+
+
+def test_an_untagged_marker_still_exempts_but_says_nobody_named_a_feature(contract):
+    """The syntax keeps the feature optional so an older line still parses; the
+    static test above is what requires the shipped file to carry one. What it
+    must not do is pass in silence."""
+    failures, notes = contract("FOO=        # [OPTIONAL] reason, no feature\n", "")
+    assert failures == []
+    assert notes[1] == f"  {env_contract.UNATTRIBUTED}: FOO"

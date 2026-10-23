@@ -14,17 +14,24 @@ It exists because the gap was not hypothetical: on 2026-10-22 the VM ran a
 whole evening with `SHADOW_ACCOUNT_VALUE` absent, `scoring_pass` died, and the
 digest reported a quiet market.
 
-**THE RULES.** Every variable in `.env.example` must be set in `.env` and must
-not still carry a placeholder. `# [OPTIONAL]` on the example's line exempts it
-from BOTH, with the reason written beside it, because for an optional feature
-"blank" and "still the placeholder" are the same state: the feature is off, and
-the code that reads it already treats a placeholder as absent (`alerts/notify
-.py` asks the real accessors, each of which refuses one). A placeholder in a
+**THE REQUIREDNESS RULE** is stated in full in `.env.example`'s header, which
+is the canonical copy — three restatements would drift. In one line: a variable
+is REQUIRED only if the engine cannot run its required pipeline without it, so
+in practice only if `core/settings.py` reads it through `require()`, and
+`tests/test_env_contract.py` enforces that direction. The rest carry
+`# [OPTIONAL: <feature>] <reason>`, which exempts them from being set AND from
+the placeholder check, because for something optional those are the same state
+and every reader already treats a placeholder as absent (`alerts/notify.py`
+asks the real accessors, each of which refuses one). A placeholder in a
 REQUIRED variable stays a deploy failure — that is a value somebody meant to
 fill in and did not.
 
-Skipped optional variables are PRINTED, not silently passed. "Email is off" is
-a fact an operator should read, not infer from the absence of a complaint.
+**THE FEATURE TAG IS NOT DECORATION.** This report groups by it, because the
+question an operator has is never "which variables are blank" but "what is
+switched off on this box". `ENGINE_PATH` failed a VM deploy while its two
+siblings were already marked: nothing tied the three together, so marking two
+of them read as finished work. Optional variables are PRINTED, never silently
+passed.
 """
 
 from __future__ import annotations
@@ -47,6 +54,11 @@ ACTUAL = REPO_ROOT / ".env"
 # alerting layer cannot disagree about whether a value counts.
 PLACEHOLDERS = settings.PLACEHOLDERS
 NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+# `# [OPTIONAL: email alerts] blank turns the channel off`. The feature name is
+# optional in the SYNTAX so an older line still parses, and `tests/
+# test_env_contract.py` is what requires every shipped marker to carry one.
+OPTIONAL = re.compile(r"\[OPTIONAL(?::\s*([^\]]+?)\s*)?\]")
+UNATTRIBUTED = "no feature named — see .env.example"
 
 
 def parse(path: Path) -> dict[str, tuple[str, str]]:
@@ -86,21 +98,22 @@ def check() -> tuple[list[str], list[str]]:
     wanted, have = parse(EXAMPLE), parse(ACTUAL)
     failures: list[str] = []
     notes: list[str] = []
-    off: list[str] = []
+    off: dict[str, list[str]] = {}
     optional_count = 0
 
     for name, (example_value, example_line) in sorted(wanted.items()):
-        optional = "[OPTIONAL]" in example_line
-        optional_count += optional
+        marker = OPTIONAL.search(example_line)
+        optional_count += marker is not None
         value, present = (have[name][0], True) if name in have else ("", False)
         ambient = os.environ.get(name, "")
         placeholder = looks_like_a_placeholder(value, example_value)
 
-        if optional:
+        if marker:
             # Blank or placeholder are the SAME state for something optional:
-            # the feature is off. Recorded so the operator reads it.
+            # the feature is off, or its code-side default is in force.
+            # Recorded under the feature so the operator reads what is off.
             if not value or placeholder:
-                off.append(name)
+                off.setdefault(marker.group(1) or UNATTRIBUTED, []).append(name)
             continue
 
         if placeholder:
@@ -117,8 +130,16 @@ def check() -> tuple[list[str], list[str]]:
             failures.append(detail)
 
     if off:
+        blank = sum(len(names) for names in off.values())
         notes.append(
-            f"OFF by design ({len(off)} optional, unset or placeholder): " + ", ".join(off)
+            f"NOT SET, by design ({blank} optional — the feature is off, or its "
+            f"code-side default is in force):"
+        )
+        notes.extend(
+            f"  {feature}: {', '.join(names)}"
+            # Case-insensitive, so "EDGAR insiders" sorts next to "email alerts"
+            # rather than above every lowercase feature in the list.
+            for feature, names in sorted(off.items(), key=lambda item: item[0].lower())
         )
     notes.append(
         f"{len(wanted)} variable(s) in .env.example, {optional_count} marked [OPTIONAL], "
@@ -135,8 +156,9 @@ def main() -> int:
         print(note)
     if failures:
         print(
-            "\n`.env` is what cron reads. Fill these in, or mark a variable "
-            "`# [OPTIONAL]` in .env.example with the reason it may be blank."
+            "\n`.env` is what cron reads. Fill these in, or — if the engine can run "
+            "its required pipeline without one — mark it `# [OPTIONAL: <feature>]` in "
+            ".env.example with the reason it may be blank."
         )
     return 1 if failures else 0
 

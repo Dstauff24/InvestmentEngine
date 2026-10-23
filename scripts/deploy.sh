@@ -114,14 +114,13 @@ fi
 # this checks the FILE and says explicitly when the environment is the only
 # thing holding a variable up.
 #
-# `# [OPTIONAL]` in .env.example exempts a variable from having to be SET and
-# from the placeholder check, because for an optional feature those are the
-# same state: the feature is off, and the code that reads it already treats a
-# placeholder as absent. Email is optional per D16's amendment (Telegram alone
-# is supported), so a blank SMTP block is a CONFIGURATION — the check prints
-# every optional variable it skipped, so "email is off" is something the
-# operator reads rather than infers from silence. A placeholder in a REQUIRED
-# variable is still a deploy failure: that is a value somebody meant to fill in.
+# ONE REQUIREDNESS RULE, stated in full in .env.example's header and nowhere
+# else (three copies would drift): a variable is REQUIRED only if the engine
+# cannot run its required pipeline without it — 11 of the 48. The rest carry
+# `# [OPTIONAL: <feature>]` and are exempt from being set and from the
+# placeholder check; a placeholder in a REQUIRED variable still fails the
+# deploy. What is off prints GROUPED BY FEATURE, because "email is off on this
+# box" is the question an operator has.
 step "checking .env against .env.example"
 if [[ ! -f "$REPO_ROOT/.env" ]]; then
   fail "no .env in $REPO_ROOT — copy .env.example and fill it in"

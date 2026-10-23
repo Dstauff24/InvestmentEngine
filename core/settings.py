@@ -176,8 +176,16 @@ def fmp_rate_limit() -> int:
     The separate DAILY budget (D29 free-tier operation) is
     `config/universe.yaml`'s `fmp.daily_call_budget`, not an env var: it is a
     tuning decision, not a secret.
+
+    The default is 600, the Premium value CLAUDE.md pins (the plan allows 750).
+    It used to be 300, a free-tier leftover that `.env.example` itself
+    documents as WRONG — the free plan's real constraint was ~250 calls/DAY, so
+    300/min enforced nothing. That mattered the moment the variable became
+    `[OPTIONAL]`: an unset variable now RUNS on this number instead of failing
+    the deploy, and a default the file calls wrong is not a state the engine is
+    designed to run in.
     """
-    return get_int("FMP_RATE_LIMIT_PER_MIN", 300)
+    return get_int("FMP_RATE_LIMIT_PER_MIN", 600)
 
 
 def finnhub_api_key() -> str:
