@@ -60,12 +60,29 @@ def require(name: str, *, hint: str = "") -> str:
             f"Required environment variable {name} is not set{suffix}. "
             f"Copy .env.example to .env and fill it in."
         )
-    if value.startswith("CHANGE_ME"):
+    if looks_like_placeholder(value):
         raise SettingsError(
             f"Environment variable {name} is still the .env.example placeholder "
             f"({value!r}). Set a real value."
         )
     return value
+
+
+# THE CANONICAL PLACEHOLDER RULE, so every reader agrees on what "filled in"
+# means: `require` here, `scripts/env_contract.py` at deploy time, and
+# `alerts/notify.py` deciding whether a channel exists at all. An alert
+# addressed to you@example.com reaches nobody, which makes it the same class of
+# non-value as CHANGE_ME — and on 2026-10-22 the engine called email
+# "configured" on exactly those shipped defaults.
+PLACEHOLDERS = ("change_me", "replace_me", "you@example.com", "engine@example.com")
+
+
+def looks_like_placeholder(value: str | None) -> bool:
+    """Whether a value is one of `.env.example`'s own, i.e. nobody filled it in."""
+    if not value:
+        return False
+    lowered = value.lower()
+    return any(token in lowered for token in PLACEHOLDERS)
 
 
 def get_int(name: str, default: int) -> int:

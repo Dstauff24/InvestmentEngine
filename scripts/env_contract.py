@@ -28,14 +28,18 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core import settings
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = REPO_ROOT / ".env.example"
 ACTUAL = REPO_ROOT / ".env"
 
-# Values that mean "nobody filled this in". `.env.example`'s own values are
-# compared too, so a variable left exactly as shipped is caught even when its
-# placeholder is not in this list.
-PLACEHOLDERS = ("change_me", "replace_me", "you@example.com", "engine@example.com", "changeme")
+# ONE DEFINITION of "nobody filled this in", imported from the only module
+# that reads os.environ — so the deploy check, `settings.require` and the
+# alerting layer cannot disagree about whether a value counts.
+PLACEHOLDERS = settings.PLACEHOLDERS
 NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 
 

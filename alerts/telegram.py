@@ -106,11 +106,14 @@ def send(
     dedupe_key: str | None = None,
     record: bool = True,
     session: requests.Session | None = None,
-) -> bool:
-    """Send one Telegram message. True on success; NEVER raises.
+) -> store.Outcome:
+    """Send one Telegram message. NEVER raises.
 
-    Returns False when Telegram is unreachable, unconfigured, or the consent
-    gate refuses — all of which are reported, none of which propagate.
+    Returns DELIVERED, SUPPRESSED (a row with this key already exists) or
+    FAILED — unreachable, unconfigured, or the consent gate refusing, all of
+    which are reported and none of which propagate. **Not a bool**: True used
+    to mean both "delivered" and "suppressed", so `notify` reported a
+    suppression as a send.
     """
     subject = f"[{settings.engine_env()}] {subject}"
 
@@ -126,7 +129,7 @@ def send(
         )
         if alert_id is None:
             log.info("suppressed duplicate telegram alert: %s", dedupe_key)
-            return True
+            return store.Outcome.SUPPRESSED
 
     try:
         token = settings.telegram_bot_token()
@@ -134,7 +137,7 @@ def send(
     except settings.SettingsError as exc:
         log.error("telegram is not configured: %s", redact(str(exc)))
         store.mark(alert_id, "failed", redact(str(exc)))
-        return False
+        return store.Outcome.FAILED
 
     # D27: consent before the transport, exactly as the data clients do. Under
     # pytest `require_live_calls` always refuses, flag or not.
@@ -143,7 +146,7 @@ def send(
     except netguard.LiveCallBlocked as exc:
         log.error("telegram send blocked: %s", redact(str(exc)))
         store.mark(alert_id, "failed", redact(str(exc)))
-        return False
+        return store.Outcome.FAILED
 
     text = f"{subject}\n\n{body}" if body else subject
     parts = split_message(text)
@@ -164,17 +167,17 @@ def send(
             message = redact(f"{type(exc).__name__}: {exc}")
             log.error("could not send telegram alert %r: %s", subject, message)
             store.mark(alert_id, "failed", message)
-            return False
+            return store.Outcome.FAILED
 
         if not response.ok:
             message = redact(f"HTTP {response.status_code}: {response.text[:200]}")
             log.error("telegram rejected alert %r: %s", subject, message)
             store.mark(alert_id, "failed", message)
-            return False
+            return store.Outcome.FAILED
 
     log.info("sent telegram alert %r (%d part(s))", subject, total)
     store.mark(alert_id, "sent", None)
-    return True
+    return store.Outcome.DELIVERED
 
 
 def job_failure_key(job_name: str, day: date | None = None) -> str:

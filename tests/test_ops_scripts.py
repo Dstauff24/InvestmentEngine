@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from alerts import store
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 BACKUP = SCRIPTS / "backup_db.sh"
 
@@ -246,7 +248,7 @@ def test_send_never_raises_on_an_smtp_failure(monkeypatch):
         "SMTP",
         lambda *a, **k: (_ for _ in ()).throw(smtplib.SMTPException("server down")),
     )
-    assert mailer.send("subject", "body", record=True) is False
+    assert mailer.send("subject", "body", record=True) is store.Outcome.FAILED
 
 
 def test_send_never_raises_on_a_missing_setting(monkeypatch):
@@ -258,7 +260,7 @@ def test_send_never_raises_on_a_missing_setting(monkeypatch):
         "smtp_host",
         lambda: (_ for _ in ()).throw(mailer.settings.SettingsError("SMTP_HOST is not set")),
     )
-    assert mailer.send("subject", "body") is False
+    assert mailer.send("subject", "body") is store.Outcome.FAILED
 
 
 def test_send_never_raises_on_a_network_error(monkeypatch):
@@ -268,17 +270,25 @@ def test_send_never_raises_on_a_network_error(monkeypatch):
     monkeypatch.setattr(
         mailer.smtplib, "SMTP", lambda *a, **k: (_ for _ in ()).throw(OSError("unreachable"))
     )
-    assert mailer.send("subject", "body") is False
+    assert mailer.send("subject", "body") is store.Outcome.FAILED
 
 
-def test_a_duplicate_dedupe_key_suppresses_the_send(monkeypatch):
-    """The same failure on three consecutive retries is one email, not three."""
+def test_a_duplicate_dedupe_key_suppresses_the_send_and_reports_it_as_suppressed(
+    monkeypatch,
+):
+    """The same failure on three consecutive retries is one email, not three —
+    and the SECOND one must not be reported as a send. Returning True here is
+    what made the VM log "sent via email, telegram" on an evening when nothing
+    was delivered."""
     from alerts import mailer
 
     sent = []
     monkeypatch.setattr(mailer, "_record", lambda *a, **k: None)  # row already exists
     monkeypatch.setattr(mailer.smtplib, "SMTP", lambda *a, **k: sent.append(1))
-    assert mailer.send("subject", "body", dedupe_key="k") is True
+
+    outcome = mailer.send("subject", "body", dedupe_key="k")
+    assert outcome is store.Outcome.SUPPRESSED
+    assert outcome is not store.Outcome.DELIVERED
     assert sent == []
 
 

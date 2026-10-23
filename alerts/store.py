@@ -15,12 +15,33 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from enum import StrEnum
 
 import psycopg
 
 from core import clock, db
 
 log = logging.getLogger(__name__)
+
+
+class Outcome(StrEnum):
+    """What a transport actually DID, which a bool cannot express.
+
+    Both transports used to return True both when they delivered an alert and
+    when they SUPPRESSED it as a duplicate, so `notify` filed a suppression
+    under `sent`. On 2026-10-22 the VM logged "suppressed duplicate telegram
+    alert: daily_digest:2026-10-22" and then "sent via email, telegram" — the
+    alert reached nobody that evening and the summary line said it had.
+
+    Three outcomes, because three things happen and they want different
+    responses: DELIVERED is done, SUPPRESSED means the reader was already told,
+    FAILED means nobody was told and something is broken.
+    """
+
+    DELIVERED = "delivered"
+    SUPPRESSED = "suppressed"
+    FAILED = "failed"
+
 
 # `_record` returns this when the database itself is unreachable: the alert is
 # sent UNRECORDED rather than dropped, because a database that is down is

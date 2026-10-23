@@ -405,3 +405,80 @@ def test_a_failed_outcome_tracker_warns_without_leading():
     assert "SCORING INCOMPLETE" not in body
     assert "outcome tracking did not complete" in body
     assert "may be stale" in body
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The dedupe key that blocked a correction (2026-10-22)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def clean_content(day=DAY, **kw) -> digest.DigestContent:
+    base = {
+        "session_date": day,
+        "cards": [],
+        "refusals": [],
+        "candidates": [],
+        "stats": None,
+        "closed": [],
+        "open_calls": [],
+        "blocked": [],
+    }
+    base.update(kw)
+    return digest.DigestContent(**base)
+
+
+def test_a_corrected_digest_supersedes_the_failure_notice():
+    """THE BUG. The VM sent SCORING INCOMPLETE, the operator fixed the setting
+    and re-ran, and the corrected digest was suppressed as a duplicate of the
+    broken one — leaving the reader with the failure notice and no idea the day
+    had recovered."""
+    failed = blocked_content().dedupe_key
+    corrected = clean_content().dedupe_key
+
+    assert failed != corrected, "both must deliver"
+    assert "incomplete" in failed
+    assert corrected.endswith(":ok")
+
+
+def test_a_clean_rerun_of_an_already_clean_day_stays_suppressed():
+    """The dedupe still has to work: re-running a good evening must not page
+    the reader twice with the same message."""
+    assert clean_content().dedupe_key == clean_content().dedupe_key
+
+
+def test_two_failures_of_the_same_step_are_one_message():
+    """Same problem, same day, already paged."""
+    first = blocked_content().dedupe_key
+    again = blocked_content().dedupe_key
+    assert first == again
+
+
+def test_a_different_step_failing_is_a_different_message():
+    """A new broken step is a new problem, not a repeat of the old one."""
+    scoring = blocked_content().dedupe_key
+    other = blocked_content(
+        blocked=[{"job_name": "schwab_prices", "status": "failed", "error": "x"}]
+    ).dedupe_key
+    assert scoring != other
+    assert "scoring_pass" in scoring and "schwab_prices" in other
+
+
+def test_two_steps_failing_together_key_stably_whatever_the_order():
+    """A set of failures is one state; its key must not depend on row order."""
+    a = blocked_content(
+        blocked=[
+            {"job_name": "scoring_pass", "status": "failed", "error": None},
+            {"job_name": "outcome_tracker", "status": "failed", "error": None},
+        ]
+    ).dedupe_key
+    b = blocked_content(
+        blocked=[
+            {"job_name": "outcome_tracker", "status": "failed", "error": None},
+            {"job_name": "scoring_pass", "status": "failed", "error": None},
+        ]
+    ).dedupe_key
+    assert a == b
+
+
+def test_the_key_is_scoped_to_the_session_date():
+    assert clean_content(day=DAY).dedupe_key != clean_content(day=date(2026, 10, 22)).dedupe_key

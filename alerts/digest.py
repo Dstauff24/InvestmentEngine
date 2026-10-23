@@ -128,6 +128,27 @@ class DigestContent:
     """Outcome steps that did not succeed: a warning, not a lead."""
 
     @property
+    def dedupe_key(self) -> str:
+        """The key this digest dedupes on — which INCLUDES its outcome.
+
+        `daily_digest:{day}` alone blocked the correction. On 2026-10-22 the VM
+        sent a SCORING INCOMPLETE digest, the operator fixed the setting and
+        re-ran, and the corrected digest was suppressed as a duplicate of the
+        broken one: the reader was left with the failure notice and no idea the
+        day had recovered.
+
+        So the outcome is part of the identity of the message. An incomplete
+        digest and its corrected successor are different messages and both
+        deliver; a clean re-run of an already-clean day is the SAME message and
+        stays suppressed. The blocked step names are included too, because a
+        different step failing later is a different problem, not a repeat.
+        """
+        if not self.blocked:
+            return f"daily_digest:{self.session_date}:ok"
+        failed = "+".join(sorted(b["job_name"] for b in self.blocked))
+        return f"daily_digest:{self.session_date}:incomplete({failed})"
+
+    @property
     def scoring_incomplete(self) -> bool:
         """Whether anything was evaluated tonight at all.
 
@@ -376,15 +397,26 @@ def run(
                 # An incomplete digest is a WARNING: the reader has to know the
                 # engine did not run, and "info" is what they skim past.
                 severity="warning" if content.scoring_incomplete else "info",
-                dedupe_key=f"daily_digest:{day}",
+                # Keyed on the OUTCOME as well as the day, so a corrected
+                # digest supersedes a failure notice instead of being
+                # suppressed as a duplicate of it.
+                dedupe_key=content.dedupe_key,
             )
             job.note(
                 channels_sent=list(delivery.sent),
+                channels_suppressed=list(delivery.suppressed),
                 channels_failed=list(delivery.failed),
+                channels_skipped=list(delivery.skipped),
+                dedupe_key=content.dedupe_key,
                 ideas=len(content.cards),
                 scoring_incomplete=content.scoring_incomplete,
                 blocked_by=[b["job_name"] for b in content.blocked],
             )
+            if not delivery.reached_someone:
+                # The digest is non-critical, so this cannot fail the job — but
+                # "nobody got tonight's digest" must not be a line only the log
+                # knows about.
+                log.error("digest for %s reached nobody: %s", day, delivery)
         else:
             job.note(
                 ideas=len(content.cards),

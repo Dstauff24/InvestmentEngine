@@ -28,20 +28,42 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Delivery:
-    """Which channels took the alert, and which were tried and failed."""
+    """What each channel actually DID. Four outcomes, never conflated.
+
+    `sent` means delivered JUST NOW. A suppressed duplicate is not a send: on
+    2026-10-22 the VM logged "suppressed duplicate telegram alert" and then
+    "sent via email, telegram", because both transports returned True for a
+    suppression and this class had nowhere else to put it. The evening's digest
+    reached nobody and the summary line said otherwise.
+    """
 
     sent: tuple[str, ...] = ()
     failed: tuple[str, ...] = ()
     skipped: tuple[str, ...] = field(default=())
+    suppressed: tuple[str, ...] = field(default=())
+    """Already delivered earlier under the same dedupe key — NOT a send."""
 
     @property
     def any_sent(self) -> bool:
+        """Whether anything was delivered NOW. Suppressions do not count."""
         return bool(self.sent)
+
+    @property
+    def reached_someone(self) -> bool:
+        """Whether the reader has this alert, now or from an earlier delivery.
+
+        The distinction `any_sent` cannot make: a wholly suppressed alert went
+        nowhere this minute and yet nothing is wrong, because the same message
+        already arrived.
+        """
+        return bool(self.sent or self.suppressed)
 
     def __str__(self) -> str:
         bits = []
         if self.sent:
             bits.append("sent via " + ", ".join(self.sent))
+        if self.suppressed:
+            bits.append("suppressed as duplicate: " + ", ".join(self.suppressed))
         if self.failed:
             bits.append("FAILED via " + ", ".join(self.failed))
         if self.skipped:
@@ -70,6 +92,7 @@ def notify(
     sent: list[str] = []
     failed: list[str] = []
     skipped: list[str] = []
+    suppressed: list[str] = []
 
     for channel in wanted:
         try:
@@ -77,7 +100,7 @@ def notify(
                 if not _email_configured():
                     skipped.append("email")
                     continue
-                ok = mailer.send(
+                outcome = mailer.send(
                     subject,
                     body,
                     alert_type=alert_type,
@@ -88,7 +111,7 @@ def notify(
                 if not settings.telegram_configured():
                     skipped.append("telegram")
                     continue
-                ok = telegram.send(
+                outcome = telegram.send(
                     subject,
                     body,
                     alert_type=alert_type,
@@ -107,10 +130,16 @@ def notify(
             failed.append(channel)
             continue
 
-        (sent if ok else failed).append(channel)
+        # A SUPPRESSION IS NOT A SEND. Three outcomes, three buckets.
+        if outcome == store.Outcome.DELIVERED:
+            sent.append(channel)
+        elif outcome == store.Outcome.SUPPRESSED:
+            suppressed.append(channel)
+        else:
+            failed.append(channel)
 
-    delivery = Delivery(tuple(sent), tuple(failed), tuple(skipped))
-    if not delivery.any_sent:
+    delivery = Delivery(tuple(sent), tuple(failed), tuple(skipped), tuple(suppressed))
+    if not delivery.reached_someone:
         # Worth a loud line of its own: every channel failed or none exists, so
         # this alarm reached nobody and only the log records that it happened.
         log.error("ALERT REACHED NOBODY: %r — %s", subject, delivery)
@@ -120,11 +149,30 @@ def notify(
 
 
 def _email_configured() -> bool:
-    """SMTP host plus a recipient. Mirrors `settings.telegram_configured`."""
+    """Whether email is USABLE, not merely mentioned.
+
+    It used to test `SMTP_HOST and alert_email_onfail()` for presence, and
+    `.env.example` SHIPS `SMTP_HOST=smtp.gmail.com` and
+    `ALERT_EMAIL_ONFAIL=you@example.com` — so a machine that copied the example
+    and never filled in SMTP reported email as a live channel, then failed on
+    the first send with "SMTP_USER is still the .env.example placeholder". A
+    channel whose credentials are placeholders is not configured; it is
+    unconfigured in a way that looks configured.
+
+    Asking the real accessors is what keeps this honest: each one refuses a
+    placeholder (`settings.looks_like_placeholder`), so "no SettingsError"
+    means every value email needs is actually filled in.
+    """
     try:
-        return bool(settings.get("SMTP_HOST") and settings.alert_email_onfail())
-    except settings.SettingsError:
+        settings.smtp_host()
+        settings.smtp_user()
+        settings.smtp_password()
+        settings.alert_email_from()
+        settings.alert_email_onfail()
+    except settings.SettingsError as exc:
+        log.info("email channel unavailable: %s", exc)
         return False
+    return True
 
 
 def job_failure_key(job_name: str, day: date | None = None) -> str:

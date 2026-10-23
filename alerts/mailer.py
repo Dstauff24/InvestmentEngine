@@ -8,7 +8,7 @@ Two properties that matter for something running unattended:
 
   * `send` NEVER raises. A mail server outage must not turn a job that succeeded
     into a job that failed, nor mask the original error in one that did fail.
-    It returns False and records the failure.
+    It returns `Outcome.FAILED` and records the failure.
   * Every send is recorded in `alerts` with a `dedupe_key`, so the same failure
     firing on three consecutive retries produces one email, not three.
 """
@@ -36,8 +36,13 @@ def send(
     severity: str = "critical",
     dedupe_key: str | None = None,
     record: bool = True,
-) -> bool:
-    """Send one plain-text email. Returns True on success; never raises.
+) -> store.Outcome:
+    """Send one plain-text email. Never raises.
+
+    Returns DELIVERED, SUPPRESSED (a row with this key already exists) or
+    FAILED. **Not a bool**: this used to return True for a suppression as well
+    as a delivery, so `notify` reported "sent via email" on an evening when
+    nothing was sent.
 
     `dedupe_key` makes the send idempotent: if a row with that key already
     exists in `alerts`, nothing is sent. Callers build one that is stable for
@@ -50,8 +55,8 @@ def send(
     if record:
         alert_id = _record(subject, body, alert_type, severity, dedupe_key)
         if alert_id is None:
-            log.info("suppressed duplicate alert: %s", dedupe_key)
-            return True
+            log.info("suppressed duplicate email alert: %s", dedupe_key)
+            return store.Outcome.SUPPRESSED
 
     try:
         message = EmailMessage()
@@ -69,11 +74,11 @@ def send(
         # more important failure than "the mail server was down".
         log.error("could not send alert %r: %s", subject, exc)
         _mark(alert_id, "failed", str(exc))
-        return False
+        return store.Outcome.FAILED
 
     log.info("sent alert %r to %s", subject, recipient)
     _mark(alert_id, "sent", None)
-    return True
+    return store.Outcome.DELIVERED
 
 
 def _record(

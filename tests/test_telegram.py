@@ -72,7 +72,7 @@ def test_it_refuses_without_consent(monkeypatch, caplog):
 
     session = FakeSession()
     with caplog.at_level(logging.ERROR):
-        assert telegram.send("subject", "body", session=session) is False
+        assert telegram.send("subject", "body", session=session) is store.Outcome.FAILED
     assert session.posts == [], "the gate must fire BEFORE the transport"
 
 
@@ -96,13 +96,13 @@ def test_inside_pytest_the_gate_refuses_even_with_the_flag(monkeypatch):
 def test_a_dead_telegram_returns_false_and_never_raises(boom, caplog):
     session = FakeSession(raises=boom)
     with caplog.at_level(logging.ERROR):
-        assert telegram.send("subject", "body", session=session) is False
+        assert telegram.send("subject", "body", session=session) is store.Outcome.FAILED
 
 
 def test_an_http_error_returns_false_and_never_raises(caplog):
     session = FakeSession(FakeResponse(403, '{"ok":false,"description":"bot blocked"}'))
     with caplog.at_level(logging.ERROR):
-        assert telegram.send("subject", "body", session=session) is False
+        assert telegram.send("subject", "body", session=session) is store.Outcome.FAILED
 
 
 def test_an_unconfigured_bot_returns_false_and_never_raises(monkeypatch, caplog):
@@ -110,7 +110,7 @@ def test_an_unconfigured_bot_returns_false_and_never_raises(monkeypatch, caplog)
         settings, "telegram_bot_token", lambda: (_ for _ in ()).throw(settings.SettingsError("x"))
     )
     with caplog.at_level(logging.ERROR):
-        assert telegram.send("subject", "body", session=FakeSession()) is False
+        assert telegram.send("subject", "body", session=FakeSession()) is store.Outcome.FAILED
 
 
 # ── token redaction ─────────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ def test_redact_leaves_ordinary_text_alone():
 
 def test_a_short_message_is_one_part():
     session = FakeSession()
-    assert telegram.send("subject", "body", session=session) is True
+    assert telegram.send("subject", "body", session=session) is store.Outcome.DELIVERED
     assert len(session.posts) == 1
     assert "(part" not in session.posts[0][1]["text"]
 
@@ -164,7 +164,7 @@ def test_a_short_message_is_one_part():
 def test_an_over_long_message_is_split_and_every_part_fits():
     body = "\n".join(f"line {i:05d}: " + "y" * 70 for i in range(400))
     session = FakeSession()
-    assert telegram.send("subject", body, session=session) is True
+    assert telegram.send("subject", body, session=session) is store.Outcome.DELIVERED
     assert len(session.posts) > 1
     for _, payload in session.posts:
         assert len(payload["text"]) <= telegram.MAX_MESSAGE_CHARS, (
@@ -202,17 +202,22 @@ def test_a_single_over_long_line_is_hard_cut_rather_than_dropped():
 
 def test_an_empty_body_still_sends_the_subject():
     session = FakeSession()
-    assert telegram.send("just the subject", "", session=session) is True
+    assert telegram.send("just the subject", "", session=session) is store.Outcome.DELIVERED
     assert "just the subject" in session.posts[0][1]["text"]
 
 
 # ── dedupe ──────────────────────────────────────────────────────────────────
 
 
-def test_a_duplicate_is_suppressed_without_a_post(monkeypatch):
+def test_a_duplicate_is_suppressed_and_says_so_rather_than_claiming_a_send(monkeypatch):
+    """IT USED TO RETURN TRUE. That is how the VM logged "suppressed duplicate
+    telegram alert" and then "sent via email, telegram" on an evening when the
+    digest reached nobody."""
     monkeypatch.setattr(store, "record", lambda *a, **k: None)  # key already present
     session = FakeSession()
-    assert telegram.send("subject", "body", dedupe_key="k", session=session) is True
+    outcome = telegram.send("subject", "body", dedupe_key="k", session=session)
+    assert outcome is store.Outcome.SUPPRESSED
+    assert outcome is not store.Outcome.DELIVERED
     assert session.posts == [], "a suppressed alert must not reach the API"
 
 
@@ -229,13 +234,67 @@ def test_the_dedupe_key_is_namespaced_per_channel():
 
 def test_notify_reports_which_channels_took_it(monkeypatch):
     monkeypatch.setattr(notify, "_email_configured", lambda: True)
-    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: True)
-    monkeypatch.setattr(notify.telegram, "send", lambda *a, **k: False)
+    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: store.Outcome.DELIVERED)
+    monkeypatch.setattr(notify.telegram, "send", lambda *a, **k: store.Outcome.FAILED)
 
     delivery = notify.notify("subject", "body")
     assert delivery.sent == ("email",)
     assert delivery.failed == ("telegram",)
     assert delivery.any_sent is True
+
+
+def test_notify_reports_a_suppressed_channel_as_suppressed_not_sent(monkeypatch):
+    """THE 2026-10-22 BUG, at the facade. A suppression must never appear in
+    `sent`, and the summary line must not say "sent via" a channel that sent
+    nothing."""
+    monkeypatch.setattr(notify, "_email_configured", lambda: True)
+    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: store.Outcome.SUPPRESSED)
+    monkeypatch.setattr(notify.telegram, "send", lambda *a, **k: store.Outcome.SUPPRESSED)
+
+    delivery = notify.notify("subject", "body", dedupe_key="daily_digest:2026-10-22")
+
+    assert delivery.sent == ()
+    assert delivery.suppressed == ("email", "telegram")
+    assert delivery.failed == ()
+    assert delivery.any_sent is False, "nothing was delivered now"
+    assert delivery.reached_someone is True, "but the reader already has it"
+    assert "sent via" not in str(delivery)
+    assert "suppressed as duplicate: email, telegram" in str(delivery)
+
+
+def test_a_mixed_delivery_separates_all_four_outcomes(monkeypatch):
+    monkeypatch.setattr(notify, "_email_configured", lambda: True)
+    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: store.Outcome.SUPPRESSED)
+    monkeypatch.setattr(notify.telegram, "send", lambda *a, **k: store.Outcome.DELIVERED)
+
+    delivery = notify.notify("subject", "body")
+    assert delivery.sent == ("telegram",)
+    assert delivery.suppressed == ("email",)
+    summary = str(delivery)
+    assert "sent via telegram" in summary
+    assert "suppressed as duplicate: email" in summary
+
+
+def test_an_alert_that_is_wholly_suppressed_is_not_logged_as_reaching_nobody(monkeypatch, caplog):
+    """ "REACHED NOBODY" is for a real outage. A duplicate reached them the
+    first time, and crying wolf here trains the reader to ignore the line."""
+    monkeypatch.setattr(notify, "_email_configured", lambda: True)
+    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: store.Outcome.SUPPRESSED)
+    monkeypatch.setattr(settings, "telegram_configured", lambda: False)
+
+    with caplog.at_level("ERROR"):
+        notify.notify("subject", "body")
+    assert "REACHED NOBODY" not in caplog.text
+
+
+def test_an_alert_that_only_failed_is_logged_as_reaching_nobody(monkeypatch, caplog):
+    monkeypatch.setattr(notify, "_email_configured", lambda: True)
+    monkeypatch.setattr(notify.mailer, "send", lambda *a, **k: store.Outcome.FAILED)
+    monkeypatch.setattr(settings, "telegram_configured", lambda: False)
+
+    with caplog.at_level("ERROR"):
+        notify.notify("subject", "body")
+    assert "ALERT REACHED NOBODY" in caplog.text
 
 
 def test_notify_skips_a_channel_that_is_not_configured(monkeypatch):
@@ -273,3 +332,59 @@ def test_notify_logs_loudly_when_an_alarm_reaches_nobody(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR):
         assert notify.notify("subject", "body").any_sent is False
     assert "ALERT REACHED NOBODY" in caplog.text
+
+
+def test_email_is_not_configured_when_its_credentials_are_placeholders(monkeypatch):
+    """`.env.example` SHIPS `SMTP_HOST=smtp.gmail.com` and
+    `ALERT_EMAIL_ONFAIL=you@example.com`, so a presence check called email a
+    live channel on a machine that never filled SMTP in — and the first send
+    then failed with "SMTP_USER is still the .env.example placeholder".
+
+    A channel whose credentials are placeholders is not configured; it is
+    unconfigured in a way that LOOKS configured, which is why the VM's digest
+    could claim an email path that was never going to work.
+    """
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_USER", "CHANGE_ME")
+    monkeypatch.setenv("SMTP_PASSWORD", "CHANGE_ME")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", "engine@example.com")
+    monkeypatch.setenv("ALERT_EMAIL_ONFAIL", "you@example.com")
+
+    assert notify._email_configured() is False
+
+
+def test_email_is_configured_once_the_values_are_real(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.fastmail.com")
+    monkeypatch.setenv("SMTP_USER", "engine@real.example")
+    monkeypatch.setenv("SMTP_PASSWORD", "a-real-app-password")
+    monkeypatch.setenv("ALERT_EMAIL_FROM", "engine@real.example")
+    monkeypatch.setenv("ALERT_EMAIL_ONFAIL", "me@real.example")
+
+    assert notify._email_configured() is True
+
+
+def test_an_unconfigured_email_channel_is_skipped_not_reported_as_sent(monkeypatch):
+    """The whole point: a channel that cannot work must appear under `skipped`,
+    where a reader can see it, and never under `sent`."""
+    monkeypatch.setenv("SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("SMTP_USER", "CHANGE_ME")
+    monkeypatch.setenv("SMTP_PASSWORD", "CHANGE_ME")
+    monkeypatch.setattr(settings, "telegram_configured", lambda: False)
+
+    delivery = notify.notify("subject", "body")
+    assert delivery.skipped == ("email", "telegram")
+    assert delivery.sent == ()
+    assert "not configured: email, telegram" in str(delivery)
+
+
+def test_the_placeholder_rule_has_one_definition(monkeypatch):
+    """`settings.require`, the deploy check and the alerting layer must agree
+    about what "filled in" means, or a value passes one gate and fails another."""
+    from scripts import env_contract
+
+    assert env_contract.PLACEHOLDERS is settings.PLACEHOLDERS
+    assert settings.looks_like_placeholder("CHANGE_ME_NOW") is True
+    assert settings.looks_like_placeholder("you@example.com") is True
+    assert settings.looks_like_placeholder("engine@real.example") is False
+    assert settings.looks_like_placeholder("") is False
+    assert settings.looks_like_placeholder(None) is False
