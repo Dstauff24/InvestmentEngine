@@ -32,6 +32,7 @@ EXPECTED_TABLES = [
     "alerts",
     "api_budget",
     "corporate_actions",
+    "daily_candidates",
     "daily_scoring_stats",
     "estimate_snapshots",
     "events",

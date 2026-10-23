@@ -843,6 +843,16 @@ def test_only_named_modules_read_raw_bars_and_each_says_why():
         # Reads raw and rebases forward into the CALL's units
         # (`in_call_basis`), because the stored projections are frozen (D13).
         "shadow_book/outcome_tracker.py",
+        # Reads raw and takes it through `adjust_bars` in TOTAL-RETURN mode: a
+        # candidate's forward return is performance (D19), not chart structure,
+        # so it is the one reader that deliberately differs from `load_bars`.
+        "jobs/candidate_returns.py",
+        # Stores `daily_candidates.close_raw` — the RAW print, on purpose: it
+        # is what a human checking the row against that day's chart saw, and
+        # nothing is computed from it. The forward returns come off an adjusted
+        # frame, so the one number here that could be wrong about a split is
+        # the one that is never used in arithmetic.
+        "scoring/runner.py",
         # Reads raw ON PURPOSE: its whole job is to prove a stored series
         # STEPS at a split ex-date, which is the only evidence that
         # `prices_daily` is still raw.

@@ -123,11 +123,17 @@ STATS_SQL = """
     ORDER  BY session_date
 """
 
-IDEAS_SQL = """
-    SELECT as_of_date, symbol, recipe, tier, composite_score, pillars_agreeing
-    FROM   ideas
-    WHERE  as_of_date >= %(since)s AND as_of_date <= %(as_of)s
-    ORDER  BY composite_score DESC, as_of_date DESC
+# D42 AMENDED: the week's best-ranked candidates, by name. Before the
+# `daily_candidates` table existed this read `ideas`, which holds only SURFACED
+# ideas — so on a week where nothing surfaced the scorecard could say how close
+# the best composite came and never which symbol it was.
+CANDIDATES_SQL = """
+    SELECT session_date, symbol, rank, composite, percentile, tier,
+           scored_pillars, surfaced, recipe, risk_reward, no_plan_reason,
+           fwd_5_pct, fwd_10_pct, fwd_20_pct
+    FROM   daily_candidates
+    WHERE  session_date >= %(since)s AND session_date <= %(as_of)s
+    ORDER  BY composite DESC NULLS LAST, session_date DESC
     LIMIT  %(limit)s
 """
 
@@ -315,7 +321,7 @@ def collect(*, as_of: date | None = None) -> Scorecard:
         cells=analytics.cells(as_of=day),
         stats=db.fetch_all(STATS_SQL, {"since": since, "as_of": day}),
         top_ideas=db.fetch_all(
-            IDEAS_SQL, {"since": since, "as_of": day, "limit": MAX_IDEAS_LISTED}
+            CANDIDATES_SQL, {"since": since, "as_of": day, "limit": MAX_IDEAS_LISTED}
         ),
         incomplete=incomplete,
     )
@@ -418,21 +424,59 @@ def _empty_book(card: Scorecard) -> list[str]:
         "",
     ]
 
-    if card.top_ideas:
-        lines += ["IDEAS THAT SURFACED THIS WEEK", "-" * 46]
-        for idea in card.top_ideas:
-            lines.append(
-                f"  {idea['symbol']:<6} {idea['recipe']:<20} tier {idea['tier']} "
-                f"{_num(idea['composite_score'])} ({idea['pillars_agreeing']} agreeing)"
-            )
-    else:
+    lines += _candidate_section(card)
+    return lines
+
+
+def _candidate_section(card: Scorecard) -> list[str]:
+    """The week's closest candidates, BY NAME (D42 amended).
+
+    Every one of these is a SCORE, not a call: most produced no plan, which is
+    why the refusal reason is printed under each. The forward returns are
+    shown where the sessions have passed, because "the engine's best idea of
+    the week went nowhere" is the single most useful line here and the
+    aggregate could never carry it.
+    """
+    if not card.top_ideas:
+        if not card.stats:
+            return []
         best = max((r["composite_max"] or 0) for r in card.stats)
-        lines += [
-            f"CLOSEST THE WEEK CAME: a composite of {_num(best)}, and D42 keeps",
-            "NO SYMBOL for an idea that qualified but did not surface — the",
-            "aggregate is a count and a distribution by design. Naming the",
-            "near-misses would mean deciding to persist them.",
+        return [
+            f"CLOSEST THE WEEK CAME: a composite of {_num(best)}, with no",
+            "candidate rows for the week — `daily_candidates` is written by the",
+            "scoring pass, so this is a gap in the record rather than a quiet",
+            "market.",
         ]
+
+    lines = ["THE WEEK'S BEST-RANKED CANDIDATES (D42 — scores, not calls)", "-" * 46]
+    for row in card.top_ideas:
+        mark = "surfaced" if row["surfaced"] else "no call"
+        lines.append(
+            f"  {row['symbol']:<6} {_num(row['composite'])} "
+            f"p{_num(row['percentile'])}  [{row['scored_pillars'] or 'none'}]  "
+            f"tier {row['tier'] or '-'}  {mark}"
+        )
+        forward = [
+            f"{label} {value:+.1f}%"
+            for label, value in (
+                ("5d", _f(row["fwd_5_pct"])),
+                ("10d", _f(row["fwd_10_pct"])),
+                ("20d", _f(row["fwd_20_pct"])),
+            )
+            if value is not None
+        ]
+        if forward:
+            lines.append("    since: " + "  ".join(forward))
+        if row["no_plan_reason"]:
+            lines.append(f"    {_clip(row['no_plan_reason'], 100)}")
+        elif row["recipe"]:
+            lines.append(f"    {row['recipe']}, R:R {_num(row['risk_reward'])}")
+    lines += [
+        "",
+        "  A forward return here is a property of the SCORE, not of a trade:",
+        "  no entry, no stop, no R. D40's ladder reads closed Shadow Book",
+        "  ideas and never this list.",
+    ]
     return lines
 
 
@@ -580,6 +624,10 @@ def _mask_totals(stats: list[dict]) -> dict[str, int]:
         for pillars, count in (row["mask_histogram"] or {}).items():
             out[str(pillars)] = out.get(str(pillars), 0) + int(count)
     return out
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _level(value: float | None, pct: float | None) -> str:

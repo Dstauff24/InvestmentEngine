@@ -64,6 +64,18 @@ def test_fundamentals_run_after_events():
     assert names.index("fmp_events") < names.index("fmp_fundamentals")
 
 
+# Every step that READS what was ingested rather than fetching it. Named once:
+# the ingestion-order tests below define themselves as "everything else", so a
+# new derived step added to one list and not the other would silently move what
+# they assert.
+DERIVED = {
+    "scoring_pass",
+    "outcome_tracker",
+    "candidate_returns",
+    "daily_digest",
+}
+
+
 def test_news_is_the_last_INGESTION_step():
     """It is the slowest and nothing ingested depends on it.
 
@@ -71,8 +83,7 @@ def test_news_is_the_last_INGESTION_step():
     digest) follow every ingestion step, because they read what was ingested.
     """
     names = [s.name for s in build_plan()]
-    derived = {"scoring_pass", "outcome_tracker", "daily_digest"}
-    ingestion = [n for n in names if n not in derived]
+    ingestion = [n for n in names if n not in DERIVED]
     assert ingestion[-1] == "finnhub_news"
 
 
@@ -80,9 +91,8 @@ def test_the_derived_layers_come_after_all_ingestion_and_in_order():
     """The digest must run AFTER the tracker (D16): it reports yesterday's
     outcome changes alongside today's ideas."""
     names = [s.name for s in build_plan()]
-    derived = {"scoring_pass", "outcome_tracker", "daily_digest"}
-    first_derived = min(names.index(n) for n in derived)
-    assert all(names.index(n) >= first_derived for n in derived)
+    first_derived = min(names.index(n) for n in DERIVED)
+    assert all(names.index(n) >= first_derived for n in DERIVED)
     assert names.index("outcome_tracker") < names.index("daily_digest")
 
 

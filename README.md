@@ -515,6 +515,12 @@ Notes on the schedule:
   visible in `job_runs` and harmless.
 - The orchestrator releases abandoned `running` rows from a previous crash before
   starting, so a hard kill does not wedge the next night's run.
+- **`candidate_returns` runs inside the nightly pipeline** (after `scoring_pass`)
+  and fills forward returns for EARLIER days — a 5-session horizon from tonight
+  does not exist yet. Non-critical and recomputable from stored bars, so a
+  missed night is filled by the next run rather than lost. Check what is
+  outstanding without writing anything:
+  `python -m jobs.candidate_returns --dry-run`.
 - **The Friday scorecard is non-critical and cannot make a day look
   incomplete**: `v_day_status` derives `day_complete` from CRITICAL jobs only,
   so a Telegram outage on a Friday evening is a missing report, not a broken

@@ -41,6 +41,8 @@ __all__ = [
     "SectorCache",
     "abstaining_pillars",
     "build_cards",
+    "candidate_rows",
+    "record_candidates",
     "record_daily_stats",
     "score_symbol",
     "score_universe",
@@ -260,6 +262,7 @@ def score_universe(
     run = UniverseRun(scored=scored)
     if record_stats:
         record_daily_stats(run, day=day)
+        record_candidates(run, day=day)
     log.info(
         "scored %d: %d tier A, %d tier B, %d abstained; pillars %s",
         len(scored),
@@ -308,6 +311,130 @@ STATS_UPSERT = """
         recipe_counts      = EXCLUDED.recipe_counts,
         updated_at         = now()
 """
+
+
+CANDIDATES_UPSERT = """
+    INSERT INTO daily_candidates (
+        session_date, symbol, rank, composite, percentile, scored_pillars,
+        pillars_scored, tier, tier_reason, surfaced, recipe, risk_reward,
+        no_plan_reason, gates_in_force, close_raw
+    ) VALUES (
+        %(session_date)s, %(symbol)s, %(rank)s, %(composite)s, %(percentile)s,
+        %(scored_pillars)s, %(pillars_scored)s, %(tier)s, %(tier_reason)s,
+        %(surfaced)s, %(recipe)s, %(risk_reward)s, %(no_plan_reason)s,
+        %(gates_in_force)s, %(close_raw)s
+    )
+    ON CONFLICT (session_date, symbol) DO UPDATE SET
+        rank           = EXCLUDED.rank,
+        composite      = EXCLUDED.composite,
+        percentile     = EXCLUDED.percentile,
+        scored_pillars = EXCLUDED.scored_pillars,
+        pillars_scored = EXCLUDED.pillars_scored,
+        tier           = EXCLUDED.tier,
+        tier_reason    = EXCLUDED.tier_reason,
+        surfaced       = EXCLUDED.surfaced,
+        recipe         = EXCLUDED.recipe,
+        risk_reward    = EXCLUDED.risk_reward,
+        no_plan_reason = EXCLUDED.no_plan_reason,
+        gates_in_force = EXCLUDED.gates_in_force,
+        close_raw      = EXCLUDED.close_raw
+"""
+
+CLOSE_SQL = """
+    SELECT close FROM prices_daily WHERE symbol = %s AND session_date = %s
+"""
+
+MAX_REASON_CHARS = 600
+
+
+def candidate_rows(run: UniverseRun, *, day: date, cfg=None) -> list[dict]:
+    """The day's top N by rank, as rows. Pure: no database, no clock.
+
+    N is `ranking.max_ideas_per_day` — the same cut D42 uses for surfacing, so
+    the rows are "what the engine would have shown if every one of them had a
+    plan and cleared a gate", which is the population whose forward returns can
+    say whether the composite predicts anything on its own.
+
+    **RANKED, NOT QUALIFYING.** The cut is by rank over the whole universe, so
+    a high score that fired no setup is kept — that case is the entire point. A
+    cut on `tier is not None` would keep only the ideas the gates already liked
+    and could never answer whether the gates are the thing adding value.
+    """
+    scoring_cfg = cfg or config.scoring()
+    ranked = [s for s in run.scored if s.rank is not None]
+    ranked.sort(key=lambda s: s.rank)
+    top = ranked[: scoring_cfg.ranking.max_ideas_per_day]
+
+    gates = {
+        "tier_a_min_composite": scoring_cfg.tiers.a.min_composite,
+        "tier_b_min_composite": scoring_cfg.tiers.b.min_composite,
+        "max_ideas_per_day": scoring_cfg.ranking.max_ideas_per_day,
+        "pillar_agreement_min_score": scoring_cfg.pillar_agreement.min_score,
+    }
+
+    rows = []
+    for item in top:
+        best = item.best_plan
+        rows.append(
+            {
+                "session_date": day,
+                "symbol": item.symbol,
+                "rank": item.rank,
+                "composite": item.composite,
+                "percentile": item.percentile,
+                "scored_pillars": item.mask or None,
+                "pillars_scored": item.pillars_scored,
+                "tier": item.tier,
+                "tier_reason": item.tier_reason or None,
+                "surfaced": item.surfaced,
+                "recipe": best.recipe if best else None,
+                "risk_reward": round(best.plan.risk_reward, 4) if best else None,
+                "no_plan_reason": None if best else _no_plan_reason(item),
+                "gates_in_force": gates,
+                "close_raw": None,
+            }
+        )
+    return rows
+
+
+def _no_plan_reason(item) -> str:
+    """Why this score produced no trade plan.
+
+    Every recipe's own refusal, joined — not just the first. A score of 78 with
+    "not in an uptrend / no base / no knowable report" is a different fact from
+    one whose single recipe refused on a gate, and the shape of these strings
+    across a few hundred rows is what will say whether the recipes or the gates
+    are what the composite keeps running into.
+    """
+    reasons = [f"{r.recipe}: {r.reason}" for r in item.recipes if r.reason]
+    if not reasons:
+        return "no recipe produced a result at all"
+    joined = "; ".join(reasons)
+    return joined if len(joined) <= MAX_REASON_CHARS else joined[: MAX_REASON_CHARS - 1] + "…"
+
+
+def record_candidates(run: UniverseRun, *, day: date) -> int:
+    """Persist the day's top-ranked candidates (D42 amended). Returns the count.
+
+    Idempotent by (session_date, symbol): a re-run of a day replaces the
+    scores, and deliberately does NOT touch the forward-return columns — those
+    are filled once by `jobs/candidate_returns.py` and never rewritten, so a
+    re-scored day cannot silently move a number a study already read.
+    """
+    import json
+
+    rows = candidate_rows(run, day=day)
+    for row in rows:
+        close = db.fetch_one(CLOSE_SQL, (row["symbol"], day))
+        row["close_raw"] = close["close"] if close else None
+        row["gates_in_force"] = json.dumps(row["gates_in_force"])
+        db.execute(CANDIDATES_UPSERT, row)
+    log.info(
+        "D42 candidates for %s: %d row(s) kept with their mask and refusal reason",
+        day,
+        len(rows),
+    )
+    return len(rows)
 
 
 def record_daily_stats(run: UniverseRun, *, day: date) -> None:

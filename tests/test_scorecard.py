@@ -162,31 +162,66 @@ def test_an_empty_book_with_no_stats_is_reported_as_a_fault():
     assert "that is a fault, not a quiet market" in body
 
 
-def test_the_near_misses_cannot_be_named_and_the_report_says_why():
-    """D42 rolls every qualifying-but-unsurfaced idea into one aggregate row
-    with no symbols in it. Naming them would mean deciding to persist them,
-    which nobody has decided — so the report states the limit rather than
-    quietly showing an empty list."""
+def candidate_row(**kw) -> dict:
+    base = {
+        "session_date": MONDAY,
+        "symbol": "NVDA",
+        "rank": 1,
+        "composite": 81.0,
+        "percentile": 99.0,
+        "tier": None,
+        "scored_pillars": "T+F+C",
+        "surfaced": False,
+        "recipe": None,
+        "risk_reward": None,
+        "no_plan_reason": "pullback_to_trend: not in an uptrend (MAs not stacked)",
+        "fwd_5_pct": 2.4,
+        "fwd_10_pct": -1.1,
+        "fwd_20_pct": None,
+    }
+    base.update(kw)
+    return base
+
+
+def test_a_week_with_no_candidate_rows_calls_it_a_gap_in_the_record():
+    """`daily_candidates` is written by the scoring pass, so an empty week is
+    a missing record rather than a quiet market — the distinction the digest
+    had to learn in October."""
     _, body = scorecard.render(card(stats=[stats_row()]))
-    assert "D42 keeps" in body
-    assert "NO SYMBOL" in body
+    assert "gap in the record rather than a quiet" in body
 
 
-def test_ideas_that_did_surface_are_listed_by_composite():
-    ideas = [
-        {
-            "as_of_date": MONDAY,
-            "symbol": "NVDA",
-            "recipe": "post_earnings_drift",
-            "tier": "A",
-            "composite_score": 81.0,
-            "pillars_agreeing": 3,
-        }
-    ]
-    _, body = scorecard.render(card(stats=[stats_row()], top_ideas=ideas))
-    assert "IDEAS THAT SURFACED THIS WEEK" in body
+def test_the_weeks_best_candidates_are_named_with_their_refusals(capsys):
+    """D42 AMENDED. The aggregate carried no symbol, so the scorecard could
+    say how close the best composite came and never which symbol it was."""
+    _, body = scorecard.render(card(stats=[stats_row()], top_ideas=[candidate_row()]))
+    assert "THE WEEK'S BEST-RANKED CANDIDATES" in body
     assert "NVDA" in body
-    assert "D42 keeps" not in body, "there is something to name, so the caveat is not needed"
+    assert "[T+F+C]" in body, "D41's mask travels with the score"
+    assert "no call" in body
+    assert "not in an uptrend" in body, "the reason no plan exists"
+    assert "5d +2.4%" in body and "10d -1.1%" in body
+    assert "20d" not in body, "a horizon the sessions have not reached is absent, not zero"
+
+
+def test_a_candidate_is_marked_as_a_score_and_not_a_call():
+    """The line that keeps this table out of D40's ladder."""
+    _, body = scorecard.render(card(stats=[stats_row()], top_ideas=[candidate_row()]))
+    assert "property of the SCORE, not of a trade" in body
+    assert "never this list" in body
+
+
+def test_a_candidate_that_surfaced_shows_its_plan_instead_of_a_refusal():
+    row = candidate_row(
+        surfaced=True,
+        tier="A",
+        recipe="post_earnings_drift",
+        risk_reward=3.2,
+        no_plan_reason=None,
+    )
+    _, body = scorecard.render(card(stats=[stats_row()], top_ideas=[row]))
+    assert "surfaced" in body
+    assert "post_earnings_drift, R:R 3.2" in body
 
 
 # ── open positions ──────────────────────────────────────────────────────────

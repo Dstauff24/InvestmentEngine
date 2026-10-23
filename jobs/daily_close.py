@@ -55,7 +55,7 @@ from ingest import (
 )
 from ingest.fmp_estimates import EstimatesPlanBlocked
 from ingest.schwab_client import SchwabTokenError, check_token
-from jobs import price_basis_check, scoring_pass
+from jobs import candidate_returns, price_basis_check, scoring_pass
 from shadow_book import outcome_tracker
 
 log = logging.getLogger(__name__)
@@ -218,6 +218,18 @@ def build_plan() -> list[Step]:
             lambda: outcome_tracker.run(),
             depends_on=("schwab_prices",),
             description="mark open Shadow Book calls against today's bars (D13/D19)",
+        ),
+        Step(
+            "candidate_returns",
+            lambda: candidate_returns.run(),
+            # AFTER the scoring pass, which is what writes today's candidate
+            # rows — though the returns it fills belong to EARLIER days, since
+            # a 5-session horizon from today does not exist yet. Non-critical
+            # and recomputable: every value comes from stored bars, and the
+            # writer only ever fills a NULL, so a missed day is filled by the
+            # next run rather than lost.
+            depends_on=("scoring_pass",),
+            description="forward returns at 5/10/20 sessions for ranked candidates (D42)",
         ),
         Step(
             "daily_digest",
