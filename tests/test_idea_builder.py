@@ -314,7 +314,10 @@ def test_an_exhausted_tier_b_budget_refuses():
         tier_b_spent_pct=RISK.tier_b_budget.hard_ceiling_pct,
     )
     assert isinstance(rejection, Rejection)
-    assert rejection.stage == "sizing"
+    # D54 renamed the stage from the catch-all `sizing`: the budget, the heat
+    # cap and the concurrency limit were three different causes under one
+    # label, and D54 has to name each one to flag it on a certified call.
+    assert rejection.stage == "tier_b_budget"
     assert "D18" in rejection.reason
 
 
@@ -563,7 +566,7 @@ def test_the_assignment_reports_how_many_symbols_it_CONSIDERED():
     assignment = assign_slots(run, build_context=contexts({"S0": result()}), limit=1)
 
     assert assignment.considered == 8, "every scored symbol is a candidate (D53)"
-    assert assignment.walked == 1, "and the walk still stops once the slots are full"
+    assert assignment.walked == 8, "and D54 walks all of them, not just to the first slot"
 
 
 def test_a_rank_six_idea_is_surfaced_when_the_leaders_are_REFUSED_too():
@@ -586,9 +589,14 @@ def test_a_rank_six_idea_is_surfaced_when_the_leaders_are_REFUSED_too():
     assert assignment.refused_by_symbol["EXPD"].stage == "risk_reward"
 
 
-def test_the_walk_stops_as_soon_as_the_slots_are_full():
-    """Lazy by design: the cost is how far it had to go, not the size of the
-    qualifying population (190 ideas qualified on 2026-10-21)."""
+def test_the_walk_RUNS_PAST_the_slot_limit_so_D54_can_log_what_it_finds():
+    """It used to stop here, which let `max_ideas_per_day` decide what the
+    engine LEARNS from rather than what a human reads at 16:45 (D54).
+
+    The laziness is gone on purpose and the cost is bounded by the same thing
+    as before: a symbol with no plan refuses at `plan` before `build_context`
+    touches the database, so the walk is long and cheap rather than short.
+    """
     from decision.idea_builder import assign_slots
 
     items = [scored(symbol=f"S{i}", composite=95.0 - i) for i in range(20)]
@@ -603,8 +611,18 @@ def test_the_walk_stops_as_soon_as_the_slots_are_full():
         ),
         limit=3,
     )
-    assert len(assignment.accepted) == 3
-    assert assignment.walked == 3, "it never looked at the other seventeen"
+    assert len(assignment.accepted) == 3, "the digest still shows only the top N"
+    assert assignment.walked == 20, "but every candidate is now evaluated (D54)"
+    # `pullback_to_trend` is UNCERTIFIED, so the ones past the limit are
+    # refused rather than logged — D54 records certified plans only.
+    past = [r for _, r in assignment.refused if r.stage == "slot_rank"]
+    assert len(past) == 17
+    # `logged` is what reaches the Shadow Book: the ACCEPTED ideas as before
+    # (D13 logs every surfaced call, certified or not), and under D54 also the
+    # certified plans a cap or the slot limit kept out. Nothing certified fired
+    # here, so it is exactly the three that took slots.
+    assert [idea.symbol for idea in assignment.logged] == ["S0", "S1", "S2"]
+    assert all(idea.would_be_taken for idea in assignment.logged)
 
 
 def test_an_accepted_idea_counts_against_the_sector_guard_for_the_next_one():
@@ -658,7 +676,7 @@ def test_an_accepted_idea_counts_against_the_heat_cap_for_the_next_one():
     )
     cap = config.risk().heat.max_open_heat_pct
     assert shared.open_risk_pct <= cap + 1e-9
-    assert any(r.stage == "sizing" for _, r in assignment.refused), (
+    assert any(r.stage == "heat" for _, r in assignment.refused), (
         "the cap has to refuse someone, or it is not a cap"
     )
 
@@ -763,3 +781,139 @@ def test_every_idea_records_what_the_composite_alone_said():
         assert isinstance(built, Idea), built
         assert built.composite_tier == expected
         assert built.composite_gate_passed is (expected is not None)
+
+
+# ── D54: shadow maximizes evidence ──────────────────────────────────────────
+
+# The recipe NAME that is certified in the shipped config. Distinct from
+# `CERTIFIED` above, which is a scoring CONFIG these tests pass as `cfg=`.
+CERTIFIED_RECIPE = "post_earnings_drift"
+
+
+def test_a_certified_plan_PAST_the_slot_limit_is_logged_not_discarded():
+    """D54. `max_ideas_per_day` decides what a human reads at 16:45; it has no
+    business deciding what the engine learns from. A shadow call costs nothing
+    and a day not recorded cannot be recovered."""
+    from decision.idea_builder import assign_slots
+
+    items = [scored(symbol=f"S{i}", composite=95.0 - i) for i in range(4)]
+    run = universe(*items)
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {f"S{i}": result(recipe=CERTIFIED_RECIPE) for i in range(4)},
+            sectors={f"S{i}": f"Sector{i}" for i in range(4)},
+        ),
+        limit=1,
+    )
+
+    assert [idea.symbol for idea in assignment.accepted] == ["S0"], "the digest shows one"
+    assert [idea.symbol for idea in assignment.logged] == ["S0", "S1", "S2", "S3"]
+    past = [idea for idea in assignment.logged if "slot_rank" in idea.would_refuse]
+    assert [idea.slot_rank for idea in past] == [2, 3, 4]
+    assert all(not idea.would_be_taken for idea in past)
+    assert assignment.logged[0].would_be_taken, "the one that took the slot would be taken"
+
+
+def test_a_cap_FLAGS_a_certified_plan_and_REFUSES_an_uncertified_one():
+    """The asymmetry is D53's: where a recipe has certified, the plan is
+    evidence whatever the book looks like. Where nothing has shown its plans
+    are worth recording, the old conservatism stands."""
+    from decision.idea_builder import assign_slots
+
+    full = book(swing_count=RISK.max_concurrent_swings)
+    for recipe, expect_logged in ((CERTIFIED_RECIPE, True), ("pullback_to_trend", False)):
+        run = universe(scored(symbol="AAPL"))
+        assignment = assign_slots(
+            run, build_context=contexts({"AAPL": result(recipe=recipe)}, shared_book=full)
+        )
+        assert assignment.accepted == [], "the cap still keeps it out of the book"
+        if expect_logged:
+            [idea] = assignment.logged
+            assert idea.would_refuse == ("concurrency",)
+            assert any("WOULD NOT BE TAKEN" in note for note in idea.notes)
+        else:
+            assert assignment.logged == []
+            assert assignment.refused_by_symbol["AAPL"].stage == "concurrency"
+
+
+def test_a_flagged_call_RESERVES_NOTHING_in_the_book():
+    """It is not a position. Charging the heat cap for risk nobody took would
+    refuse the next real idea on a trade that does not exist — the same reason
+    D38's watch-only reserves nothing."""
+    from decision.idea_builder import assign_slots
+
+    shared = book(open_risk_pct=RISK.heat.max_open_heat_pct)
+    run = universe(scored(symbol="AAPL"), scored(symbol="MSFT", composite=80.0))
+    assignment = assign_slots(
+        run,
+        build_context=contexts(
+            {"AAPL": result(recipe=CERTIFIED_RECIPE), "MSFT": result(recipe=CERTIFIED_RECIPE)},
+            shared_book=shared,
+            sectors={"AAPL": "Technology", "MSFT": "Healthcare"},
+        ),
+    )
+
+    assert len(assignment.logged) == 2
+    assert all(idea.would_refuse == ("heat",) for idea in assignment.logged)
+    assert shared.open_risk_pct == pytest.approx(RISK.heat.max_open_heat_pct), (
+        "a flagged call must not move the book's heat"
+    )
+
+
+def test_a_certified_WATCH_ONLY_call_is_logged_with_its_sector_flag():
+    """D54 amends D42 here, deliberately: the engine declined to SIZE it, so it
+    takes no slot and reserves nothing, but the plan is still evidence about
+    the recipe and the row says why it was not taken."""
+    from decision.idea_builder import assign_slots
+
+    full_sector = book(by_sector={"Technology": RISK.sector_guard.max_concurrent_swings_per_sector})
+    run = universe(scored(symbol="AAPL"))
+    assignment = assign_slots(
+        run,
+        build_context=contexts({"AAPL": result(recipe=CERTIFIED_RECIPE)}, shared_book=full_sector),
+    )
+
+    assert assignment.accepted == []
+    assert [idea.symbol for idea in assignment.watch_only] == ["AAPL"]
+    [idea] = assignment.logged
+    assert idea.would_refuse == ("sector",)
+    assert idea.watch_only is True
+    assert not idea.would_be_taken
+
+
+def test_the_constraint_vocabulary_matches_what_the_builder_can_emit():
+    """`shadow_book.would_refuse` stores these strings and the digest reads
+    them back, so a name invented in one place and not the other would write
+    rows nobody can interpret."""
+    from decision.idea_builder import CONSTRAINTS
+
+    assert set(CONSTRAINTS) == {"tier_b_budget", "heat", "sector", "concurrency", "slot_rank"}
+
+
+def test_a_cap_BINDS_at_paper_even_for_a_certified_recipe():
+    """D54 says shadow records and paper ENFORCES, and D40's amendment judges
+    paper->live on the paper book alone BECAUSE the caps bind there. A paper
+    call a cap would have refused must therefore not exist — otherwise the
+    portfolio question is answered with calls the portfolio never held."""
+    from decision.idea_builder import assign_slots
+
+    full = book(swing_count=RISK.max_concurrent_swings)
+    full.status = "paper"
+    run = universe(scored(symbol="AAPL"))
+    assignment = assign_slots(
+        run,
+        build_context=lambda item: {
+            "result": result(recipe=CERTIFIED_RECIPE),
+            "catalyst": cata(),
+            "sector": "Technology",
+            "status": "paper",
+            "book": full,
+            "iv_rank": None,
+            "iv_history_days": 0,
+            "account_value": ACCOUNT,
+        },
+    )
+
+    assert assignment.logged == [], "paper does not record what it would not take"
+    assert assignment.refused_by_symbol["AAPL"].stage == "concurrency"

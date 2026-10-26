@@ -46,6 +46,7 @@ INSERT = """
         proj_risk_reward, proj_confidence, proj_horizon_days,
         proj_trail_ma, proj_trail_confirm_closes,
         composite_tier, composite_gate_passed,
+        would_refuse, slot_rank,
         was_taken, outcome,
         status_at_call, regime_at_call, scored_pillars, pillars_scored,
         sentiment_scorer, gates_in_force,
@@ -57,6 +58,7 @@ INSERT = """
         %(proj_confidence)s, %(proj_horizon_days)s,
         %(proj_trail_ma)s, %(proj_trail_confirm_closes)s,
         %(composite_tier)s, %(composite_gate_passed)s,
+        %(would_refuse)s, %(slot_rank)s,
         FALSE, 'open',
         %(status_at_call)s, %(regime_at_call)s, %(scored_pillars)s, %(pillars_scored)s,
         %(sentiment_scorer)s, %(gates_in_force)s,
@@ -165,6 +167,11 @@ def log_idea(
             # that stopped gating on it, or the change erases its own evidence.
             "composite_tier": getattr(idea, "composite_tier", None),
             "composite_gate_passed": getattr(idea, "composite_gate_passed", None),
+            # D54: which caps WOULD have refused this call, and where it ranked.
+            # An EMPTY list means the engine would have taken it — distinct from
+            # NULL, which can only mean a row written before migration 020.
+            "would_refuse": list(getattr(idea, "would_refuse", ()) or []),
+            "slot_rank": getattr(idea, "slot_rank", None),
             "status_at_call": idea.status,
             "regime_at_call": regime if regime is not None else regime_at(day),
             "scored_pillars": idea.mask,
@@ -192,7 +199,14 @@ def log_idea(
 def log_surfaced(
     ideas: list[Idea], *, sentiment_scorer: str | None = None, as_of: date | None = None
 ) -> int:
-    """Log every surfaced idea. Returns how many were newly written.
+    """Log every call the day produced. Returns how many were newly written.
+
+    **D54: THIS IS NO LONGER "THE SURFACED ONES".** The caller hands over
+    `assignment.logged` — the accepted ideas plus every certified-recipe plan a
+    cap or the slot limit would have refused — because a shadow call costs
+    nothing and a day not recorded cannot be recovered. Each row carries
+    `would_refuse`, so "the engine would have taken this" and "its sector was
+    full" stay separable; the digest still shows only the accepted ones.
 
     The regime is computed ONCE for the day and passed to each call: it is a
     fact about the market, not about the idea, and reading the whole benchmark

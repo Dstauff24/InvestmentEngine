@@ -97,6 +97,15 @@ class Idea:
     `composite_tier`, and stored anyway: this is the question D53 poses, and a
     reader splitting expectancy on it should not have to know that NULL meant
     refused."""
+    would_refuse: tuple[str, ...] = ()
+    """D54: the capital constraints that WOULD have declined this call. Empty
+    means the engine would have taken it. The plan is recorded either way,
+    because the caps decide what would be TRADED while the Shadow Book measures
+    what the RECIPE is worth — two questions the old behaviour answered with
+    one number."""
+    slot_rank: int | None = None
+    """1-based position in the day's ranking, stamped by `assign_slots`. Past
+    `max_ideas_per_day` that is itself one of `would_refuse`."""
     watch_only: bool = False
     """D38's excess: the sector is at its limit, so the idea SURFACES as
     information and is not a position. It takes a digest slot and reserves no
@@ -113,6 +122,19 @@ class Idea:
         actionable, and the card says so rather than leaving it to be inferred.
         """
         return self.status == "live"
+
+    @property
+    def would_be_taken(self) -> bool:
+        """D54: would the engine have TAKEN this today, caps and slots included?
+
+        Deliberately not called `actionable`, which above means D40's ladder
+        question — "is this the human's to trade" — and is about the STRATEGY.
+        This one is about the day: the same plan can be live-actionable and
+        still not taken because the sector was full. Collapsing the two would
+        make `would_refuse` unreadable, since a row would not say which of the
+        two reasons kept it out of the book.
+        """
+        return not self.would_refuse and not self.watch_only
 
     def card(self) -> str:
         """The full card. Every section states a value or states why not."""
@@ -220,6 +242,11 @@ class SlotAssignment:
     it declined to take is not a call. It gets its own digest section with the
     D38 reason, because "this sector is working and we are already full" is
     worth reading."""
+    logged: list = field(default_factory=list)
+    """D54: every certified-recipe plan that cleared its RECIPE gates — the
+    accepted ones plus the ones a cap or the slot limit would have refused,
+    each carrying `would_refuse`. THIS is what goes to the Shadow Book;
+    `accepted` is what the digest shows."""
     refused: list = field(default_factory=list)
     """(ScoredSymbol, Rejection) for every candidate walked and declined."""
     walked: int = 0
@@ -269,6 +296,18 @@ def reserve(book: OpenBook, *, symbol: str, sector: str | None, risk_pct: float)
     book.by_sector[key] = book.by_sector.get(key, 0) + 1
     book.swing_count += 1
     book.open_risk_pct += risk_pct
+
+
+# D54's vocabulary, fixed here because `shadow_book.would_refuse` stores these
+# strings and a renderer has to read them back. A CHECK constraint on array
+# elements could not be read by the code that renders them, so the pairing is
+# pinned by a test instead.
+CONSTRAINTS = ("tier_b_budget", "heat", "sector", "concurrency", "slot_rank")
+
+
+def certified_recipe(recipe: str, cfg) -> bool:
+    """D53's certification, by name. D54 logs only certified recipes."""
+    return cfg.certification_of(recipe).status == "certified"
 
 
 def assign_slots(
@@ -331,8 +370,14 @@ def assign_slots(
     assignment = SlotAssignment(considered=len(ranked))
     tier_b_spent: dict[str, float] = {}
     for scored in ranked:
-        if len(assignment.accepted) >= slots:
-            break
+        # **D54: THE WALK NO LONGER STOPS AT THE SLOT LIMIT.** It used to break
+        # here, which made `max_ideas_per_day` decide what the engine LEARNS
+        # from rather than what it shows a human at 16:45. A shadow call costs
+        # nothing and a day not recorded cannot be recovered, so the walk runs
+        # to the end of the ranking and ideas past the limit are logged with
+        # `slot_rank` among their refusing constraints. The cost is bounded by
+        # the same thing as before: a symbol with no plan refuses at `plan`
+        # before `build_context` touches the database.
         assignment.walked += 1
         scored.surfaced = False
 
@@ -369,6 +414,27 @@ def assign_slots(
             assignment.refused.append((scored, built))
             continue
 
+        built.slot_rank = assignment.walked
+        if len(assignment.accepted) >= slots and not built.watch_only:
+            # Past the limit. For a CERTIFIED recipe that is a slot-rank flag
+            # and the call is still recorded; for an uncertified one it is a
+            # refusal, since nothing says its plans are worth recording.
+            if certified_recipe(built.recipe, scoring_cfg):
+                built.would_refuse = (*built.would_refuse, "slot_rank")
+                assignment.logged.append(built)
+            else:
+                assignment.refused.append(
+                    (
+                        scored,
+                        Rejection(
+                            scored.symbol,
+                            f"rank {built.slot_rank} is past the day's {slots} actionable slot(s)",
+                            "slot_rank",
+                        ),
+                    )
+                )
+            continue
+
         if built.watch_only:
             # D38's excess is INFORMATION, not a call: outside the N, no slot,
             # no book state, not logged to the Shadow Book. Charging the heat
@@ -376,9 +442,23 @@ def assign_slots(
             # trade that does not exist, and filling the actionable slots with
             # ideas the engine declined to size is the bug this walk replaced.
             assignment.watch_only.append(built)
+            if certified_recipe(built.recipe, scoring_cfg):
+                # D54 amends D42 here: the engine declined to SIZE it, which is
+                # why it takes no slot and reserves no book state, but the plan
+                # is still evidence about the recipe.
+                assignment.logged.append(built)
+            continue
+
+        if built.would_refuse:
+            # A certified plan a cap would have refused: recorded, not taken,
+            # and it reserves nothing — charging the heat cap for risk nobody
+            # took would refuse the next real idea on a trade that does not
+            # exist.
+            assignment.logged.append(built)
             continue
 
         assignment.accepted.append(built)
+        assignment.logged.append(built)
         scored.surfaced = True
         # The state the NEXT candidate must see (D17/D38/D18).
         reserve(
@@ -421,6 +501,7 @@ def build_idea(
     account = account_value if account_value is not None else settings.shadow_account_value()
     notes: list[str] = []
     watch_only = False
+    would_refuse: list[str] = []
 
     # ── D53: is the COMPOSITE an existence gate for this recipe? ───────────
     certification = scoring_cfg.certification_of(result.recipe)
@@ -481,6 +562,29 @@ def build_idea(
         )
 
     # ── D38/D44: the sector guard, scoped to this ladder state ──────────────
+    # ── D54: A CAP DECIDES WHAT WOULD BE TRADED, NOT WHAT IS RECORDED ──────
+    # For a CERTIFIED recipe the capital constraints below stop refusing and
+    # start FLAGGING: the plan is logged either way and the row says which cap
+    # it broke. A shadow call costs nothing and a day not recorded cannot be
+    # recovered, while the caps exist to protect capital that shadow is not
+    # risking. They bind from PAPER (D40). For an UNCERTIFIED recipe nothing
+    # changes — there is no evidence its plans are worth recording at all.
+    def capped(name: str, reason: str) -> Rejection | None:
+        """Flag for a certified recipe IN SHADOW; refuse everywhere else.
+
+        **THE LADDER STATE IS PART OF THE RULE, not just the certification.**
+        D54 says shadow records and paper and live ENFORCE, and D40 (amended
+        Oct 26 2026) judges paper->live on the paper book alone precisely
+        because the caps bind there — so a paper call a cap would have refused
+        must not exist, or the portfolio question is answered with calls the
+        portfolio would never have held.
+        """
+        if not certified or status != "shadow":
+            return Rejection(scored.symbol, reason, name)
+        would_refuse.append(name)
+        notes.append(f"WOULD NOT BE TAKEN — {reason} (D54: recorded anyway, shadow only)")
+        return None
+
     guard = risk_cfg.sector_guard
     held = book.sector_count(sector)
     if held >= guard.max_concurrent_swings_per_sector:
@@ -491,20 +595,31 @@ def build_idea(
         )
         if guard.surface_excess_as_watch_only:
             # D38: the information that the sector is working is worth keeping;
-            # the concentration is not.
+            # the concentration is not. D54 ALSO logs it when the recipe is
+            # certified, which amends D42's "watch-only is not a Shadow Book
+            # call" for that case — the plan is evidence about the recipe even
+            # though the engine declined to size it.
             notes.append(f"WATCH ONLY — {reason}")
             watch_only = True
+            if certified and status == "shadow":
+                would_refuse.append("sector")
         else:
-            return Rejection(scored.symbol, reason, "sector")
+            refusal = capped("sector", reason)
+            if refusal:
+                return refusal
+    # NOT a cap: a second call on a symbol already open would count one setup
+    # twice, which is the same rule D39(4) gives the backtest. It refuses for
+    # every recipe, certified or not.
     if book.holds(scored.symbol):
-        return Rejection(scored.symbol, f"already open in the {book.status} book", "sector")
+        return Rejection(scored.symbol, f"already open in the {book.status} book", "duplicate")
     if book.swing_count >= risk_cfg.max_concurrent_swings:
-        return Rejection(
-            scored.symbol,
+        refusal = capped(
+            "concurrency",
             f"{book.swing_count} swings open in the {book.status} book, at D17's "
             f"limit of {risk_cfg.max_concurrent_swings}",
-            "sector",
         )
+        if refusal:
+            return refusal
 
     # ── D17/D18/D44: sizing ─────────────────────────────────────────────────
     risk_pct = risk_pct_for(tier, risk_cfg)
@@ -512,13 +627,14 @@ def build_idea(
         budget = risk_cfg.tier_b_budget
         remaining = budget.hard_ceiling_pct - tier_b_spent_pct
         if remaining < risk_pct:
-            return Rejection(
-                scored.symbol,
+            refusal = capped(
+                "tier_b_budget",
                 f"Tier B month budget exhausted: {tier_b_spent_pct:.2f}% of the "
                 f"{budget.hard_ceiling_pct:g}% ceiling used, {remaining:.2f}% left but this "
                 f"idea needs {risk_pct:g}% (D18)",
-                "sizing",
             )
+            if refusal:
+                return refusal
         if remaining < risk_pct * 2:
             notes.append(
                 f"Tier B budget nearly spent: {remaining:.2f}% of "
@@ -537,12 +653,13 @@ def build_idea(
 
     heat_after = book.open_risk_pct + risk_pct
     if heat_after > risk_cfg.heat.max_open_heat_pct:
-        return Rejection(
-            scored.symbol,
+        refusal = capped(
+            "heat",
             f"open heat would reach {heat_after:.1f}%, over D17's "
             f"{risk_cfg.heat.max_open_heat_pct:g}% cap in the {book.status} book",
-            "sizing",
         )
+        if refusal:
+            return refusal
 
     vehicle, vehicle_note = vehicle_line(iv_rank, iv_history_days)
 
@@ -597,4 +714,5 @@ def build_idea(
         watch_only=watch_only,
         composite_tier=composite_tier,
         composite_gate_passed=composite_tier is not None,
+        would_refuse=tuple(would_refuse),
     )

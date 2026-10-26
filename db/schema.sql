@@ -625,6 +625,21 @@ CREATE TABLE IF NOT EXISTS shadow_book (
     composite_tier          TEXT CHECK (composite_tier IS NULL
                                         OR composite_tier IN ('A', 'B')),
     composite_gate_passed   BOOLEAN,
+
+    -- D54: which constraints WOULD have refused this call. Shadow logs every
+    -- certified-recipe plan that passes its RECIPE gates regardless of
+    -- `max_ideas_per_day` and the D17/D18/D38 caps, because a shadow call
+    -- costs nothing and a day not recorded cannot be recovered — so the row
+    -- has to say which caps it broke, or "the engine would have taken this"
+    -- and "its sector was already full" become the same claim. EMPTY array =
+    -- actionable; NULL = written before migration 020. Vocabulary lives in
+    -- `decision.idea_builder.CONSTRAINTS`. The caps bind from PAPER (D40).
+    would_refuse            TEXT[],
+    -- 1-based position in the day's composite ranking at call time. Beyond
+    -- `max_ideas_per_day` that is itself the reason the call is not
+    -- actionable, and O21's replay rebuilds the queue from it.
+    slot_rank               INT,
+
     scored_pillars          TEXT,
     pillars_scored          SMALLINT CHECK (pillars_scored IS NULL
                                             OR pillars_scored BETWEEN 0 AND 4),

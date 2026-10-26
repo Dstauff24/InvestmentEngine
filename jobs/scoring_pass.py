@@ -106,7 +106,14 @@ def run(*, as_of: date | None = None) -> int:
         refusal_summary: dict[str, int] = {}
         for _, rejection in refused:
             refusal_summary[rejection.stage] = refusal_summary.get(rejection.stage, 0) + 1
-        logged = log_surfaced(ideas, sentiment_scorer=scorer_id(get_scorer()), as_of=day)
+        # **D54: the Shadow Book gets `assignment.logged`, not the cards.**
+        # `ideas` is what the digest prints — the top N that passed every stage
+        # — while `logged` adds every certified-recipe plan a cap or the slot
+        # limit would have refused, each flagged with which one. The two lists
+        # answer different questions and conflating them is what made
+        # `max_ideas_per_day` decide what the engine learns from.
+        to_log = assignment.logged if assignment else ideas
+        logged = log_surfaced(to_log, sentiment_scorer=scorer_id(get_scorer()), as_of=day)
 
         _LAST = PassResult(
             cards=[idea.card() for idea in ideas],

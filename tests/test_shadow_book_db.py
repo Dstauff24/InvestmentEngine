@@ -44,7 +44,11 @@ def seeded():
 
 
 def _clean() -> None:
-    db.execute("DELETE FROM shadow_book WHERE symbol = %s", (SYMBOL,))
+    # ZZFLAG is the second symbol D54's split test needs: one call per
+    # (symbol, recipe, called_on) is unique, so two calls on one day have to
+    # come from two symbols. It is cleaned here so it cannot leak into another
+    # test's row counts.
+    db.execute("DELETE FROM shadow_book WHERE symbol IN (%s, 'ZZFLAG')", (SYMBOL,))
     db.execute("DELETE FROM prices_daily WHERE symbol = %s", (SYMBOL,))
     db.execute("DELETE FROM corporate_actions WHERE symbol = %s", (SYMBOL,))
     db.execute("DELETE FROM tickers WHERE symbol = %s", (SYMBOL,))
@@ -426,3 +430,86 @@ def test_a_retried_step_recovers_the_digest():
         db.execute(
             "DELETE FROM job_runs WHERE session_date = %s AND job_name = %s", (day, "scoring_pass")
         )
+
+
+# ── D54: the constraint flags, end to end ───────────────────────────────────
+
+
+def test_the_would_refuse_flags_survive_the_round_trip():
+    """D54. The row has to say which caps kept a call out of the book, or
+    "the engine would have taken this" and "its sector was full" become the
+    same claim about the same plan."""
+    from decision.idea_builder import CONSTRAINTS
+
+    call = idea(symbol=SYMBOL, recipe="post_earnings_drift")
+    call.would_refuse = ("heat", "slot_rank")
+    call.slot_rank = 7
+    row_id = log_idea(call, as_of=CALLED, regime="bull_calm")
+
+    stored = db.fetch_one(
+        "SELECT would_refuse, slot_rank FROM shadow_book WHERE id = %s", (row_id,)
+    )
+    assert stored["would_refuse"] == ["heat", "slot_rank"]
+    assert stored["slot_rank"] == 7
+    assert set(stored["would_refuse"]) <= set(CONSTRAINTS)
+
+
+def test_an_ACTIONABLE_call_stores_an_EMPTY_list_not_null():
+    """Empty and NULL are different claims: empty means the engine would have
+    taken it, NULL can only mean a row written before migration 020. A reader
+    splitting expectancy on the flags must not have to guess which."""
+    row_id = log_idea(idea(symbol=SYMBOL), as_of=CALLED, regime="bull_calm")
+    stored = db.fetch_one("SELECT would_refuse FROM shadow_book WHERE id = %s", (row_id,))
+    assert stored["would_refuse"] == []
+
+
+def test_expectancy_reports_the_whole_recipe_AND_the_taken_subset():
+    """The headline stays the RECIPE's number, because that is what shadow
+    measures (D54) — but the capped subset is not a random sample of it, so a
+    promotion decision has to see both."""
+    from shadow_book.analytics import cells
+
+    taken = idea(symbol=SYMBOL, recipe="post_earnings_drift")
+    flagged = idea(symbol="ZZFLAG", recipe="post_earnings_drift")
+    flagged.would_refuse = ("sector",)
+    log_idea(taken, as_of=CALLED, regime="bull_calm")
+    log_idea(flagged, as_of=CALLED, regime="bull_calm")
+
+    add_bar(CALLED + timedelta(days=1), 102, 100.0, 101)
+    add_bar(CALLED + timedelta(days=2), 101, 90.0, 92)
+    track_open_calls(as_of=TODAY)
+
+    cell = next(c for c in cells(as_of=TODAY) if c.recipe == "post_earnings_drift" and c.closed)
+    assert cell.closed >= cell.taken_closed
+    assert cell.taken_closed >= 1
+
+
+def test_paper_to_live_is_judged_on_the_calls_the_PORTFOLIO_would_have_held():
+    """D40's amendment. Shadow->paper asks whether the RECIPE has an edge, so
+    it counts every certified call including the ones a cap flagged. Paper->live
+    asks whether the PORTFOLIO is viable, so it counts only calls that would
+    have been taken — the caps bind from paper (D54), so a correct paper book
+    holds no flagged calls and the two agree; this guards the legacy case."""
+    from shadow_book.analytics import Cell, verdict_for
+
+    paper = Cell(recipe="post_earnings_drift", regime="bull_calm", status="paper")
+    paper.closed = 40
+    paper.r_multiples = [0.5] * 40
+    paper.taken_r_multiples = [0.5] * 10  # only ten would have been held
+    paper.first_called = CALLED
+    paper.last_called = CALLED + timedelta(days=200)
+
+    verdict = verdict_for(paper)
+    assert verdict.rule == "insufficient"
+    assert "would have been TAKEN" in verdict.detail
+
+    shadow = Cell(recipe="post_earnings_drift", regime="bull_calm", status="shadow")
+    shadow.closed = 40
+    shadow.r_multiples = [0.5] * 40
+    shadow.taken_r_multiples = [0.5] * 10
+    shadow.first_called = CALLED
+    shadow.last_called = CALLED + timedelta(days=200)
+
+    assert verdict_for(shadow).rule == "promote", (
+        "the recipe question counts every certified call (D40 amended)"
+    )

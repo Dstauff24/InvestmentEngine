@@ -66,7 +66,8 @@ ROWS_SQL = """
            days_held,
            called_on,
            proj_confidence,
-           pillars_scored
+           pillars_scored,
+           would_refuse
     FROM   shadow_book
     WHERE  origin = 'engine'
       AND  called_on >= %(since)s
@@ -95,6 +96,16 @@ class Cell:
     open_now: int = 0
     never_triggered: int = 0
     r_multiples: list[float] = field(default_factory=list)
+    taken_r_multiples: list[float] = field(default_factory=list)
+    """D54: the subset the engine WOULD have taken — `would_refuse` empty.
+
+    Kept beside the whole population rather than instead of it. D54's premise
+    is that shadow measures the RECIPE while the caps decide what would be
+    TRADED, so the headline stays the recipe's number; but the capped subset is
+    not a random sample of it (an idea refused because its sector was already
+    full arrived when that sector was working), so a promotion decision has to
+    be able to see both. Rows written before migration 020 carry NULL and are
+    counted as taken, because that is what they were."""
     hold_days: list[int] = field(default_factory=list)
     confidences: list[float] = field(default_factory=list)
     first_called: date | None = None
@@ -114,6 +125,15 @@ class Cell:
     def expectancy_r(self) -> float | None:
         """Mean R per CLOSED idea. None on an empty cell, never 0.0."""
         return statistics.fmean(self.r_multiples) if self.r_multiples else None
+
+    @property
+    def taken_closed(self) -> int:
+        return len(self.taken_r_multiples)
+
+    @property
+    def taken_expectancy_r(self) -> float | None:
+        """Expectancy over the calls the engine would actually have taken."""
+        return statistics.fmean(self.taken_r_multiples) if self.taken_r_multiples else None
 
     @property
     def hit_rate(self) -> float | None:
@@ -182,6 +202,8 @@ class Cell:
         self.closed += 1
         value = float(row["r_multiple"])
         self.r_multiples.append(value)
+        if not (row.get("would_refuse") or []):
+            self.taken_r_multiples.append(value)
         if row["days_held"] is not None:
             self.hold_days.append(int(row["days_held"]))
         # A scratch is its own category: stopped at breakeven after the TP1
@@ -239,6 +261,10 @@ def verdict_for(cell: Cell, *, cfg=None) -> LadderVerdict:
         )
 
     if cell.status == "shadow":
+        # D40 AMENDED (Oct 26 2026): shadow->paper counts EVERY certified call,
+        # flagged or not, because the question at this rung is whether the
+        # RECIPE has an edge — and D54 logs the calls a cap would have refused
+        # precisely so that question has the evidence.
         gate = promotion.shadow_to_paper
         if value >= gate.min_expectancy_r:
             return LadderVerdict(
@@ -255,8 +281,23 @@ def verdict_for(cell: Cell, *, cfg=None) -> LadderVerdict:
         )
 
     if cell.status == "paper":
+        # D40 AMENDED (Oct 26 2026): PAPER->LIVE IS JUDGED ON THE PAPER BOOK
+        # ALONE, because the question at this rung is PORTFOLIO VIABILITY and
+        # not recipe edge. The caps bind from paper (D54), so a correct paper
+        # book holds no flagged calls at all and the two numbers agree; the
+        # distinction bites only on rows written before that was enforced, and
+        # there the taken subset is the honest one.
         gate = promotion.paper_to_live
         span = cell.span_days or 0
+        if cell.taken_closed < gate.min_closed_ideas:
+            return LadderVerdict(
+                cell,
+                "insufficient",
+                f"{cell.taken_closed} of {cell.closed} closed would have been TAKEN, "
+                f"under paper->live's {gate.min_closed_ideas} — the portfolio question "
+                f"cannot be answered with calls the portfolio would not have held (D40)",
+            )
+        value = cell.taken_expectancy_r if cell.taken_expectancy_r is not None else value
         if value >= gate.min_expectancy_r and span >= gate.sustained_window_days:
             return LadderVerdict(
                 cell,
@@ -366,6 +407,15 @@ def render(items: list[Cell], *, window: str = "all time") -> str:
     lines.append("-" * 118)
     for cell in items:
         lines.append(_row(cell))
+        # D54: only when it CHANGES the number. A line repeating the headline
+        # on every row would train a reader to skip it, and the split only
+        # matters where the caps actually kept calls out of the book.
+        if cell.taken_closed != cell.closed:
+            lines.append(
+                f"{'  ^ of which the engine would have TAKEN (D54)':<52} "
+                f"{'':>5} {'':>5} {cell.taken_closed:>5} {'':>6} "
+                f"{_num(cell.taken_expectancy_r):>7}"
+            )
 
     lines.append("")
     lines.append("ROLL-UP ACROSS REGIMES (context only — D45 judges the cells above)")
