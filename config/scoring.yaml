@@ -270,7 +270,11 @@ geometry:
     # suspects behind v1 being timeout-dominated (1,570 of 1,820 closed on the
     # clock, median R:R 0.85). A MODE, not a number: it moves on a decision
     # with both arms backtested side by side, never on taste.
-    variant: v1
+    # ADOPTED v3 on 2026-10-26 (D56): the certifying run `f572337` / arm
+    # `4608e1c347ed` passed all six pre-registered criteria out of sample on
+    # trimmed R. THE EDGE IS CONCENTRATED IN ONE REGIME — see
+    # `backtest_expectancy` below, which every card prints.
+    variant: v3
     # Window for the prior swing high a pullback is expected to reclaim (TP1).
     # READ BY THE MEASUREMENT as of 2026-10-23: it was configured and never
     # read before that, agreeing with `price_structure`'s own default of 60, so
@@ -326,6 +330,30 @@ geometry:
 # The loader REFUSES a recipe with no entry here, and refuses the word
 # "certified" without `min_risk_reward` and `evidence`. An entry is the one flag
 # in this repo that can let a plan past a gate.
+# ── Measured per-regime evidence, printed on every card (D45/D56) ──────────
+# NOT [OPEN] parameters: these are MEASURED values with a citation, and they
+# move only when a new certifying run measures them again. They are here rather
+# than in code because a card has to print them and because the citation has to
+# travel with the numbers — a card claiming "+0.51R in this regime" with no way
+# to check which run said so is the kind of claim this repo exists not to make.
+#
+# WHY A CARD CARRIES THIS AT ALL: D45 evaluates the ladder per recipe x REGIME,
+# and v3's out-of-sample edge sits almost entirely in `bull_calm`. A pullback
+# call surfacing in `bull_normal` is therefore a call in a cell that measured
+# NEGATIVE on a real sample, and the human deciding on it should see that on
+# the card rather than having to remember it.
+backtest_expectancy:
+  pullback_to_trend:
+    citation: "f572337 / 4608e1c347ed"
+    basis: trimmed
+    window: "2024-10-01..2026-10-01"
+    by_regime:
+      bull_calm:     {expectancy_r:  0.506, closed: 506}
+      bull_normal:   {expectancy_r: -0.094, closed: 432}
+      bull_volatile: {expectancy_r: -0.147, closed:  74}
+      bear_volatile: {expectancy_r: -0.043, closed:  43}
+      bear_normal:   {expectancy_r:  1.033, closed:  18}
+
 certification:
   post_earnings_drift:
     status: certified

@@ -653,6 +653,70 @@ class SentimentReinstatement(Base):
     restore_toward: Score
 
 
+REGIME_TAGS = frozenset(
+    f"{trend}_{band}" for trend in ("bull", "bear") for band in ("calm", "normal", "volatile")
+)
+"""Every tag `backtest/regime.py` can produce. `unknown` is deliberately NOT
+here: a regime nobody can compute has no measured expectancy either, so an
+evidence block naming it would be claiming to have measured the unmeasurable."""
+
+
+class RegimeEvidence(Base):
+    """What one recipe measured in one regime, on a cited run."""
+
+    expectancy_r: float
+    closed: int = Field(ge=0)
+
+    @property
+    def sufficient(self) -> bool:
+        """D39(2)'s floor, applied per cell as D45 requires."""
+        return self.closed >= 30
+
+    @property
+    def is_counter_evidence(self) -> bool:
+        """Did this cell measure NEGATIVE on a sample worth believing?
+
+        Thin cells are not counter-evidence — they are no evidence, which is a
+        different thing and the card says so differently.
+        """
+        return self.sufficient and self.expectancy_r <= 0
+
+
+class RecipeEvidence(Base):
+    """A recipe's measured per-regime expectancy, with the run that said so.
+
+    **THE CITATION IS REQUIRED.** "This recipe measures +0.51R in this regime"
+    with no way to check which run measured it is exactly the unverifiable
+    claim the evidence rules exist to stop, and this number goes on a card a
+    human acts on.
+    """
+
+    citation: str = Field(min_length=8)
+    basis: Literal["whole", "trimmed"]
+    window: str = Field(min_length=8)
+    by_regime: dict[str, RegimeEvidence]
+
+    @model_validator(mode="after")
+    def _regimes_are_real(self):
+        unknown = set(self.by_regime) - REGIME_TAGS
+        if unknown:
+            raise ValueError(
+                f"backtest_expectancy names regime(s) {sorted(unknown)}, which "
+                f"`backtest/regime.py` cannot produce. A card would print a cell that "
+                f"no call can ever land in"
+            )
+        return self
+
+    def of(self, regime: str | None) -> RegimeEvidence | None:
+        return self.by_regime.get(regime or "")
+
+    @property
+    def best(self) -> tuple[str, RegimeEvidence] | None:
+        """The strongest WELL-SAMPLED cell, for the contrast a card draws."""
+        candidates = [(k, v) for k, v in self.by_regime.items() if v.sufficient]
+        return max(candidates, key=lambda kv: kv[1].expectancy_r) if candidates else None
+
+
 class ScoringConfig(Base):
     version: PositiveInt
     pillar_weights: PillarWeights
@@ -667,6 +731,12 @@ class ScoringConfig(Base):
     ranking: Ranking
     sentiment_reinstatement: SentimentReinstatement
     recipes: Recipes
+    backtest_expectancy: dict[str, RecipeEvidence] = Field(default_factory=dict)
+    """D45/D56: measured per-regime expectancy, printed on every card.
+
+    A recipe with no entry here prints "no per-regime evidence on record",
+    which is the honest output for one that has never had a certifying run —
+    deliberately not an empty default that reads as zero."""
     certification: dict[str, RecipeCertification]
     """D53, one entry per recipe. A MAPPING rather than three named fields so
     the validator below can insist the two sets match exactly: a recipe with no
@@ -720,6 +790,10 @@ class ScoringConfig(Base):
                 f"trades that would have trailed out were cut by a 15-session horizon"
             )
         return self
+
+    def evidence_for(self, recipe: str) -> RecipeEvidence | None:
+        """The per-regime backtest evidence for a recipe, or None."""
+        return self.backtest_expectancy.get(recipe)
 
     def certification_of(self, recipe: str) -> RecipeCertification:
         """The certification for a recipe, raising rather than defaulting."""

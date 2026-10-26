@@ -243,12 +243,23 @@ def test_a_target_behind_the_price_is_not_a_bad_trade_but_no_trade():
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def test_a_clean_pullback_fires():
+def test_a_clean_pullback_fires_with_the_SHIPPED_v3_GEOMETRY():
+    """The shipped default is v3 (D56), so this describes v3 and would fail if
+    the variant drifted back: the stop hangs on the PULLBACK low rather than
+    the 60-day swing low, there is no far target at all, and the remainder
+    trails. v1's and v2's geometries keep their own named tests against their
+    own config fixtures."""
     result = pullback.evaluate(tech(), cata())
     assert result.triggered, result.reason
     assert result.plan is not None
     assert result.plan.target_1 == pytest.approx(120.0), "TP1 is the swing high"
-    assert result.plan.stop < 94.0, "stopped below the swing low plus a buffer"
+    assert result.plan.stop == pytest.approx(96.0), (
+        "the pullback low (97.0) less the 0.5-ATR buffer — not the 60-day low, "
+        "which is what v1 used and what made it timeout-dominated"
+    )
+    assert result.plan.target_2 is None, "v3 has no far target by design"
+    assert result.plan.trail_ma == 20
+    assert result.plan.horizon_days[1] == 45, "O20's swept net, not the 15-day swing horizon"
 
 
 def test_a_pullback_without_an_uptrend_does_not_fire():

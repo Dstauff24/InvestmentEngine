@@ -34,6 +34,7 @@ from features import technical as technical_features
 from scoring.composite import ScoredSymbol, UniverseRun, composite_score, rank_universe
 from scoring.pillars import PillarScore, PillarScores, score_all
 from scoring.recipes import evaluate_all
+from shadow_book.logger import regime_at
 
 log = logging.getLogger(__name__)
 
@@ -552,6 +553,7 @@ def _context_for(
     statuses,
     books: dict,
     account: float,
+    regime: str | None = None,
 ) -> dict | None:
     """The per-symbol inputs every refusal stage needs. One symbol, one read.
 
@@ -575,6 +577,11 @@ def _context_for(
     return {
         "result": best,
         "catalyst": catalyst,
+        # D45/D56: computed ONCE per run by the caller and passed down. It is a
+        # fact about the market, not about the symbol, and reading the whole
+        # benchmark series per candidate would be the same answer bought 400
+        # times — the same reason `log_surfaced` computes it once.
+        "regime": regime,
         "sector": sectors.get(item.symbol),
         "status": status,
         "book": books[status],
@@ -590,6 +597,7 @@ def assign_daily_slots(run: UniverseRun, *, as_of: date) -> SlotAssignment:
     sectors = sectors_by_symbol()
     statuses = config.scoring().promotion.status
     books = {state: load_book(state, account_value=account) for state in LADDER_STATES}
+    regime = regime_at(as_of)
     assignment = assign_slots(
         run,
         build_context=lambda item: _context_for(
@@ -599,6 +607,7 @@ def assign_daily_slots(run: UniverseRun, *, as_of: date) -> SlotAssignment:
             statuses=statuses,
             books=books,
             account=account,
+            regime=regime,
         ),
     )
     log.info(

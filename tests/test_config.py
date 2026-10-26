@@ -1148,10 +1148,38 @@ def test_a_pullback_low_window_as_long_as_the_swing_window_is_rejected(tmp_path)
     )
 
 
-def test_the_shipped_config_still_runs_the_v1_geometry():
-    """Every number on record was measured under v1, so the flag may not drift
-    to v2 without a decision and a side-by-side backtest (D43/D50)."""
-    assert cfg.scoring().geometry.pullback_to_trend.variant == "v1"
+def test_the_shipped_geometry_is_v3_AND_its_evidence_is_on_record():
+    """ADOPTED by D56 on the certifying run `f572337` / arm `4608e1c347ed`,
+    which passed all six pre-registered criteria out of sample on trimmed R.
+
+    The flag may not drift without a decision and a side-by-side backtest
+    (D43/D50), so this pins the variant AND the citation together: a switch
+    with no evidence block naming the run that justified it fails here.
+    """
+    scoring = cfg.scoring()
+    assert scoring.geometry.pullback_to_trend.variant == "v3"
+    evidence = scoring.evidence_for("pullback_to_trend")
+    assert evidence is not None, "a variant switch has to cite the run that earned it"
+    assert "f572337" in evidence.citation
+    assert evidence.basis == "trimmed", "O20 certifies a trailing recipe on trimmed R"
+
+
+def test_the_regime_split_on_record_says_the_edge_is_CONCENTRATED():
+    """D45's expectation, pinned so nobody reads v3's +0.21R as uniform. The
+    out-of-sample edge is almost all `bull_calm`; `bull_normal` measured
+    NEGATIVE on 432 closed, which is a real sample and not a thin one."""
+    evidence = cfg.scoring().evidence_for("pullback_to_trend")
+    calm = evidence.of("bull_calm")
+    normal = evidence.of("bull_normal")
+
+    assert calm.expectancy_r > 0.4 and calm.closed >= 500
+    assert normal.expectancy_r < 0 and normal.closed >= 400
+    assert normal.is_counter_evidence, (
+        "negative on a real sample, so a call there is counter-evidence"
+    )
+    assert evidence.best[0] == "bull_calm"
+    # bear_normal looks best of all and is 18 trades: NO evidence, not good evidence.
+    assert not evidence.of("bear_normal").sufficient
 
 
 # ══════════════════════════════════════════════════════════════════════════

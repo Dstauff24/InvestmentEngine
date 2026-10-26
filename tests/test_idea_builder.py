@@ -917,3 +917,54 @@ def test_a_cap_BINDS_at_paper_even_for_a_certified_recipe():
 
     assert assignment.logged == [], "paper does not record what it would not take"
     assert assignment.refused_by_symbol["AAPL"].stage == "concurrency"
+
+
+# ── D45/D56: the regime, and the counter-evidence call ──────────────────────
+
+
+def test_every_card_SHOWS_the_regime_and_what_the_recipe_measured_there():
+    """D56. v3's out-of-sample edge is almost all `bull_calm`, so a human
+    deciding on a call needs the cell it landed in on the card, not in their
+    memory of a backtest report."""
+    idea = build(regime="bull_calm")
+    card = idea.card()
+    assert "regime      bull_calm" in card
+    assert "+0.51R in this regime" in card
+    assert "506 closed" in card
+    assert "f572337" in card, "the number travels with the run that measured it"
+    assert "2024-10-01..2026-10-01" in card, "and with the window"
+
+
+def test_a_call_in_a_NEGATIVE_cell_is_labelled_COUNTER_EVIDENCE():
+    """`bull_normal` measured -0.09R on 432 closed — a real sample. A pullback
+    call there is a call the evidence argues against, and the card says so in
+    those words rather than leaving it to be inferred from a number."""
+    card = build(regime="bull_normal").card()
+    assert "COUNTER-EVIDENCE" in card
+    assert "-0.09R" in card
+    assert "against +0.51R in bull_calm" in card, "the contrast is the point"
+
+
+def test_a_THIN_cell_is_NO_evidence_rather_than_good_evidence():
+    """`bear_normal` measured +1.03R and would be the best cell on the table —
+    on 18 closed trades. Under D39(2) that is not evidence at all, and a card
+    printing it as a positive would be the most flattering reading of the
+    smallest sample."""
+    card = build(regime="bear_normal").card()
+    assert "NO evidence rather than weak evidence" in card
+    assert "COUNTER-EVIDENCE" not in card
+
+
+def test_an_UNKNOWN_regime_says_the_call_cannot_be_PLACED():
+    """Before the benchmark has 200 sessions there is no cell to compare to,
+    and `unknown` must not read as "no edge here"."""
+    card = build(regime=None).card()
+    assert "regime      unknown" in card
+    assert "cannot be placed" in card
+
+
+def test_a_recipe_with_NO_evidence_block_says_so_instead_of_implying_zero():
+    """`post_earnings_drift` has no per-regime block on record yet. Silence
+    there would read as zero, which is a measurement nobody took."""
+    card = build(result=result(recipe=CERTIFIED_RECIPE), regime="bull_calm").card()
+    assert "no per-regime backtest evidence on record" in card

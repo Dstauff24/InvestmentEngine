@@ -97,6 +97,13 @@ class Idea:
     `composite_tier`, and stored anyway: this is the question D53 poses, and a
     reader splitting expectancy on it should not have to know that NULL meant
     refused."""
+    regime: str | None = None
+    """D45's market regime at call time, from `backtest/regime.py` — the same
+    code the backtest tags trades with, so the card's comparison is between
+    like and like. `None`/`unknown` before the benchmark has 200 sessions."""
+    regime_note: str = ""
+    """What this recipe MEASURED in this regime, and whether that makes the
+    call counter-evidence. Rendered on every card."""
     would_refuse: tuple[str, ...] = ()
     """D54: the capital constraints that WOULD have declined this call. Empty
     means the engine would have taken it. The plan is recorded either way,
@@ -154,9 +161,59 @@ class Idea:
             f"{self.account_value:,.0f})",
             f"  vehicle     {self.vehicle}  ({self.vehicle_note})",
             f"  horizon     {self.horizon_days[0]}-{self.horizon_days[1]} days",
+            f"  regime      {self.regime or 'unknown'}{self.regime_note}",
         ]
         lines.extend(f"  note        {note}" for note in self.notes)
         return "\n".join(lines)
+
+
+# ── D45/D56: what this recipe measured in THIS regime ───────────────────────
+
+
+def regime_line(recipe: str, regime: str | None, *, cfg=None) -> str:
+    """The clause a card appends to its regime, from CITED evidence.
+
+    **A CALL IN A CELL THAT MEASURED NEGATIVE IS COUNTER-EVIDENCE, AND THE CARD
+    SAYS SO.** v3's out-of-sample edge sits almost entirely in `bull_calm`
+    (+0.51R on 506 closed) while `bull_normal` measured -0.09R on 432 — a real
+    sample, not a thin one. D45 evaluates the ladder per recipe x regime, so a
+    pullback call surfacing in `bull_normal` is a call the evidence argues
+    against, and a human should not have to remember that.
+
+    Four shapes, because the honest statement differs:
+      * no evidence block at all -> say that, never imply zero;
+      * `unknown` regime -> the benchmark cannot place the call in a cell;
+      * a cell under D39(2)'s 30-closed floor -> NO evidence, not bad evidence;
+      * a well-sampled cell -> the number, with the best cell for contrast and
+        the word COUNTER-EVIDENCE when it is at or below zero.
+    """
+    evidence = (cfg or config.scoring()).evidence_for(recipe)
+    if evidence is None:
+        return "  (no per-regime backtest evidence on record for this recipe)"
+    if not regime or regime == "unknown":
+        return (
+            "  (regime UNKNOWN — the benchmark has under 200 sessions, so this call "
+            f"cannot be placed in one of {recipe}'s measured cells)"
+        )
+    cell = evidence.of(regime)
+    if cell is None:
+        return f"  ({recipe} measured nothing in this regime on {evidence.citation})"
+    if not cell.sufficient:
+        return (
+            f"  ({recipe} measured {cell.expectancy_r:+.2f}R here on only {cell.closed} "
+            f"closed — under D39(2)'s 30, so this cell is NO evidence rather than weak "
+            f"evidence; {evidence.citation})"
+        )
+    verdict = "COUNTER-EVIDENCE — " if cell.is_counter_evidence else ""
+    contrast = ""
+    best = evidence.best
+    if best and best[0] != regime:
+        contrast = f", against {best[1].expectancy_r:+.2f}R in {best[0]}"
+    return (
+        f"  ({verdict}{recipe} measured {cell.expectancy_r:+.2f}R in this regime on "
+        f"{cell.closed} closed{contrast}; {evidence.basis} R over {evidence.window}, "
+        f"{evidence.citation})"
+    )
 
 
 # ── D36: the vehicle line ───────────────────────────────────────────────────
@@ -408,6 +465,7 @@ def assign_slots(
             iv_history_days=context.get("iv_history_days"),
             account_value=context.get("account_value"),
             tier_b_spent_pct=tier_b_spent.get(status, 0.0),
+            regime=context.get("regime"),
             cfg=scoring_cfg,
         )
         if isinstance(built, Rejection):
@@ -487,6 +545,7 @@ def build_idea(
     iv_history_days: int | None = None,
     account_value: float | None = None,
     tier_b_spent_pct: float = 0.0,
+    regime: str | None = None,
     cfg=None,
 ) -> Idea | Rejection:
     """One scored symbol plus one triggered recipe -> an idea, or a rejection.
@@ -714,5 +773,7 @@ def build_idea(
         watch_only=watch_only,
         composite_tier=composite_tier,
         composite_gate_passed=composite_tier is not None,
+        regime=regime,
+        regime_note=regime_line(result.recipe, regime, cfg=scoring_cfg),
         would_refuse=tuple(would_refuse),
     )
