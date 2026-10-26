@@ -267,6 +267,8 @@ def _send_digest() -> int:
         refusals=result.refusals,
         refusal_summary=result.refusal_summary,
         watch_only=result.watch_only,
+        evaluated=result.evaluated,
+        considered=result.considered,
     )
     return len(result.cards) or len(result.candidates)
 

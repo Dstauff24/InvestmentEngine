@@ -586,3 +586,39 @@ def test_watch_only_lines_are_not_counted_as_ideas():
     _, body = render(card)
     assert "NOTHING TODAY" in body or "no idea cleared" in body.lower()
     assert "WATCH ONLY" in body
+
+
+def test_the_stage_line_NAMES_THE_POPULATION_it_counted():
+    """2026-10-26: the digest said "declined by stage — 286 at plan" and 286
+    was the TIER-QUALIFYING subset, not the universe — so a reader could not
+    tell whether the engine had looked at everything, and the answer turned out
+    to be no (a D53 bug). The counts now travel with the population."""
+    content = digest.build_digest(
+        [],
+        [],
+        refusals=["AAPL  no recipe produced a plan"],
+        refusal_summary={"plan": 286, "tier": 140, "risk_reward": 3},
+        evaluated=429,
+        considered=429,
+        as_of=DAY,
+    )
+    _, body = digest.render(content)
+    assert "evaluated 429 of 429 scored symbol(s)" in body
+    assert "the composite does not decide who is looked at" in body
+
+
+def test_a_walk_that_stopped_early_SAYS_SO_rather_than_implying_coverage():
+    """The walk is lazy by design, so `evaluated` below `considered` is normal
+    and must not read as "the engine ignored 400 symbols"."""
+    content = digest.build_digest(
+        [],
+        [],
+        refusals=["AAPL  no recipe produced a plan"],
+        refusal_summary={"plan": 12},
+        evaluated=17,
+        considered=429,
+        as_of=DAY,
+    )
+    _, body = digest.render(content)
+    assert "evaluated 17 of 429 scored symbol(s)" in body
+    assert "the walk stops once the slots are full" in body

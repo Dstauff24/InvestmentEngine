@@ -225,6 +225,13 @@ class SlotAssignment:
     walked: int = 0
     """How far down the ranking the walk went. The number that makes the bug
     this replaced visible: it used to be exactly `max_ideas_per_day`."""
+    considered: int = 0
+    """How many symbols were CANDIDATES — every scored symbol, since D53 says
+    the composite may not decide who is looked at. Reported beside `walked` so
+    the digest can state what the engine evaluated rather than leaving a reader
+    to infer it from a stage count: on 2026-10-26 "286 at plan" was read as the
+    universe and was actually the tier-qualifying subset, which is the question
+    this pair exists to answer from the digest itself."""
 
     @property
     def refused_by_symbol(self) -> dict:
@@ -300,10 +307,28 @@ def assign_slots(
     scoring_cfg = cfg or config.scoring()
     slots = scoring_cfg.ranking.max_ideas_per_day if limit is None else limit
 
-    ranked = [s for s in run.scored if s.tier is not None and s.composite is not None]
+    # **D53: THE COMPOSITE MAY NOT DECIDE WHICH SYMBOLS ARE CONSIDERED.** This
+    # line read `s.tier is not None` until 2026-10-26, which put the composite
+    # tier gate BACK in front of plan-building one level earlier than the branch
+    # D53 added inside `build_idea` — so a certified recipe's plan on a symbol
+    # the composite gave no tier was never built, and the D53 branch that
+    # handles exactly that case was unreachable. The live symptom was a digest
+    # reporting "286 at plan" where 286 was the tier-qualifying population
+    # rather than the universe: the engine had not looked at the other ~145
+    # symbols at all. The same shape as the D42 surfacing bug, which is the
+    # argument for one function — a gate applied while choosing who to consider
+    # is still a gate applied before the plan exists.
+    #
+    # Every scored symbol is now a candidate, in composite order. Cost is
+    # unchanged for the ones with no plan: `build_context` returns None without
+    # touching the database, so they refuse at `plan` immediately. The
+    # composite gate still binds for UNCERTIFIED recipes — `build_idea` refuses
+    # those at stage `tier` — which is D53's actual rule rather than a filter
+    # that cannot tell the two apart.
+    ranked = [s for s in run.scored if s.composite is not None]
     ranked.sort(key=lambda s: (-(s.composite or 0.0), s.symbol))
 
-    assignment = SlotAssignment()
+    assignment = SlotAssignment(considered=len(ranked))
     tier_b_spent: dict[str, float] = {}
     for scored in ranked:
         if len(assignment.accepted) >= slots:

@@ -506,6 +506,66 @@ def test_a_gate_passing_plan_at_rank_six_is_surfaced_when_the_top_five_cannot_be
     assert stages == dict.fromkeys(["EXPD", "DVN", "MPC", "FTNT", "VLO"], "plan")
 
 
+def test_a_CERTIFIED_plan_on_a_symbol_WITH_NO_TIER_is_still_surfaced():
+    """D53 END TO END, and the bug that made it only half true.
+
+    `assign_slots` filtered its candidates on `tier is not None`, so a symbol
+    the composite gave no tier never reached the branch D53 added inside
+    `build_idea` — the composite gate was back in front of plan-building, one
+    level earlier, and the branch written to stop exactly that was
+    unreachable. Live symptom on 2026-10-26: a digest reporting "286 at plan"
+    where 286 was the tier-qualifying population and ~145 symbols had not been
+    looked at at all.
+    """
+    from decision.idea_builder import assign_slots
+
+    no_tier = scored(symbol="HAS", composite=48.0, tier=None)
+    no_tier.tier_reason = "composite 48.0 below Tier B's 55"
+    run = universe(no_tier)
+
+    assignment = assign_slots(
+        run, build_context=contexts({"HAS": result(recipe="post_earnings_drift")})
+    )
+
+    assert [idea.symbol for idea in assignment.accepted] == ["HAS"]
+    idea = assignment.accepted[0]
+    assert idea.tier == "B", "certified but no composite Tier A: Tier B size (D53)"
+    assert idea.composite_tier is None
+    assert idea.composite_gate_passed is False, "recorded on the row, not silently dropped"
+
+
+def test_an_UNCERTIFIED_recipe_still_needs_the_composite_gate():
+    """The other half of D53, which the same filter also hid: the gate is not
+    abolished, it is scoped to recipes that have not certified. Dropping it for
+    everything would have made the filter's removal a strategy change."""
+    from decision.idea_builder import assign_slots
+
+    no_tier = scored(symbol="HAS", composite=48.0, tier=None)
+    no_tier.tier_reason = "composite 48.0 below Tier B's 55"
+    run = universe(no_tier)
+
+    assignment = assign_slots(
+        run, build_context=contexts({"HAS": result(recipe="pullback_to_trend")})
+    )
+
+    assert assignment.accepted == []
+    assert assignment.refused_by_symbol["HAS"].stage == "tier"
+
+
+def test_the_assignment_reports_how_many_symbols_it_CONSIDERED():
+    """So the digest can state what was evaluated instead of leaving a reader
+    to infer it from a stage count — which is how "286 at plan" was read as
+    the universe when it was the tier-qualifying subset."""
+    from decision.idea_builder import assign_slots
+
+    items = [scored(symbol=f"S{i}", composite=95.0 - i, tier=None if i else "A") for i in range(8)]
+    run = universe(*items)
+    assignment = assign_slots(run, build_context=contexts({"S0": result()}), limit=1)
+
+    assert assignment.considered == 8, "every scored symbol is a candidate (D53)"
+    assert assignment.walked == 1, "and the walk still stops once the slots are full"
+
+
 def test_a_rank_six_idea_is_surfaced_when_the_leaders_are_REFUSED_too():
     """The same hole one stage later: a plan that exists and fails D12's R:R
     gate used to take a slot and print a refusal. Walking past it is the point

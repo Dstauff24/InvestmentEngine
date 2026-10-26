@@ -54,6 +54,14 @@ class PassResult:
     candidates: list[dict] = field(default_factory=list)
     ideas_logged: int = 0
     surfaced: int = 0
+    evaluated: int = 0
+    """How many symbols the slot walk actually looked at."""
+    considered: int = 0
+    """How many were candidates — every scored symbol, per D53. Reported beside
+    `evaluated` because a stage count alone cannot say which population it
+    describes: on 2026-10-26 "286 at plan" read as the universe and was the
+    tier-qualifying subset, which was a live bug rather than a wording
+    problem."""
 
 
 _LAST: PassResult = PassResult()
@@ -108,6 +116,8 @@ def run(*, as_of: date | None = None) -> int:
             candidates=candidates,
             ideas_logged=logged,
             surfaced=len(universe_run.surfaced),
+            evaluated=assignment.walked if assignment else 0,
+            considered=assignment.considered if assignment else 0,
         )
         job.note(
             surfaced=len(universe_run.surfaced),

@@ -141,6 +141,14 @@ class DigestContent:
     """D38's excess (D42 amended): ideas whose sector is already at its limit.
     Surfaced as INFORMATION in a section of their own — outside the actionable
     N, consuming no slot, reserving no book state, and not Shadow Book calls."""
+    evaluated: int = 0
+    """Symbols the slot walk looked at."""
+    considered: int = 0
+    """Symbols that were candidates: every scored symbol (D53). The PAIR is
+    printed, because a stage count cannot say which population it describes —
+    the 2026-10-26 digest's "286 at plan" was read as the universe and was the
+    tier-qualifying subset, which turned out to be a live D53 bug. A reader has
+    to be able to answer "did the engine look at everything?" from the digest."""
     refusal_summary: dict = field(default_factory=dict)
     """{stage: count} over the whole ranked walk (D42 amended). The counts are
     the point: 305 symbols with no setup is one fact, and five near-misses
@@ -194,6 +202,8 @@ def build_digest(
     refusal_summary: dict | None = None,
     watch_only: list[str] | None = None,
     as_of: date | None = None,
+    evaluated: int = 0,
+    considered: int = 0,
 ) -> DigestContent:
     """Gather the day's material. `candidates` are the top-ranked scored rows.
 
@@ -219,6 +229,8 @@ def build_digest(
         cards=[] if blocked else cards,
         refusals=[] if blocked else (refusals or []),
         refusal_summary={} if blocked else (refusal_summary or {}),
+        evaluated=0 if blocked else evaluated,
+        considered=0 if blocked else considered,
         watch_only=[] if blocked else (watch_only or []),
         candidates=[] if blocked else candidates[:MAX_CANDIDATES],
         stats=db.fetch_one(STATS, (day,)),
@@ -365,6 +377,18 @@ def _no_setup_section(content: DigestContent) -> list[str]:
             f"{count} at {stage}" for stage, count in sorted(content.refusal_summary.items())
         )
         lines.append(f"  declined by stage — {shape}")
+        if content.considered:
+            # THE POPULATION, NAMED. Without it a stage count is ambiguous
+            # between "the universe" and "whatever subset was walked", and on
+            # 2026-10-26 that ambiguity hid a D53 bug for an evening.
+            walk = f"evaluated {content.evaluated} of {content.considered} scored symbol(s)"
+            if content.evaluated < content.considered:
+                walk += " — the walk stops once the slots are full, so the rest are unwalked"
+            else:
+                walk += (
+                    " — every scored symbol, D53: the composite does not decide who is looked at"
+                )
+            lines.append(f"  {walk}")
         if content.refusal_summary.get("plan"):
             lines.append("  `plan` means no recipe fired at all: a high composite is not a setup.")
     lines.append("")
@@ -450,6 +474,8 @@ def run(
     refusal_summary: dict | None = None,
     watch_only: list[str] | None = None,
     as_of: date | None = None,
+    evaluated: int = 0,
+    considered: int = 0,
     send: bool = True,
 ) -> str:
     """Build, render and send the digest. Returns the rendered body.
@@ -468,6 +494,8 @@ def run(
         refusal_summary=refusal_summary,
         watch_only=watch_only,
         as_of=day,
+        evaluated=evaluated,
+        considered=considered,
     )
     subject, body = render(content)
 
