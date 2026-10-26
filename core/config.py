@@ -293,6 +293,29 @@ class PullbackGeometry(Base):
     pullback_low_lookback_days: PositiveInt  # [OPEN] #82 — v2 and v3
     tp2_leg_multiple: float  # [OPEN] #83 — v2 only
     trail_confirm_closes: PositiveInt  # [OPEN] #84 — v3 only
+    trail_timeout_days: PositiveInt  # [OPEN] #86 — v3 only
+    """O20'S SAFETY NET, in CALENDAR DAYS, and for a trailing variant it is the
+    only clock there is. The tracker enforces `proj_horizon_days or
+    exits.swing.max_holding_days`, so whatever horizon travels with the plan IS
+    the clock — which is how v3's first certifying run came to be decided by
+    one: the recipe's own `horizon_days: [2, 15]` went out on every plan and
+    closed a third of the trades, 89% of them winners averaging +2.52R, before
+    the trail could act. Measured over the 658 v3 trades that reached TP1, the
+    path from entry to the trail's own exit runs p50 28 / p75 43 / p90 61
+    calendar days, so 15 PRE-EMPTED THE TRAIL ON 69% OF THEM. The shipped 45 is
+    `exits.swing.max_holding_days`, which is the number O20 meant.
+
+    ONE NUMBER, TWO JOBS, AND THAT IS NOT A FREE CHOICE: the tracker uses the
+    same horizon as the ENTRY DEADLINE (a plan unfilled by then is
+    `never_triggered`), so lengthening the clock lengthens the window a plan
+    may fill in. Measured on the same 2,121 fills, the call-to-fill delay runs
+    p50 1 / p90 3 / p99 5 days and never exceeded 15 — CENSORED at 15 by the
+    old deadline, so the honest claim is that the distribution is concentrated
+    at one day and the tail this widens is thin, not that it is empty.
+    Separating the two is O14's entry deadline, deliberately not built here.
+
+    Swept as a net rather than assumed: the edge must not live inside the
+    clock, which is exactly why v2 was refused (O15)."""
 
     @model_validator(mode="after")
     def _coherent(self):
@@ -312,6 +335,13 @@ class PullbackGeometry(Base):
     def trails(self) -> bool:
         """Does the remainder exit on a trail rather than at a target?"""
         return self.variant == "v3"
+
+    @property
+    def horizon_cap(self) -> int | None:
+        """The clock a TRAILING plan carries, or None when the variant's own
+        horizon governs. Read by the recipe, so the net travels with the plan
+        and the tracker enforces one clock rather than two."""
+        return self.trail_timeout_days if self.trails else None
 
 
 class BreakoutGeometry(Base):
@@ -662,6 +692,32 @@ class ScoringConfig(Base):
                 f"scoring.certification names {sorted(extra)}, which is not a recipe. "
                 f"A certification for a recipe that does not exist is a typo that would "
                 f"leave a real recipe uncovered"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _a_trailing_net_outlives_the_trail_it_protects(self):
+        """A net SHORTER than the recipe's own horizon is not a net.
+
+        v3's first certifying run failed criterion (6) because the clock, not
+        the trail, carried the expectancy — and the clock was the recipe's
+        `horizon_days` upper bound, which no sweep had ever touched. A trailing
+        variant whose `trail_timeout_days` sat at or below that bound would
+        reproduce the defect exactly, under a parameter named as though it
+        prevented it, so the loader refuses it.
+        """
+        geometry = self.geometry.pullback_to_trend
+        if not geometry.trails:
+            return self
+        own = int(self.recipes.pullback_to_trend.horizon_days[1])
+        if geometry.trail_timeout_days <= own:
+            raise ValueError(
+                f"geometry.pullback_to_trend.trail_timeout_days "
+                f"({geometry.trail_timeout_days}) must EXCEED the recipe's own "
+                f"horizon_days upper bound ({own}) while the variant trails. At or "
+                f"below it the clock closes the trade before the trail can act, which "
+                f"is the defect that invalidated v3's first certifying run: 59% of the "
+                f"trades that would have trailed out were cut by a 15-session horizon"
             )
         return self
 

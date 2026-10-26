@@ -661,6 +661,21 @@ def test_the_depth_axis_says_it_cannot_use_its_own_measurement():
     assert axis.structural is True
 
 
+def test_the_trailing_net_is_a_sweepable_axis_and_every_candidate_is_LEGAL():
+    """O20 says the safety net is swept rather than assumed, so it needs an
+    axis — and every candidate on it must be a value the loader will accept.
+    A candidate at or below the recipe's own horizon is refused (it would
+    reproduce the clock-decides defect), so the axis starts above it rather
+    than wasting a slot on a value that cannot run."""
+    axes = {axis.name: axis for axis in sweep.axes_from(sweep.Distributions())}
+    axis = axes["trail_timeout_days"]
+    own = config.scoring().recipes.pullback_to_trend.horizon_days[1]
+    assert len(axis.values) >= sweep.MIN_AXIS_VALUES
+    assert min(axis.values) > own
+    assert axis.structural is False, "the net changes no feature, so arms share one pass"
+    assert "cuts 62%" in axis.rationale, "the range says where the net stops binding"
+
+
 def test_a_structural_axis_is_marked_so_the_sweep_can_price_it():
     axes = {axis.name: axis for axis in sweep.axes_from(sweep.Distributions())}
     assert axes["min_base_weeks"].structural is True

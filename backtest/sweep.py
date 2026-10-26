@@ -105,6 +105,7 @@ GATED = {
     "relative_volume": "recipes.base_breakout.min_relative_volume_on_break",
     "rsi": "recipes.pullback_to_trend.rsi_max",
     "gap_up_pct": "recipes.post_earnings_drift.min_gap_up_pct",
+    "trail_timeout_days": "geometry.pullback_to_trend.trail_timeout_days",
 }
 
 
@@ -458,6 +459,31 @@ def axes_from(distributions: Distributions, *, cfg=None) -> list[Axis]:
                 ),
             )
         )
+
+    # O20's SAFETY NET, in CALENDAR days because that is the unit the tracker
+    # enforces. Its range comes from a distribution this object does not carry,
+    # and deliberately so: the quantity is how long a v3 trade lives when only
+    # the trail can close it, measured by walking the bars of trades that
+    # reached TP1 rather than by sampling a gated quantity at signal time. Over
+    # 658 such trades the path from entry to the trail's own exit ran p50 28 /
+    # p75 43 / p90 61 days, so the candidates span the band where the net goes
+    # from binding hard to barely binding: 20 cuts 62% of the trails, 45 cuts
+    # 23%, 90 cuts 3%, 120 cuts 0.6%. The shipped 15 is NOT a candidate because
+    # the loader refuses it — at or below the recipe's own horizon the clock
+    # pre-empts the trail, which is the defect being fixed, and that same 15
+    # cut 69% of these trails.
+    axes.append(
+        Axis(
+            path=GATED["trail_timeout_days"],
+            values=(20, 25, 30, 40, 45, 60, 75, 90, 120),
+            rationale=(
+                f"shipped {scoring.geometry.pullback_to_trend.trail_timeout_days:g} calendar "
+                f"days; nine candidates across the band where O20's net stops binding (p50 28 "
+                f"/ p90 61 days from entry to the trail's exit over 658 v3 trades that reached "
+                f"TP1) — a net at 20 cuts 62% of those trails, one at 120 cuts 0.6%"
+            ),
+        )
+    )
 
     # A MEASUREMENT BOUNDED BY THE PARAMETER BEING SWEPT CANNOT SET ITS OWN
     # RANGE. `_detect_base` finds the longest consolidation that FITS the

@@ -1033,8 +1033,8 @@ def retired_parameters() -> set[int]:
     return {int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*RETIRED", doc, re.MULTILINE)}
 
 
-def test_the_doc_lists_exactly_83_live_parameters_and_two_tombstones():
-    assert len(documented_parameters()) == 83
+def test_the_doc_lists_exactly_84_live_parameters_and_two_tombstones():
+    assert len(documented_parameters()) == 84
     # #12 retired by D49 (max_days_since_earnings), #8 by O13's redesign
     # (range_contraction_ratio). Numbers are never reused.
     assert retired_parameters() == {8, 12}
@@ -1069,8 +1069,8 @@ def test_the_tag_numbering_is_contiguous_across_live_and_retired_rows():
 def test_the_doc_headline_count_matches_reality():
     doc = OPEN_PARAMS_DOC.read_text()
     assert "D42" in doc  # the doc states the decision range it was built against
-    assert len(tagged_parameters()) == 83
-    assert len(tagged_parameters()) + len(retired_parameters()) == 85
+    assert len(tagged_parameters()) == 84
+    assert len(tagged_parameters()) + len(retired_parameters()) == 86
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1325,6 +1325,24 @@ def test_the_pending_layers_list_only_names_fields_that_are_really_inert():
 # ══════════════════════════════════════════════════════════════════════════
 # D53: certification, and the citation the loader insists on
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_trailing_net_at_or_below_the_recipes_own_horizon_is_REFUSED(tmp_path):
+    """A net shorter than the trail it protects reproduces the exact defect it
+    is named after. v3's first run was decided by a 15-session clock, so a
+    `trail_timeout_days` of 15 under a trailing variant must not load."""
+    shipped = raw("scoring.yaml")["geometry"]["pullback_to_trend"]
+    for value in (10, 15):
+        expect_error(
+            tmp_path,
+            "scoring.yaml",
+            mutate(
+                "scoring.yaml",
+                ["geometry", "pullback_to_trend"],
+                {**shipped, "variant": "v3", "trail_timeout_days": value},
+            ),
+            "must EXCEED the recipe's own horizon_days",
+        )
 
 
 def test_the_shipped_certification_matches_the_evidence_on_record():

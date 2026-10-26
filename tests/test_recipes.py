@@ -895,6 +895,33 @@ def test_v3_quotes_r_to_tp1_per_d12s_amendment():
     assert plan.risk_reward == pytest.approx((120.0 - 100.0) / (100.0 - 96.0))
 
 
+def test_a_trailing_plan_carries_O20s_NET_as_its_horizon_not_the_swing_clock():
+    """THE DEFECT THAT DECIDED v3's FIRST CERTIFYING RUN.
+
+    The tracker enforces `proj_horizon_days or exits.swing.max_holding_days`,
+    so whatever horizon travels with the plan IS the clock. v3 went out
+    carrying the recipe's own `horizon_days: [2, 15]`, which closed a third of
+    its trades — 89% of them winners averaging +2.52R — before the 20-day-MA
+    trail could act, and criterion (6) then failed on a design nobody had
+    measured. A trailing plan must carry the swept net instead.
+    """
+    plan = pullback.evaluate(tech(), cata(), cfg=V3).plan
+    net = V3.geometry.pullback_to_trend.trail_timeout_days
+    assert plan.horizon_days[1] == net
+    assert net > CFG.recipes.pullback_to_trend.horizon_days[1], (
+        "a net at or below the recipe's own horizon is not a net"
+    )
+
+
+def test_a_FIXED_TARGET_plan_keeps_the_recipes_own_horizon():
+    """The net is v3's only. v1 and v2 reach for a far target inside the
+    framework's swing horizon, and lengthening their clock would change what
+    they are while pretending to fix a trailing recipe."""
+    for arm in (V1, V2):
+        plan = pullback.evaluate(tech(), cata(), cfg=arm).plan
+        assert plan.horizon_days == tuple(CFG.recipes.pullback_to_trend.horizon_days)
+
+
 def test_v3_refuses_when_the_framework_says_the_runner_does_not_trail():
     """`runner_trail: none` is a legal configuration and makes v3 impossible:
     a trailing variant without a trail would leave the remainder with no exit,

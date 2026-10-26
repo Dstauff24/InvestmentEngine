@@ -159,7 +159,7 @@ scripts/         fmp_probe.py (endpoint reachability), field_probe.py (live fiel
                  adoption_check.py (pre-registered criteria + citation)
 tests/           (fixtures/ includes schwab_payloads.py, live-validated)
 docs/            engine-decisions-and-todo.md (canonical log, D1-D52 + O1-O19),
-                 open-parameters.md (79 live rows + 2 tombstones), REBUILD_KICKOFF.md
+                 open-parameters.md (84 live rows + 2 tombstones), REBUILD_KICKOFF.md
 ```
 
 ## Schema conventions (all previously verified against live PG16 + Timescale 2.29)

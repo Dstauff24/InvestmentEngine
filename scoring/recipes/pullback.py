@@ -20,6 +20,21 @@ def trail_window() -> int | None:
     return config.risk().exits.swing.trail_ma_days
 
 
+def _horizon(recipe, geometry) -> tuple[int, int]:
+    """The plan's horizon — and for a TRAILING variant it is O20's safety net.
+
+    The tracker enforces whatever horizon travels with the plan
+    (`proj_horizon_days or exits.swing.max_holding_days`), so there is exactly
+    one clock per call and this decides which number it is. A trailing variant
+    takes `trail_timeout_days`, because the recipe's own 15-session swing
+    horizon pre-empted the trail on 59% of the trades that would have trailed
+    out — the defect that decided v3's first certifying run.
+    """
+    low, high = tuple(recipe.horizon_days)
+    cap = geometry.horizon_cap
+    return (low, cap) if cap else (low, high)
+
+
 def evaluate(
     technical: TechnicalFeatures,
     catalyst: CatalystFeatures,
@@ -195,7 +210,7 @@ def evaluate(
         target_1=target_1,
         target_2=target_2,
         features=technical,
-        horizon_days=tuple(recipe.horizon_days),
+        horizon_days=_horizon(recipe, geometry),
         cfg=scoring_cfg,
         trail_ma=trail_ma,
         trail_confirm=geometry.trail_confirm_closes if trail_ma else None,

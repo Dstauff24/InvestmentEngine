@@ -291,6 +291,12 @@ geometry:
     # to get it. The trail ITSELF is `exits.swing.runner_trail` in risk.yaml,
     # which has said ma_20 since the framework was written.
     trail_confirm_closes: 1          # [OPEN] #84
+    # O20's SAFETY NET for the trailing variant, in SESSIONS, and the only clock
+    # a v3 plan carries. Swept, never assumed: v3's first certifying run was
+    # decided by the recipe's own 15-session horizon, which cut 59% of the
+    # trades that would have trailed out (p50 19 / p75 29 / p90 41 sessions from
+    # entry to the trail's exit over 658 trades that reached TP1).
+    trail_timeout_days: 45             # [OPEN] #86 — v3 only
 
   base_breakout:
     # TP1 = entry + base depth (the classic measured move). TP2 extends it.
