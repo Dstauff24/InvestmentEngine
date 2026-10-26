@@ -342,6 +342,76 @@ raw series steps by the split ratio at an ex-date, an adjusted one does not. If
 it fails, `python -m ingest.fmp_history --repair-split-basis` re-sources the
 restated sessions.
 
+### Deeper history, once (O19) — on the VM, in this order
+
+O7's five years is enough for the recipes and **not** enough for a regime split:
+`bear_normal` has 19 SPY sessions in the stored window, so D45's cells cannot
+all be sampled. O19 extends prices and Form 4s. Runtimes below were measured on
+the dev box or derived from the limiter; **measure the first slice before
+committing to the rest.**
+
+```bash
+# 1. ACTIONS FIRST, as deep as the bars will go. Splits and dividends before
+#    prices, or every earlier bar gets a wrong total-return series, silently.
+ALLOW_LIVE_CALLS=1 python -m ingest.fmp_events --backfill-actions     # ~866 calls, ~5 min
+
+# 2. PRICES. 18 years, CHUNKED into 4-year windows (FMP truncates silently:
+#    every calendar endpoint caps at 4,000 rows and returns an arbitrary slice
+#    without saying so, and 18 years is ~4,500 sessions per symbol).
+ALLOW_LIVE_CALLS=1 python -m ingest.fmp_history --bars --years 18     # ~2,170 calls, 30-60 min
+
+# 3. PROVE THE BASIS. A raw series steps by the split ratio at an ex-date; an
+#    adjusted one does not, and that arithmetic is the only evidence either way.
+python -m jobs.price_basis_check
+ALLOW_LIVE_CALLS=1 python -m ingest.fmp_history --repair-split-basis  # only if (3) fails
+python -m jobs.price_basis_check                                      # must pass before step 5
+```
+
+**Call budget:** `fmp.daily_call_budget` is 12,000 and step 2 costs ~2,170, so
+it fits beside a normal evening. The limiter is 600/min, so the floor on step 2
+is ~4 minutes of rate-limited waiting; the rest is parsing and ~1.9M upserts.
+
+**Why 18 and not "as far back as it goes":** 2008 reaches the financial crisis,
+which is the only `bear_volatile` stretch of any length available. Asking for
+more costs another chunk per symbol for years in which half the universe did
+not exist, and `backfill_bars` already writes nothing for a symbol with no data.
+
+```bash
+# 4. FORM 4 HISTORY — point-in-time on `filed_at` (NOT the transaction date: a
+#    filing is knowledge when the SEC ACCEPTS it, up to two business days
+#    later, and keying on the trade would let a backtest act on a purchase
+#    before anyone could know).
+#    START WITH THREE YEARS AND MEASURE. See the warning below.
+ALLOW_LIVE_CALLS=1 python -m ingest.edgar_insiders --years 3
+```
+
+**STEP 4 IS A MULTI-NIGHT JOB AND THE BUDGET WILL STOP IT.** Three facts decide
+the plan:
+
+* The walk now follows the OLDER submission pages. `filings.recent` holds only
+  the last ~1,000 filings, so a historical pull that reads it alone stops
+  wherever 1,000 filings happens to land — two years for a large filer, twenty
+  for a quiet one, with no error and rows that look complete.
+* Cost is **1 feed + ~1-3 older pages + one document per Form 4**, and a
+  large-cap files Form 4s in the dozens per year. Across ~420 symbols with a
+  CIK (ETFs and foreign issuers have none), three years is plausibly 30-60k
+  document fetches.
+* The SEC limit is **5 requests/second** (`SEC_EDGAR_RATE_LIMIT_PER_SEC`), which
+  is a hard floor of **~2-4 hours per three-year slice**, and
+  `edgar.daily_call_budget` is **2,000** — a runaway-loop guard sized for a
+  normal evening, which will halt the backfill in about seven minutes.
+
+So: raise `edgar.daily_call_budget` for the one-off, run **one slice per night**
+(`--years 3`, then 6, then 9 — each run re-fetches what it has, which is
+idempotent and the price of not tracking a cursor), and check
+`job_runs.unavailable_endpoints` and the row count after the first slice before
+committing to the rest. A 403 is never retried; an unconfigured User-Agent is an
+expected SKIP, not a failure.
+
+**What NOT to do:** do not run step 4 against the dev database to "test it" —
+`insider_transactions` stores rows UNFILTERED (D25) so the volume is real, and
+the SEC blocks by User-Agent, not by host.
+
 ### Backtest (D39(4)/O7)
 
 ```bash

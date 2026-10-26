@@ -197,6 +197,34 @@ def compare_overlap(
         into.diffs_pct.append(abs(row["close"] - theirs) / theirs * 100.0)
 
 
+# How much history one request may ask for. **FMP TRUNCATES SILENTLY AND THIS
+# REPO HAS BEEN BITTEN BY IT**: every calendar endpoint caps at 4,000 rows and
+# returns an arbitrary slice of the window without saying so (measured
+# 2026-10-21 — a 30-day ask came back as 11 days from the MIDDLE). The EOD
+# endpoints have never been pushed past five years here, and O19 asks for
+# eighteen, so the request is CHUNKED into windows small enough that a cap
+# could not bite and each chunk's coverage is checked against what it asked
+# for. Four years is ~1,008 sessions, a quarter of the known cap.
+CHUNK_YEARS = 4
+
+
+def chunks(start: date, end: date, *, years: int = CHUNK_YEARS) -> list[tuple[date, date]]:
+    """`[(from, to), ...]` covering `start..end`, newest LAST.
+
+    Newest last so a partial failure leaves the OLDEST part missing, which is
+    the half that matters least and is visible as a short series — the other
+    order would leave a hole in the recent history the engine scores against.
+    """
+    out: list[tuple[date, date]] = []
+    span = timedelta(days=365 * years)
+    lower = start
+    while lower < end:
+        upper = min(lower + span, end)
+        out.append((lower, upper))
+        lower = upper + timedelta(days=1)
+    return out
+
+
 def load_symbol_bars(
     client: FMPClient,
     symbol: str,
@@ -213,10 +241,36 @@ def load_symbol_bars(
     which is the only reason it is a parameter rather than a constant.
     """
     stored = stored_bars(symbol)
-    rows = parse_bars(client.historical_bars_raw(symbol, start=start, end=end), symbol)
+    rows: list[dict] = []
+    for lower, upper in chunks(start, end):
+        batch = parse_bars(client.historical_bars_raw(symbol, start=lower, end=upper), symbol)
+        if not batch:
+            log.debug("%s: no bars in %s..%s", symbol, lower, upper)
+            continue
+        # TRUNCATION CHECK, per chunk. A provider that silently returns a slice
+        # of what was asked for is how the engine ends up with a series that
+        # looks complete and is not; the only defence is comparing the oldest
+        # bar returned against the oldest one requested. Weekends and holidays
+        # make an exact match wrong, so the tolerance is generous and the test
+        # is for a MISSING YEAR rather than a missing week.
+        oldest = min(r["session_date"] for r in batch)
+        if (oldest - lower).days > 370:
+            log.warning(
+                "%s: asked for %s..%s and the oldest bar returned is %s — a year or more "
+                "is missing, which is what a silent cap looks like. Treating the chunk as "
+                "partial rather than complete",
+                symbol,
+                lower,
+                upper,
+                oldest,
+            )
+        rows.extend(batch)
     if not rows:
         log.warning("%s: FMP returned no bars for %s..%s", symbol, start, end)
         return 0
+    # One session can only come back once; a chunk boundary that overlaps would
+    # otherwise upsert the same row twice in one statement.
+    rows = list({r["session_date"]: r for r in rows}.values())
 
     compare_overlap(rows, stored, overlap)
     # THE SEAM. A session another provider wrote keeps that provider's bar;

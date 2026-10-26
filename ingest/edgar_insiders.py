@@ -70,7 +70,13 @@ def parse_submissions(payload: dict, *, since: date, forms=FORM_TYPES) -> list[F
     instant, which matters because a filing accepted after the close is not
     tradeable until the next session.
     """
+    # TWO SHAPES, ONE PARSER. The main feed nests its newest ~1,000 filings
+    # under `filings.recent`; the older pages named in `filings.files` carry the
+    # same arrays at the TOP level. Reading only the first shape is how a
+    # historical walk silently stops after 1,000 filings (O19).
     recent = (payload.get("filings") or {}).get("recent") or {}
+    if not recent and payload.get("accessionNumber"):
+        recent = payload
     accessions = recent.get("accessionNumber") or []
     form_types = recent.get("form") or []
     accepted = recent.get("acceptanceDateTime") or []
@@ -93,6 +99,29 @@ def parse_submissions(payload: dict, *, since: date, forms=FORM_TYPES) -> list[F
                 document=str(_at(documents, i) or ""),
             )
         )
+    return out
+
+
+def older_pages(payload: dict, *, since: date) -> list[str]:
+    """Names of the older submission files worth fetching for `since`.
+
+    `filings.files` carries `filingTo` per page, so a page whose newest filing
+    predates the window is skipped rather than downloaded — which is the
+    difference between a handful of extra requests per symbol and a hundred.
+    """
+    files = (payload.get("filings") or {}).get("files") or []
+    out: list[str] = []
+    for page in files:
+        name = page.get("name")
+        if not name:
+            continue
+        latest = page.get("filingTo") or page.get("filingFrom")
+        try:
+            if latest and date.fromisoformat(str(latest)[:10]) < since:
+                continue
+        except ValueError:
+            pass  # an unparseable bound is fetched rather than guessed away
+        out.append(str(name))
     return out
 
 
@@ -225,9 +254,20 @@ def known_accessions(symbol: str) -> set[str]:
     return {r["accession_number"] for r in rows}
 
 
-def ingest_symbol(client: EdgarClient, symbol: str, cik: str, *, since: date) -> int:
+def ingest_symbol(
+    client: EdgarClient, symbol: str, cik: str, *, since: date, deep: bool = False
+) -> int:
     """Fetch and store this symbol's new Form 4 filings. Returns rows written."""
-    filings = parse_submissions(client.submissions(cik), since=since)
+    feed = client.submissions(cik)
+    filings = parse_submissions(feed, since=since)
+    if deep:
+        # O19: walk back through the older pages too. Each is one request, and
+        # `older_pages` skips the ones whose newest filing predates the window.
+        for name in older_pages(feed, since=since):
+            filings.extend(parse_submissions(client.submissions_page(name), since=since))
+        log.info(
+            "%s: %d Form 4 filing(s) since %s across the full feed", symbol, len(filings), since
+        )
     if not filings:
         return 0
 
@@ -254,11 +294,23 @@ def ingest_symbol(client: EdgarClient, symbol: str, cik: str, *, since: date) ->
     return db.executemany(UPSERT, rows) if rows else 0
 
 
-def run(client: EdgarClient | None = None, *, symbols: list[str] | None = None) -> int:
+def run(
+    client: EdgarClient | None = None,
+    *,
+    symbols: list[str] | None = None,
+    years: int | None = None,
+) -> int:
+    """The daily pull, or O19's deep backfill when `years` is given.
+
+    `years` switches on the older submission pages AND widens the window; the
+    daily job keeps reading `edgar.lookback_days` from config, so the backfill
+    cannot change what the nightly run does.
+    """
     client = client or EdgarClient()
     cfg = config.universe().edgar
     day = clock.session_date()
-    since = day - timedelta(days=cfg.lookback_days)
+    deep = years is not None
+    since = day - timedelta(days=365 * years if deep else cfg.lookback_days)
     universe = symbols if symbols is not None else db.active_symbols()
 
     if not universe:
@@ -291,7 +343,7 @@ def run(client: EdgarClient | None = None, *, symbols: list[str] | None = None) 
     ) as job:
         outcome = for_each_symbol(
             covered,
-            lambda s: ingest_symbol(client, s, cik_by_ticker[s], since=since),
+            lambda s: ingest_symbol(client, s, cik_by_ticker[s], since=since, deep=deep),
             run=job,
             label="insiders",
             stop_on=BudgetExhausted,
@@ -382,13 +434,19 @@ def _date(node, path: str) -> date | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--symbols", nargs="*", help="override the universe (debugging)")
+    parser.add_argument(
+        "--years",
+        type=int,
+        help="O19's DEEP backfill: walk the older submission pages back this many years "
+        "instead of the daily `edgar.lookback_days` window",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    rows = run(symbols=args.symbols)
+    rows = run(symbols=args.symbols, years=args.years)
     print(f"insider transactions: {rows} rows")
     return 0
 

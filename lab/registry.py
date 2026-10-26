@@ -29,6 +29,17 @@ MIN_RATIONALE_CHARS = 30
 
 DIRECTIONS = ("higher_is_better", "lower_is_better", "unsigned")
 
+SHAPES = ("cross_section", "event_study")
+"""**TWO DIFFERENT MEASUREMENTS, and conflating them is how a conditional edge
+disappears.** A `cross_section` hypothesis sorts EVERY symbol EVERY day, which
+is the right instrument for a signal that is always present (momentum,
+volatility) and close to the worst one for a signal that fires on one symbol a
+week — `post_earnings_drift` would be measured against 400 symbols that had no
+earnings. An `event_study` measures forward returns from a QUALIFYING EVENT,
+pooled across the window and cut into quintiles by the event's magnitude, which
+is the shape the drift literature uses and the shape three of this engine's
+four pillars actually imply."""
+
 
 @dataclass(frozen=True)
 class Hypothesis:
@@ -45,6 +56,7 @@ class Hypothesis:
     registered_on: date
     horizons: tuple[int, ...] = (5, 10, 20)
     stage: int = 1
+    shape: str = "cross_section"
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -53,6 +65,12 @@ class Hypothesis:
                 f"hypothesis {self.name!r} has no economic rationale. A signal without a "
                 f"reason is a coincidence with a ticker, and the registry exists so the "
                 f"reason is written down BEFORE the measurement rather than after it"
+            )
+        if self.shape not in SHAPES:
+            raise ValueError(
+                f"hypothesis {self.name!r} has shape {self.shape!r}; expected one of {SHAPES}. "
+                f"The shape decides the instrument, and measuring a conditional signal across "
+                f"the whole cross-section is how a real edge comes back null"
             )
         if self.direction not in DIRECTIONS:
             raise ValueError(
@@ -226,6 +244,113 @@ _h(
     "barely matters, which is a different claim. Varies the HOLD alone — same entries, "
     "no concurrency rule in the way — which the sweep could not do.",
 )
+
+
+# ── Stage 1, batch three: EVENT STUDIES (registered Oct 26 2026) ───────────
+# The first run's null is part of the reason these exist. Four technical
+# measurables showed no univariate power across the daily cross-section, and
+# three of the engine's four pillars are CONDITIONAL by construction — they say
+# something about a symbol in the days after an event and nothing about it on a
+# random Tuesday. A cross-section is the wrong instrument for them, so these
+# are measured from the event forward.
+
+_h(
+    "earnings_surprise_magnitude",
+    "eps_surprise_pct",
+    "If the market under-reacts to news, the SIZE of the surprise should order "
+    "the drift that follows it — a bigger gap between actual and consensus leaving "
+    "more left to be priced",
+    "higher_is_better",
+    "fundamental_drift",
+    shape="event_study",
+    notes="The event is a report whose reaction window has completed (D49). Quintiles cut on "
+    "surprise against `abs(estimate)` so a loss-maker beating a negative estimate scores "
+    "positive, as the recipe does. This is the premise post_earnings_drift already trades on, "
+    "measured independently of the recipe's entry and exit.",
+)
+_h(
+    "post_report_gap_and_hold",
+    "gap_then_hold",
+    "A gap the market does not fill is the market refusing to take the news back, "
+    "so holding the reaction low should separate real repricing from a one-day "
+    "overreaction",
+    "higher_is_better",
+    "fundamental_drift",
+    shape="event_study",
+    notes="Measures the gap SIZE and whether the reaction low held, which are the two "
+    "conditions post_earnings_drift gates on — so a null here would say the recipe's entry "
+    "test carries no information even where its surprise test does.",
+)
+_h(
+    "insider_cluster_after_filing",
+    "insider_cluster_score",
+    "Several insiders buying with their own money in a short window is the one "
+    "trade in the filings that is costly to fake, so the days after the CLUSTER "
+    "completes should carry the information the filings revealed",
+    "higher_is_better",
+    "informed_flow",
+    shape="event_study",
+    notes="BLOCKED ON O19's EDGAR backfill: `insider_transactions` holds 26 rows from one "
+    "validation pull, so there is no history to study yet. Keyed on `filed_at` (D25/O19) — a "
+    "filing is knowledge when the SEC accepts it, and keying on the transaction date would let "
+    "the study act on a purchase before anyone could know.",
+)
+_h(
+    "estimate_revision_direction",
+    "revision_direction",
+    "Analysts move in the same direction for weeks, so the SIGN of a consensus "
+    "change should predict the next one and the price drift that follows it",
+    "higher_is_better",
+    "fundamental_drift",
+    shape="event_study",
+    notes="FORWARD-ONLY, from our OWN `estimate_snapshots`: the series starts 2026-10-22 and "
+    "the vendor's historical `epsEstimated` rows are mutable (one carried `lastUpdated` sixteen "
+    "months after the report), so a revision measured against them is not point-in-time. The "
+    "event is a snapshot-to-snapshot change in consensus.",
+)
+
+# ── Stage 1, batch four: the long-horizon factors the registry omitted ─────
+# Both are documented cross-sectional premia measured over decades elsewhere,
+# and neither was in the engine at all — the composite reaches for 20-day
+# relative strength and never asks the question these ask. They are registered
+# here partly as a CONTROL: a screen that cannot find 12-1 momentum over five
+# years is probably underpowered rather than looking at a dead universe, and
+# that is worth knowing before the engine's own signals are judged by it.
+
+_h(
+    "momentum_12_1",
+    "momentum_12_1",
+    "Winners keep winning over months because investors underreact to slow news "
+    "and chase after it, while the most recent month is dropped because short-term "
+    "reversal runs the other way and cancels it",
+    "higher_is_better",
+    "momentum",
+    horizons=(20, 60, 120),
+    notes="The classic 12-month-minus-1-month construction. Also a POWER CONTROL: if this "
+    "screen cannot see the most replicated cross-sectional premium in the literature over this "
+    "window, the null on the engine's own measurables says more about the instrument than "
+    "about the signals.",
+)
+_h(
+    "low_volatility",
+    "volatility_60d",
+    "Leverage-constrained investors bid up volatile names for their lottery "
+    "payoff, so the quiet ones are left cheap and earn more per unit of risk than "
+    "they should",
+    "lower_is_better",
+    "volatility",
+    horizons=(20, 60, 120),
+    notes="Realised 60-session volatility. Direction is pre-registered as LOWER IS BETTER, "
+    "which is the anomaly's claim and the opposite of what a risk model predicts — so a "
+    "positive spread here would be the finding, not a sign error.",
+)
+
+
+def by_shape() -> dict[str, list[Hypothesis]]:
+    out: dict[str, list[Hypothesis]] = {}
+    for h in REGISTRY.values():
+        out.setdefault(h.shape, []).append(h)
+    return out
 
 
 def by_family() -> dict[str, list[Hypothesis]]:

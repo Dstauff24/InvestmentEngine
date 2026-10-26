@@ -11,6 +11,7 @@ places a backtest can lie to you:
 
 from __future__ import annotations
 
+import itertools
 from datetime import date, timedelta
 
 import pandas as pd
@@ -1432,3 +1433,37 @@ def test_the_binding_threshold_is_a_report_threshold_not_a_strategy_one():
     [item] = metrics.reachability(just_under)
     assert item.share_tier_a == pytest.approx(0.9)
     assert item.gates_not_binding is False, "exactly 90% is not 'over 90%'"
+
+
+# ── O19: the deep price backfill ────────────────────────────────────────────
+
+
+def test_the_deep_backfill_CHUNKS_its_request_newest_last():
+    """FMP truncates silently — every calendar endpoint caps at 4,000 rows and
+    returns an arbitrary slice without saying so. O19 asks for eighteen years,
+    which is ~4,500 sessions, so the request is cut into windows a cap could
+    not bite.
+
+    Newest LAST so a partial failure leaves the OLDEST part missing, which is
+    the half that matters least; the other order would leave a hole in the
+    recent history the engine scores against.
+    """
+    from ingest.fmp_history import CHUNK_YEARS, chunks
+
+    windows = chunks(date(2008, 1, 1), date(2026, 10, 21))
+    assert windows[0][0] == date(2008, 1, 1)
+    assert windows[-1][1] == date(2026, 10, 21)
+    assert all(lo <= hi for lo, hi in windows)
+    # Contiguous, no gaps and no overlaps beyond the day boundary.
+    for (_, earlier_end), (later_start, _) in itertools.pairwise(windows):
+        assert (later_start - earlier_end).days == 1
+    assert all((hi - lo).days <= 365 * CHUNK_YEARS + 1 for lo, hi in windows)
+    # Each chunk is well under the 4,000-row cap that bit the calendar endpoints.
+    assert 365 * CHUNK_YEARS * 5 / 7 < 4000
+
+
+def test_a_single_year_needs_only_one_chunk():
+    """The daily path and a short repair must not pay for the deep one."""
+    from ingest.fmp_history import chunks
+
+    assert len(chunks(date(2026, 1, 1), date(2026, 10, 21))) == 1

@@ -156,6 +156,18 @@ class EdgarClient:
         """A filer's recent filings, newest first, with acceptance timestamps."""
         return self.get(f"{DATA_HOST}/submissions/CIK{cik}.json")
 
+    def submissions_page(self, name: str) -> dict:
+        """One of the OLDER submission files a filer's feed points at.
+
+        **`filings.recent` HOLDS ONLY THE LAST ~1,000 FILINGS.** Everything
+        before that lives in separate documents named under `filings.files`,
+        and a historical Form 4 walk that reads only `recent` stops wherever
+        1,000 filings happens to land — for a large filer that can be two
+        years, for a quiet one twenty. The omission is invisible: the feed
+        parses, the rows look fine, and the history simply ends.
+        """
+        return self.get(f"{DATA_HOST}/submissions/{name}")
+
     def filing_document(self, cik: str, accession: str, document: str) -> str:
         """One document out of one filing, as text (Form 4 XML)."""
         bare_cik = str(int(cik))

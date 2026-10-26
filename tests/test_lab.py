@@ -282,3 +282,39 @@ def test_the_test_COUNT_is_what_sets_the_bar_and_it_comes_from_the_registry():
     bar = mt.adjust(dict.fromkeys(REGISTRY, 0.04))
     assert bar[0].tests == measured_count()
     assert bar[0].bonferroni_threshold == pytest.approx(mt.ALPHA / measured_count())
+
+
+def test_excess_versus_SPY_is_the_same_test_as_raw_for_a_SPREAD():
+    """Found by the first real run, which reported the two identical on all 12
+    pairs. SPY's return is one number for the whole cross-section, so
+    subtracting it shifts every symbol equally — and a top-minus-bottom spread
+    is invariant to a common shift. Counting it as a separate test inflates the
+    multiplicity by a third for no information."""
+    rng = random.Random(11)
+    days = {}
+    for i in range(30):
+        day = START + timedelta(days=i)
+        market = rng.gauss(0, 1.5)
+        days[day] = [
+            Observation(
+                on=day,
+                symbol=f"S{j}",
+                value=float(j),
+                forward={HORIZON: float(j) / 10 + market},
+                benchmark={HORIZON: market},
+            )
+            for j in range(MIN_SYMBOLS_PER_DAY)
+        ]
+
+    raw = measure(days, measurable="x", horizon=HORIZON, basis="raw")
+    spy = measure(days, measurable="x", horizon=HORIZON, basis="spy")
+    assert raw.mean_spread == pytest.approx(spy.mean_spread)
+    assert raw.mean_rank_ic == pytest.approx(spy.mean_rank_ic)
+    # The BUCKET MEANS do shift, which is why the basis is kept for those.
+    assert raw.quintile_means[0] != pytest.approx(spy.quintile_means[0])
+
+
+def test_the_primary_bases_EXCLUDE_spy_for_that_reason():
+    from lab.run import BASES
+
+    assert BASES == ("raw", "sector")
