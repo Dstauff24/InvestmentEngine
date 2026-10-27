@@ -38,9 +38,16 @@ QUINTILES = 5
 MIN_SYMBOLS_PER_DAY = QUINTILES * 10
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Observation:
-    """One symbol on one day: the signal's value and what happened next."""
+    """One symbol on one day: the signal's value and what happened next.
+
+    **`slots=True` IS A CAPACITY DECISION, NOT A MICRO-OPTIMISATION.** The deep
+    window (O19) holds ~1.9M symbol-days and one of these per measurable, so a
+    per-instance `__dict__` costs over a gigabyte on its own — the first deep
+    run was killed by the kernel partway through loading. The three return
+    dicts below are also SHARED rather than copied: see `providers.cross_sections`.
+    """
 
     on: date
     symbol: str

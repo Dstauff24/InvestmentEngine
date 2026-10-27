@@ -251,6 +251,16 @@ def cross_sections(
     )
     regimes = regime_series(load_benchmark(as_of=as_of)).tags
 
+    # **SPY'S FORWARD RETURN IS A FACT ABOUT THE DAY, so it is stored ONCE per
+    # day and the same dict object is handed to every observation on it.** Built
+    # per observation, it was one dict per (measurable, symbol, day): ~11.7M
+    # copies of ~4,500 distinct values, which is most of why the first deep run
+    # was killed by the kernel.
+    spy_by_day: dict[date, dict[int, float]] = {}
+    for h in horizons:
+        for day, value in spy_forward[h].dropna().items():
+            spy_by_day.setdefault(day, {})[h] = float(value)
+
     out: dict[str, dict[date, list[Observation]]] = {name: {} for name in measurables}
     seen_days: set[date] = set()
     for n, (symbol, sector) in enumerate(rows, start=1):
@@ -264,17 +274,31 @@ def cross_sections(
         sector_forward = forward_returns(index.reindex(frame.index), horizons)
         betas = rolling_beta(frame["close"], spy_closes)
 
+        # **THE SYMBOL'S OWN AND ITS SECTOR'S RETURNS ARE BUILT ONCE PER DAY AND
+        # SHARED ACROSS EVERY MEASURABLE.** Only `value` differs between the six
+        # measurables for a given (symbol, day); the returns beside it are the
+        # same numbers, and building them inside the measurables loop stored six
+        # identical dicts per symbol-day. The observations are frozen, so
+        # sharing the object is safe and the saving is six-fold.
+        own_by_day: dict[date, dict[int, float]] = {}
+        sector_by_day: dict[date, dict[int, float]] = {}
+        beta_by_day: dict[date, float] = {}
+        for h in horizons:
+            for day, value in own_forward[h].dropna().items():
+                own_by_day.setdefault(day, {})[h] = float(value)
+            for day, value in sector_forward[h].dropna().items():
+                sector_by_day.setdefault(day, {})[h] = float(value)
+        for day, value in betas.dropna().items():
+            beta_by_day[day] = float(value)
+
+        empty: dict[int, float] = {}
         for name in measurables:
             try:
                 values = MEASURABLES[name](frame, index)
             except KeyError:
                 raise KeyError(f"no provider for measurable {name!r}") from None
             for day, value in values.dropna().items():
-                forward = {
-                    h: float(own_forward[h].get(day))
-                    for h in horizons
-                    if pd.notna(own_forward[h].get(day))
-                }
+                forward = own_by_day.get(day)
                 if not forward:
                     continue
                 out[name].setdefault(day, []).append(
@@ -283,17 +307,9 @@ def cross_sections(
                         symbol=symbol,
                         value=float(value),
                         forward=forward,
-                        benchmark={
-                            h: float(spy_forward[h].get(day))
-                            for h in horizons
-                            if pd.notna(spy_forward[h].get(day))
-                        },
-                        sector={
-                            h: float(sector_forward[h].get(day))
-                            for h in horizons
-                            if pd.notna(sector_forward[h].get(day))
-                        },
-                        beta=(float(betas.get(day)) if pd.notna(betas.get(day)) else None),
+                        benchmark=spy_by_day.get(day, empty),
+                        sector=sector_by_day.get(day, empty),
+                        beta=beta_by_day.get(day),
                     )
                 )
                 seen_days.add(day)
