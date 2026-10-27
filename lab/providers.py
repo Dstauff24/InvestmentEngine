@@ -195,6 +195,26 @@ def volatility_60d(closes: pd.Series, window: int = 60) -> pd.Series:
     return returns.rolling(window).std() * (252**0.5) * 100.0
 
 
+def prior_return_20d(closes: pd.Series, window: int = 20) -> pd.Series:
+    """The trailing 20-session return, in percent. The reversal measurable.
+
+    **DELIBERATELY THE PLAIN TRAILING RETURN, with no month skipped** — the
+    opposite construction to `momentum_12_1`, where the skip exists to keep
+    reversal OUT. Jegadeesh (1990) and Lehmann (1990) document the effect over
+    exactly this horizon, so the window is theirs rather than a choice made
+    here.
+
+    It mirrors nothing in `features/`: `relative_strength_20d` is a return
+    DIFFERENCE against the sector (D33), and the engine has no plain
+    own-return measure. That the two share a window is the interesting part,
+    since one is registered `higher_is_better` and this one the reverse.
+    """
+    # No length guard: `shift` yields NaN where the window does not reach, which
+    # is the abstention every caller already drops — the same shape as
+    # `momentum_12_1` and `rolling_beta`, rather than a second convention.
+    return (closes / closes.shift(window) - 1.0) * 100.0
+
+
 MEASURABLES = {
     # One signature for every provider — (bars, sector_index) — so the caller
     # needs no per-measurable knowledge. Most ignore the sector series; naming
@@ -205,6 +225,7 @@ MEASURABLES = {
     "squeeze_percentile": lambda bars, _sector: squeeze_percentile(bars),
     "momentum_12_1": lambda bars, _sector: momentum_12_1(bars["close"]),
     "volatility_60d": lambda bars, _sector: volatility_60d(bars["close"]),
+    "prior_return_20d": lambda bars, _sector: prior_return_20d(bars["close"]),
 }
 """What can be measured from stored bars alone. The registry holds more; a
 measurable with no provider here is reported UNMEASURED rather than skipped,

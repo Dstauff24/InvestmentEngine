@@ -56,6 +56,10 @@ class Verdict:
     tests: int
     bh_threshold: float
     bonferroni_threshold: float
+    expected_sign: int = 0
+    """+1, -1, or 0 for an `unsigned` hypothesis. See `expected_spread_sign`."""
+    observed_sign: int = 0
+    """The sign the spread actually came back with."""
 
     @property
     def survives_fdr(self) -> bool:
@@ -66,17 +70,67 @@ class Verdict:
         return self.p_value is not None and self.p_value <= self.bonferroni_threshold
 
     @property
+    def contradicts(self) -> bool:
+        """Significant, and in the direction OPPOSITE the registered one.
+
+        **THIS IS WHY THE REGISTRY REFUSES A HYPOTHESIS WITHOUT A DIRECTION.**
+        A sign chosen after seeing the spread is a one-sided test in disguise,
+        so the direction is pre-committed — and a report that then printed
+        "survives" for a result pointing the other way would hand back the
+        discovery the pre-registration exists to prevent. An `unsigned`
+        hypothesis (`expected_sign == 0`) can never contradict: nothing was
+        committed, so either sign is a finding.
+        """
+        if not (self.survives_fdr or self.survives_bonferroni):
+            return False
+        return self.expected_sign != 0 and self.observed_sign != self.expected_sign
+
+    @property
     def verdict(self) -> str:
+        """The bar, the direction, and — when they disagree — which one won.
+
+        The BH and Bonferroni arithmetic is untouched by direction: both are
+        procedures over two-sided p-values and `m`, and making them one-sided
+        after the fact would change the bar to suit the answer. So a
+        contradiction is still counted as a detected effect for the multiple-
+        testing math; what changes is that the line says whose effect it is.
+        """
         if self.p_value is None:
             return "UNMEASURED"
         if self.survives_bonferroni:
-            return "survives both bars"
-        if self.survives_fdr:
-            return f"survives FDR q={FDR_Q:g}, not Bonferroni"
-        return "not significant"
+            bar = "both bars"
+        elif self.survives_fdr:
+            bar = f"FDR q={FDR_Q:g}, not Bonferroni"
+        else:
+            return "not significant"
+        if self.contradicts:
+            return f"CONTRADICTS its registered direction ({bar})"
+        if self.expected_sign == 0:
+            return f"survives {bar} (unsigned — either sign is a finding)"
+        return f"survives {bar}"
 
 
-def adjust(p_values: dict[str, float | None], *, q: float = FDR_Q) -> list[Verdict]:
+def expected_spread_sign(direction: str) -> int:
+    """The sign a CONFIRMING quintile spread has, given a registered direction.
+
+    **EASY TO GET BACKWARDS, so it is written down once.** The reported spread
+    is always `top quintile OF THE MEASURABLE minus bottom` — the measurable's
+    own high end minus its low end, with no notion of good or bad in it. So for
+    a `lower_is_better` hypothesis the top quintile is the UNDESIRABLE end, and
+    confirmation looks like a NEGATIVE spread. `low_volatility` measures
+    `volatility_60d`: its hypothesis is confirmed when the most volatile names
+    earn LESS, i.e. spread < 0.
+    """
+    return {"higher_is_better": 1, "lower_is_better": -1, "unsigned": 0}[direction]
+
+
+def adjust(
+    p_values: dict[str, float | None],
+    *,
+    q: float = FDR_Q,
+    expected: dict[str, int] | None = None,
+    observed: dict[str, int] | None = None,
+) -> list[Verdict]:
     """Benjamini-Hochberg over every hypothesis MEASURED, plus Bonferroni.
 
     `m` counts the hypotheses that produced a p-value. An unmeasured one does
@@ -108,6 +162,8 @@ def adjust(p_values: dict[str, float | None], *, q: float = FDR_Q) -> list[Verdi
                 tests=m,
                 bh_threshold=threshold,
                 bonferroni_threshold=bonferroni,
+                expected_sign=(expected or {}).get(name, 0),
+                observed_sign=(observed or {}).get(name, 0),
             )
         )
     return out

@@ -194,7 +194,7 @@ def test_a_verdict_SAYS_WHICH_BAR_it_cleared():
     verdicts = {
         v.name: v for v in mt.adjust({f"h{i}": p for i, p in enumerate([0.001] + [0.5] * 9)})
     }
-    assert verdicts["h0"].verdict == "survives both bars"
+    assert "survives both bars" in verdicts["h0"].verdict
     assert verdicts["h9"].verdict == "not significant"
 
 
@@ -438,7 +438,7 @@ def test_a_BEAR_regime_cell_is_labelled_a_survivor_biased_upper_bound():
 
     assert "bear_volatile   << SURVIVOR-BIASED UPPER BOUND" in body
     assert "bull_calm\n" in body, "a bull cell carries no such flag"
-    assert "A BEAR CELL IS A CEILING, NOT AN ESTIMATE" in body
+    assert "A LABELLED CELL IS A CEILING, NOT AN ESTIMATE" in body
     assert set(BEAR_REGIMES) == {"bear_calm", "bear_normal", "bear_volatile"}
 
 
@@ -455,3 +455,93 @@ def test_the_report_states_that_survivorship_GROWS_with_distance():
     assert "SURVIVORSHIP GROWS WITH DISTANCE FROM TODAY" in body
     assert "symbols/day min" in body
     assert "O22" in body
+
+
+# ── the registered direction reaches the verdict column ─────────────────────
+#
+# It was validated at registration and then ignored, so a cell pointing the
+# OPPOSITE way to its hypothesis printed "survives" — which is the discovery
+# pre-registration exists to prevent, handed back by the report.
+
+
+def test_the_expected_spread_sign_is_inverted_for_a_lower_is_better_hypothesis():
+    """The spread is top-OF-THE-MEASURABLE minus bottom, so `low_volatility`
+    (measuring volatility) is CONFIRMED by a negative spread. Easy to get
+    backwards, which is why it is pinned."""
+    assert mt.expected_spread_sign("higher_is_better") == 1
+    assert mt.expected_spread_sign("lower_is_better") == -1
+    assert mt.expected_spread_sign("unsigned") == 0
+
+
+def test_a_significant_result_against_its_direction_says_CONTRADICTS():
+    """low_volatility's real shape: +12.52% at 120 sessions on a
+    `lower_is_better` hypothesis is HIGH volatility outearning low."""
+    verdicts = {
+        v.name: v
+        for v in mt.adjust(
+            {f"h{i}": p for i, p in enumerate([0.001] + [0.5] * 9)},
+            expected={"h0": -1},
+            observed={"h0": +1},
+        )
+    }
+    assert verdicts["h0"].contradicts
+    assert "CONTRADICTS its registered direction" in verdicts["h0"].verdict
+    assert "survives" not in verdicts["h0"].verdict
+
+
+def test_a_significant_result_WITH_its_direction_still_says_survives():
+    verdicts = {
+        v.name: v
+        for v in mt.adjust(
+            {f"h{i}": p for i, p in enumerate([0.001] + [0.5] * 9)},
+            expected={"h0": -1},
+            observed={"h0": -1},
+        )
+    }
+    assert not verdicts["h0"].contradicts
+    assert verdicts["h0"].verdict == "survives both bars"
+
+
+def test_an_unsigned_hypothesis_can_never_contradict():
+    """Nothing was pre-committed, so either sign is admissible as a finding —
+    `rsi_reset` is registered unsigned and came back negative."""
+    verdicts = {
+        v.name: v
+        for v in mt.adjust(
+            {f"h{i}": p for i, p in enumerate([0.001] + [0.5] * 9)},
+            expected={"h0": 0},
+            observed={"h0": -1},
+        )
+    }
+    assert not verdicts["h0"].contradicts
+    assert "unsigned" in verdicts["h0"].verdict
+
+
+def test_an_insignificant_result_never_contradicts_however_it_points():
+    """A contradiction is a DETECTED effect in the wrong direction. A null is
+    not evidence against the hypothesis, it is no evidence."""
+    verdicts = {
+        v.name: v
+        for v in mt.adjust({"h0": 0.9}, expected={"h0": +1}, observed={"h0": -1})
+    }
+    assert not verdicts["h0"].contradicts
+    assert verdicts["h0"].verdict == "not significant"
+
+
+def test_the_uncomputable_regime_cell_carries_the_survivorship_label():
+    """`unknown` is the WORST cell in the deep window, not an exempt one: D45
+    cannot compute a regime until the benchmark has 200 sessions, which here
+    means the 2008-09 crisis at the thinnest symbol coverage in the report."""
+    from lab.run import LABELLED_REGIMES, render
+
+    one = measure(
+        {START: observations(START, [(f"S{j}", float(j), float(j) / 10) for j in range(60)])},
+        measurable="x",
+        horizon=HORIZON,
+    )
+    body = render([one], {}, regime_results={"unknown": [one], "bull_calm": [one]})
+
+    assert "unknown   << SURVIVOR-BIASED UPPER BOUND" in body
+    assert "bull_calm\n" in body, "a bull cell still carries no flag"
+    assert "unknown` is labelled for the same reason" in body
+    assert "unknown" in LABELLED_REGIMES

@@ -194,3 +194,44 @@ def test_a_short_history_gives_NO_beta_rather_than_one():
     frame = bars(100)
     spy = frame.set_index("session_date")["close"].astype(float)
     assert providers.rolling_beta(spy, spy).isna().all()
+
+
+# ── the reversal measurable (short_term_reversal, registered Oct 27 2026) ───
+
+
+def test_prior_return_20d_is_the_plain_trailing_return():
+    """No skipped month, deliberately — the opposite construction to
+    `momentum_12_1`, whose skip exists to keep this effect out."""
+    closes = pd.Series([100.0] * 21 + [110.0], index=pd.RangeIndex(22))
+    series = providers.prior_return_20d(closes)
+    # The last bar is 10% above the close 20 sessions earlier.
+    assert series.iloc[-1] == pytest.approx(10.0)
+
+
+def test_prior_return_20d_uses_no_bar_after_the_date_it_is_indexed_at():
+    """Point-in-time, like every other provider here: a value dated today is
+    computed from today's close backwards and never from tomorrow's."""
+    frame = bars(60)
+    closes = frame.set_index("session_date")["close"].astype(float)
+    full = providers.prior_return_20d(closes)
+
+    truncated = providers.prior_return_20d(closes.iloc[:-1])
+    assert truncated.iloc[-1] == pytest.approx(full.iloc[-2])
+
+
+def test_prior_return_20d_abstains_without_the_window():
+    """`features/`'s standing convention: too little history is NO value, never
+    a number computed off a shorter window. Expressed as NaN, which is what
+    every caller drops, rather than a number from a 15-session window."""
+    closes = pd.Series([100.0] * 15, index=pd.RangeIndex(15))
+    assert providers.prior_return_20d(closes).isna().all()
+
+
+def test_the_reversal_and_the_momentum_measurables_are_registered_opposite():
+    """Same family, opposite directions, and that is the point: if both were
+    confirmed on the same horizon the pair would be incoherent."""
+    from lab.registry import REGISTRY
+
+    assert REGISTRY["short_term_reversal"].direction == "lower_is_better"
+    assert REGISTRY["momentum_12_1"].direction == "higher_is_better"
+    assert REGISTRY["short_term_reversal"].registered_on.isoformat() == "2026-10-27"

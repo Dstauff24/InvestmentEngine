@@ -101,7 +101,10 @@ def _h(name: str, measurable: str, rationale: str, direction: str, family: str, 
             rationale=rationale,
             direction=direction,
             family=family,
-            registered_on=date(2026, 10, 26),
+            # The batches were registered on different days, and the date is
+            # part of the pre-registration: it is what says a hypothesis
+            # predates the measurement that judges it.
+            registered_on=kw.pop("registered_on", date(2026, 10, 26)),
             **kw,
         )
     )
@@ -266,7 +269,14 @@ _h(
     notes="The event is a report whose reaction window has completed (D49). Quintiles cut on "
     "surprise against `abs(estimate)` so a loss-maker beating a negative estimate scores "
     "positive, as the recipe does. This is the premise post_earnings_drift already trades on, "
-    "measured independently of the recipe's entry and exit.",
+    "measured independently of the recipe's entry and exit. "
+    "**THIS IS THE LAB'S POSITIVE CONTROL (moved here Oct 27 2026, before the re-run).** It "
+    "is the only effect the engine has already CERTIFIED in-house — D48's +0.22R out of "
+    "sample on verified beats — so the harness has something it must be able to reproduce. "
+    "Point-in-time rules are D49's throughout: the effective report date is the LATER of the "
+    "dates held, the reaction window gates the event, and forward returns start from the next "
+    "session. If this comes back null, the SUSPECT IS THE HARNESS AND NOT THE MARKET, which "
+    "is exactly what momentum's null could not establish.",
 )
 _h(
     "post_report_gap_and_hold",
@@ -326,10 +336,15 @@ _h(
     "higher_is_better",
     "momentum",
     horizons=(20, 60, 120),
-    notes="The classic 12-month-minus-1-month construction. Also a POWER CONTROL: if this "
-    "screen cannot see the most replicated cross-sectional premium in the literature over this "
-    "window, the null on the engine's own measurables says more about the instrument than "
-    "about the signals.",
+    notes="The classic 12-month-minus-1-month construction. REGISTERED AS A POWER CONTROL AND "
+    "THEN WITHDRAWN AS ONE (Oct 27 2026, before the re-run): measured null in all nine cells "
+    "over 2008-2026, |t(NW)| <= 0.86, and that null is CONFOUNDED rather than clean. The 2009 "
+    "momentum crash is one of the largest factor drawdowns on record and sits inside this "
+    "window; large-cap momentum has been weak since; and survivorship (O22) removes the "
+    "delisted losers that the short leg needs. A control has to be a premium this harness "
+    "would certainly see if it worked, and this one is not, so it cannot convict the "
+    "instrument. The control moved to the drift event study, which has a certified in-house "
+    "effect to reproduce.",
 )
 _h(
     "low_volatility",
@@ -343,6 +358,44 @@ _h(
     notes="Realised 60-session volatility. Direction is pre-registered as LOWER IS BETTER, "
     "which is the anomaly's claim and the opposite of what a risk model predicts — so a "
     "positive spread here would be the finding, not a sign error.",
+)
+
+
+# ── Stage 1, batch three: an externally motivated reversal test ─────────────
+#
+# PRE-REGISTERED Oct 27 2026, BEFORE the re-run measured it, and it is NOT a
+# sign flip dressed up. The distinction that makes it admissible: `rsi_reset`
+# and `relative_strength_vs_sector` came back pointing at short-term losers,
+# and the temptation is to re-register them the other way round — which would
+# be choosing a sign after seeing a spread, the exact move the registry exists
+# to refuse. This hypothesis instead comes from outside the data: Jegadeesh
+# (1990) and Lehmann (1990) document one-month reversal in US equities on a
+# plain trailing return, and the horizon and the direction are both theirs.
+#
+# AND ITS CONFIRMATION DOES NOT COME FROM THIS WINDOW. A hypothesis registered
+# the day after a related result pointed the same way is still suggested by
+# that result, however external its literature. So what this measurement can
+# do is REFUSE it; what it cannot do is confirm it. Confirmation has to come
+# from the forward `daily_candidates` record (D42), which was written before
+# anybody looked.
+
+_h(
+    "short_term_reversal",
+    "prior_return_20d",
+    "Over about a month, price moves made by liquidity demand rather than news "
+    "are paid for by whoever supplies the other side, so the move reverses as "
+    "that premium is earned back",
+    "lower_is_better",
+    "mean_reversion",
+    registered_on=date(2026, 10, 27),
+    notes="Jegadeesh (1990) and Lehmann (1990): the documented one-month reversal effect. "
+    "EXTERNALLY MOTIVATED, not a re-registration of rsi_reset or relative_strength_vs_sector "
+    "with the sign turned round after they came back negative — the horizon and the direction "
+    "are the literature's. THIS WINDOW CAN ONLY REFUSE IT: registered the day after a related "
+    "result pointed the same way, it is suggested by that result whatever its provenance, so "
+    "confirmation comes from the forward daily_candidates record and never from here. Note it "
+    "is the deliberate opposite of momentum_12_1's construction, which skips the most recent "
+    "month precisely to keep this effect out.",
 )
 
 

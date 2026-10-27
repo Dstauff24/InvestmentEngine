@@ -78,6 +78,17 @@ it. So a bear-regime spread from the deep window is measured on the firms that
 came through — an optimistic ceiling, never an estimate. The fix is a
 point-in-time membership history (O22), which the engine does not have."""
 
+UNCOMPUTABLE_REGIME = "unknown"
+LABELLED_REGIMES = (*BEAR_REGIMES, UNCOMPUTABLE_REGIME)
+"""**THE `unknown` CELL IS LABELLED TOO, AND IT IS THE WORST CELL IN THE TABLE.**
+D45 tags a day `unknown` until the benchmark has 200 sessions, which over the
+O19 deep window means precisely the earliest dates — the 2008-09 crisis. So the
+one block whose regime nobody can compute is also the one furthest from today,
+with the thinnest symbol coverage in the report (~343 against a median of 397)
+and the most extreme spreads in it. Keying the label on bear-regime NAMES alone
+left it bare, which inverted O22's intent: the flag is there to mark where the
+bias is worst, and that is this cell."""
+
 
 def run(
     hypotheses: Sequence[Hypothesis],
@@ -157,7 +168,23 @@ def render(
 ) -> str:
     """The table, the bar, and what the bar does not cover."""
     p_values = {r.label: mt.two_sided_p(r.t_stat_newey_west or r.t_stat) for r in primary}
-    verdicts = {v.name: v for v in mt.adjust(p_values)}
+    # **THE REGISTERED DIRECTION REACHES THE VERDICT COLUMN.** It was validated
+    # at registration and then ignored here, so a cell pointing the OPPOSITE way
+    # to its hypothesis printed "survives both bars" — handing back exactly the
+    # discovery pre-registration exists to prevent. `low_volatility` measured
+    # +12.52% at 120 sessions, which is HIGH volatility outearning low: a
+    # contradiction of the registered `lower_is_better`, read by anyone skimming
+    # the column as a confirmed low-volatility premium.
+    expected = {
+        r.label: mt.expected_spread_sign(REGISTRY[r.measurable].direction)
+        for r in primary
+        if r.measurable in REGISTRY
+    }
+    observed = {
+        r.label: (0 if r.mean_spread is None else (1 if r.mean_spread > 0 else -1))
+        for r in primary
+    }
+    verdicts = {v.name: v for v in mt.adjust(p_values, expected=expected, observed=observed)}
     tests = next(iter(verdicts.values())).tests if verdicts else 0
     bh = next(iter(verdicts.values())).bh_threshold if verdicts else 0.0
     bonf = next(iter(verdicts.values())).bonferroni_threshold if verdicts else mt.ALPHA
@@ -233,7 +260,9 @@ def render(
     if regime_results:
         lines += ["", "DESCRIPTIVE SPLIT — by regime (longest horizon, raw basis)"]
         for regime, results in sorted(regime_results.items()):
-            flag = "   << SURVIVOR-BIASED UPPER BOUND" if regime in BEAR_REGIMES else ""
+            flag = (
+                "   << SURVIVOR-BIASED UPPER BOUND" if regime in LABELLED_REGIMES else ""
+            )
             lines.append(f"  {regime}{flag}")
             lines += [
                 f"    {r.measurable[:38]:<38} days {r.days:>4}  symbols/day ~{r.symbols_median:>3}"
@@ -241,14 +270,15 @@ def render(
                 for r in sorted(results, key=lambda r: r.measurable)
             ]
         lines += [
-            "  A BEAR CELL IS A CEILING, NOT AN ESTIMATE: the 2008-09 losers are absent from",
-            "  today's constituent list, so a bear-regime spread is measured on the companies",
-            "  that came through it. Read it as the best the signal could possibly have done.",
+            "  A LABELLED CELL IS A CEILING, NOT AN ESTIMATE: the 2008-09 losers are absent",
+            "  from today's constituent list, so the spread is measured on the companies that",
+            "  came through it. Read it as the best the signal could possibly have done.",
+            "  `unknown` is labelled for the same reason and is the WORST case here: a regime",
+            "  is unknown until the benchmark has 200 sessions (D45), which over this window",
+            "  means the earliest dates — the crisis itself, at the thinnest coverage.",
         ]
 
     if unmeasured:
-        from lab.registry import REGISTRY
-
         lines += [
             "",
             "UNMEASURED, and named rather than dropped (the test count is the bar):",
