@@ -447,8 +447,31 @@ def compute(
 # ── loading (the only part that touches the database) ───────────────────────
 
 
+# **`event_time` AND `alt_event_date` ARE SELECTED HERE BECAUSE `effective_report`
+# READS THEM, and for three evenings they were not.** D49 added
+# `events.alt_event_date` (migration 014) as the safeguard against FMP dating a
+# report too EARLY — the one error a reaction window cannot absorb, because the
+# true release can then fall after the close of T+1 and the engine reads an
+# actual that was not yet public. The column was populated, the function read
+# it, and this query did not fetch it, so `event.get("alt_event_date")` was
+# None on every live row and the safeguard was never in force. Measured when
+# found: 45 stored events carry a second opinion and 2 of them are LATER than
+# FMP's date, which is exactly the set the mechanism was built for.
+#
+# `event_time` was missing the same way, in the safe direction and still wrong:
+# 373 events carry a release hour from Finnhub (D49) that the live path never
+# saw, so every report was treated as `unknown` — the pessimistic reading, so
+# nothing was invented, but a confirmed `bmo` report could never be recognised
+# as tradeable at T+1 and `actual_is_knowable` refused every report on its own
+# date.
+#
+# `backtest/engine.py`'s EVENTS_SQL selected both all along, which is the worst
+# shape for a defect to take: the backtest and the live engine disagreed about
+# what date a report landed on, and nothing would ever have said which was
+# right.
 EVENTS_SQL = """
-    SELECT symbol, event_type, event_date, is_confirmed, dividend_amount,
+    SELECT symbol, event_type, event_date, event_time, alt_event_date,
+           is_confirmed, dividend_amount,
            eps_estimate, eps_actual, revenue_estimate, revenue_actual
     FROM   events
     WHERE  symbol = %s AND event_date BETWEEN %s AND %s

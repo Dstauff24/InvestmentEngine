@@ -476,3 +476,59 @@ def test_the_latest_report_is_chosen_on_the_effective_date():
     ]
     latest = cat.last_knowable_earnings(events, as_of=date(2026, 10, 23))
     assert cat.effective_report(latest)[0] == date(2026, 10, 22)
+
+
+# ── the live loader must fetch every field `effective_report` reads ─────────
+#
+# D49's safeguard was populated, read by the function, and NOT SELECTED by the
+# live query for three evenings, so `alt_event_date` was None on every live row
+# and the mechanism was never in force. `backtest/engine.py` selected it all
+# along, which made the backtest and the live engine disagree about what date a
+# report landed on.
+
+
+def test_the_live_events_query_selects_the_fields_D49_depends_on():
+    """A static check, because the failure was invisible at runtime: a missing
+    column reads as `None`, which is indistinguishable from "no second opinion
+    exists" — the overwhelmingly common case."""
+    from features.catalyst import EVENTS_SQL
+
+    for column in ("event_date", "event_time", "alt_event_date"):
+        assert column in EVENTS_SQL, (
+            f"`effective_report` reads {column!r}; a query that does not fetch it "
+            f"makes the safeguard silently inert"
+        )
+
+
+def test_the_live_and_backtest_event_queries_agree_on_those_fields():
+    """The two paths must not be able to date the same report differently.
+    Nothing would ever have said which was right."""
+    from backtest.engine import EVENTS_SQL as BACKTEST_SQL
+    from features.catalyst import EVENTS_SQL as LIVE_SQL
+
+    for column in ("event_time", "alt_event_date"):
+        assert (column in LIVE_SQL) == (column in BACKTEST_SQL), (
+            f"{column!r} is selected by one path and not the other"
+        )
+
+
+def test_the_later_provider_date_wins_through_the_loaded_shape():
+    """End to end on the dict the loader actually produces, not a hand-built
+    one — the bug lived in the gap between those two."""
+    from features.catalyst import effective_report
+
+    loaded = {
+        "symbol": "AON",
+        "event_type": "earnings",
+        "event_date": date(2026, 10, 28),
+        "alt_event_date": date(2026, 10, 29),
+        "event_time": "bmo",
+        "eps_estimate": 1.0,
+        "eps_actual": None,
+    }
+    assert effective_report(loaded) == (date(2026, 10, 29), "bmo")
+
+    # And with the two columns absent — the pre-fix shape — it silently falls
+    # back to FMP's earlier date, which is the behaviour that was live.
+    stripped = {k: v for k, v in loaded.items() if k not in ("alt_event_date", "event_time")}
+    assert effective_report(stripped) == (date(2026, 10, 28), "unknown")
