@@ -69,13 +69,27 @@ def _slice(by_day, start: date, end: date):
     return {day: obs for day, obs in by_day.items() if start <= day < end}
 
 
+BEAR_REGIMES = ("bear_calm", "bear_normal", "bear_volatile")
+"""**EVERY BEAR CELL IS A SURVIVOR-BIASED UPPER BOUND, and it is labelled as
+one on the report.** Survivorship bias is not uniform: it GROWS WITH DISTANCE
+FROM TODAY and is worst exactly in the bear markets, because the universe is
+today's constituent list and the companies that failed in 2008-09 are not in
+it. So a bear-regime spread from the deep window is measured on the firms that
+came through — an optimistic ceiling, never an estimate. The fix is a
+point-in-time membership history (O22), which the engine does not have."""
+
+
 def run(
     hypotheses: Sequence[Hypothesis],
     *,
     as_of: date,
     symbols: Sequence[str] | None = None,
-) -> tuple[list[Result], dict[str, list[Result]], dict[str, str]]:
-    """(primary results, {window: results}, {day: regime})."""
+) -> tuple[list[Result], dict[str, list[Result]], dict[str, str], dict]:
+    """(primary results, {window: results}, {day: regime}, {measurable: by_day}).
+
+    The cross-sections come back too, so the regime split can be taken without
+    reloading 433 symbols' bars a second time.
+    """
     providable = [h for h in hypotheses if h.measurable in providers.MEASURABLES]
     absent = [h.name for h in hypotheses if h.measurable not in providers.MEASURABLES]
     if absent:
@@ -109,13 +123,36 @@ def run(
             windowed[label].append(
                 measure(cut, measurable=h.name, horizon=h.horizons[-1], basis="raw")
             )
-    return primary, windowed, regimes
+    return primary, windowed, regimes, sections
+
+
+def by_regime(
+    hypotheses: Sequence[Hypothesis],
+    sections: dict,
+    regimes: dict,
+    *,
+    horizon_of=lambda h: h.horizons[-1],
+) -> dict[str, list[Result]]:
+    """{regime: results}, DESCRIPTIVE like the window split (see the module
+    docstring) — and every bear cell carries the survivorship label."""
+    out: dict[str, list[Result]] = {}
+    for regime in sorted(set(regimes.values())):
+        days = {day for day, tag in regimes.items() if tag == regime}
+        for h in hypotheses:
+            by_day = {d: obs for d, obs in sections.get(h.measurable, {}).items() if d in days}
+            if not by_day:
+                continue
+            out.setdefault(regime, []).append(
+                measure(by_day, measurable=h.name, horizon=horizon_of(h), basis="raw")
+            )
+    return out
 
 
 def render(
     primary: list[Result],
     windowed: dict[str, list[Result]],
     *,
+    regime_results: dict[str, list[Result]] | None = None,
     unmeasured: Sequence[str] = (),
 ) -> str:
     """The table, the bar, and what the bar does not cover."""
@@ -166,12 +203,47 @@ def render(
             f"{_num(r.mean_rank_ic, 3):>7}  {v.verdict}"
         )
 
+    # COVERAGE FIRST, because it conditions everything below it.
+    measured = [r for r in primary if r.days]
+    if measured:
+        widest = max(measured, key=lambda r: r.days)
+        lines += [
+            "",
+            "SYMBOL COVERAGE — how many symbols stood behind each daily cross-section",
+            f"  {widest.measurable}: {widest.days} day(s) "
+            f"{widest.first_day}..{widest.last_day}, "
+            f"symbols/day min {widest.symbols_min} / median {widest.symbols_median} / "
+            f"max {widest.symbols_max}",
+            "  SURVIVORSHIP GROWS WITH DISTANCE FROM TODAY. The universe is TODAY's",
+            "  constituent list, so the further back a date sits the more of the market that",
+            "  existed then is missing — and what is missing is not random, it is the firms",
+            "  that failed. A spread measured on the survivors of 2009 is an upper bound, and",
+            "  the symbol count is the only thing here that says by how much. O22 would fix it.",
+        ]
+
     for label, results in windowed.items():
         lines += ["", f"DESCRIPTIVE SPLIT — {label} (longest horizon, raw basis)"]
         lines += [
             f"  {r.measurable[:40]:<40} days {r.days:>4}  spread {_num(r.mean_spread):>8}  "
             f"t(NW) {_num(r.t_stat_newey_west):>7}"
             for r in sorted(results, key=lambda r: r.measurable)
+        ]
+
+    regime_results = regime_results or {}
+    if regime_results:
+        lines += ["", "DESCRIPTIVE SPLIT — by regime (longest horizon, raw basis)"]
+        for regime, results in sorted(regime_results.items()):
+            flag = "   << SURVIVOR-BIASED UPPER BOUND" if regime in BEAR_REGIMES else ""
+            lines.append(f"  {regime}{flag}")
+            lines += [
+                f"    {r.measurable[:38]:<38} days {r.days:>4}  symbols/day ~{r.symbols_median:>3}"
+                f"  spread {_num(r.mean_spread):>8}  t(NW) {_num(r.t_stat_newey_west):>7}"
+                for r in sorted(results, key=lambda r: r.measurable)
+            ]
+        lines += [
+            "  A BEAR CELL IS A CEILING, NOT AN ESTIMATE: the 2008-09 losers are absent from",
+            "  today's constituent list, so a bear-regime spread is measured on the companies",
+            "  that came through it. Read it as the best the signal could possibly have done.",
         ]
 
     if unmeasured:
@@ -221,9 +293,17 @@ def main(argv: list[str] | None = None) -> int:
         [REGISTRY[name] for name in args.hypothesis] if args.hypothesis else list(REGISTRY.values())
     )
     day = date.fromisoformat(args.as_of) if args.as_of else clock.session_date()
-    primary, windowed, _ = run(chosen, as_of=day, symbols=args.symbols)
+    primary, windowed, regimes, sections = run(chosen, as_of=day, symbols=args.symbols)
+    providable = [h for h in chosen if h.measurable in providers.MEASURABLES]
     absent = [h.name for h in chosen if h.measurable not in providers.MEASURABLES]
-    print(render(primary, windowed, unmeasured=absent))
+    print(
+        render(
+            primary,
+            windowed,
+            regime_results=by_regime(providable, sections, regimes),
+            unmeasured=absent,
+        )
+    )
     return 0
 
 

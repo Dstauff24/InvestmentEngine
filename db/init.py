@@ -45,6 +45,7 @@ EXPECTED_TABLES = [
     "news_articles",
     "option_chain_snapshots",
     "positions",
+    "price_basis_breaks",
     "prices_daily",
     "schema_migrations",
     "shadow_book",

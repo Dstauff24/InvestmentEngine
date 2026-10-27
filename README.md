@@ -382,6 +382,28 @@ ALLOW_LIVE_CALLS=1 python -m ingest.fmp_history --repair-split-basis  # only if 
 python -m jobs.price_basis_check                                      # must pass before step 5
 ```
 
+**WHAT THE CHECK ACTUALLY SAID, AND WHAT TO DO WITH EACH ANSWER (D57).** On the
+18-year window it reads 167 unambiguous splits (ratio >= 1.5) and **166 step by
+exactly their logged ratio, with none flat** — that is the evidence D24 always
+wanted, and it says the `non-split-adjusted` endpoint really does serve raw
+bars. A failure names its KIND and the two have different fixes:
+
+* `pre_adjusted` — the series does not step at all. The provider restated its
+  own history. `--repair-split-basis` re-sources those sessions; run it and
+  check again.
+* `ratio_mismatch` — the series stepped by the WRONG amount, so the action log
+  and the bars disagree about what the event was. **Do not run the repair**: FMP's
+  raw feed is its adjusted feed with that same log reversed out, so re-fetching
+  returns the same error. Decide whether the action is mis-logged, and if it is,
+  record a `price_basis_breaks` row — the pre-event era is then refused by
+  `load_bars` everywhere, which is what the engine does rather than adjust by a
+  factor it knows to be wrong.
+
+One break is recorded today: **WY 2010-07-20**, a REIT conversion whose $26.42
+special dividend was paid ~90% in stock and which FMP logs as a plain 2:1 split
+while the bars step 5.2484. The check prints every recorded break on each run,
+so what is quarantined is read rather than remembered.
+
 **Call budget:** `fmp.daily_call_budget` is 12,000 and step 2 costs ~2,170, so
 it fits beside a normal evening. The limiter is 600/min, so the floor on step 2
 is ~4 minutes of rate-limited waiting; the rest is parsing and ~1.9M upserts.

@@ -242,28 +242,43 @@ def load_symbol_bars(
     """
     stored = stored_bars(symbol)
     rows: list[dict] = []
+    # **A LATE START IS A LISTING DATE; A LATE START AFTER EARLIER DATA IS A
+    # HOLE.** The first version of this check warned whenever a chunk's oldest
+    # bar was far inside the window, and the live run produced 13 warnings that
+    # were all IPOs — APTV listed Nov 2011, ARES May 2014, ARM Sept 2023, BE
+    # July 2018. A log full of spurious "silent cap" warnings is worse than no
+    # check at all: it trains whoever reads it to skip the one that is real.
+    # Chunks run oldest-first, so "did an earlier chunk return anything" is
+    # exactly the discriminator — a symbol that existed and then has a missing
+    # year is a hole, and a symbol whose data simply starts late is a listing.
+    seen_any = False
     for lower, upper in chunks(start, end):
         batch = parse_bars(client.historical_bars_raw(symbol, start=lower, end=upper), symbol)
         if not batch:
             log.debug("%s: no bars in %s..%s", symbol, lower, upper)
             continue
-        # TRUNCATION CHECK, per chunk. A provider that silently returns a slice
-        # of what was asked for is how the engine ends up with a series that
-        # looks complete and is not; the only defence is comparing the oldest
-        # bar returned against the oldest one requested. Weekends and holidays
-        # make an exact match wrong, so the tolerance is generous and the test
-        # is for a MISSING YEAR rather than a missing week.
         oldest = min(r["session_date"] for r in batch)
-        if (oldest - lower).days > 370:
+        late = (oldest - lower).days > 370
+        if late and seen_any:
             log.warning(
-                "%s: asked for %s..%s and the oldest bar returned is %s — a year or more "
-                "is missing, which is what a silent cap looks like. Treating the chunk as "
-                "partial rather than complete",
+                "%s: asked for %s..%s and the oldest bar returned is %s, with earlier "
+                "chunks already carrying data — a year or more is MISSING FROM THE MIDDLE, "
+                "which is what a silent cap looks like. Treating the chunk as partial",
                 symbol,
                 lower,
                 upper,
                 oldest,
             )
+        elif late:
+            log.info(
+                "%s: first bars at %s inside %s..%s — consistent with a listing date, "
+                "not a truncated response",
+                symbol,
+                oldest,
+                lower,
+                upper,
+            )
+        seen_any = True
         rows.extend(batch)
     if not rows:
         log.warning("%s: FMP returned no bars for %s..%s", symbol, start, end)

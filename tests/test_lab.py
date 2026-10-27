@@ -20,6 +20,7 @@ from lab.cross_section import (
     quintile_buckets,
     spearman,
 )
+from lab.run import render
 
 START = date(2026, 1, 5)
 HORIZON = 5
@@ -396,3 +397,61 @@ def test_an_observation_with_NO_beta_drops_out_of_the_beta_basis():
     ]
     assert rows[0].excess(HORIZON, "beta") is None
     assert rows[-1].excess(HORIZON, "beta") == pytest.approx(float(MIN_SYMBOLS_PER_DAY - 1) - 1.0)
+
+
+# ── survivorship: the caveat the report must carry (O22) ────────────────────
+
+
+def test_every_result_carries_HOW_MANY_SYMBOLS_stood_behind_it():
+    """The universe is TODAY's constituent list, so the further back a date
+    sits the more of the market that existed then is missing — and what is
+    missing is not random, it is the firms that failed. The symbol count is the
+    only thing on the report that says by how much."""
+    days = {}
+    for i in range(10):
+        day = START + timedelta(days=i)
+        # Coverage GROWS over the window, as it does in reality.
+        n = MIN_SYMBOLS_PER_DAY + i * 5
+        days[day] = observations(day, [(f"S{j}", float(j), float(j) / 10) for j in range(n)])
+
+    result = measure(days, measurable="growing", horizon=HORIZON)
+    assert result.symbols_min == MIN_SYMBOLS_PER_DAY
+    assert result.symbols_max == MIN_SYMBOLS_PER_DAY + 45
+    assert result.symbols_min < result.symbols_median < result.symbols_max
+    assert result.first_day == START
+    assert result.last_day == START + timedelta(days=9)
+
+
+def test_a_BEAR_regime_cell_is_labelled_a_survivor_biased_upper_bound():
+    """Survivorship is not uniform: it is worst exactly in the bear markets,
+    because the 2008-09 losers are absent from today's list. So a bear cell is
+    a CEILING and the report says so on the line itself — a reader should not
+    have to remember which regimes were bull."""
+    from lab.run import BEAR_REGIMES, render
+
+    one = measure(
+        {START: observations(START, [(f"S{j}", float(j), float(j) / 10) for j in range(60)])},
+        measurable="x",
+        horizon=HORIZON,
+    )
+    body = render([one], {}, regime_results={"bear_volatile": [one], "bull_calm": [one]})
+
+    assert "bear_volatile   << SURVIVOR-BIASED UPPER BOUND" in body
+    assert "bull_calm\n" in body, "a bull cell carries no such flag"
+    assert "A BEAR CELL IS A CEILING, NOT AN ESTIMATE" in body
+    assert set(BEAR_REGIMES) == {"bear_calm", "bear_normal", "bear_volatile"}
+
+
+def test_the_report_states_that_survivorship_GROWS_with_distance():
+    """Not a generic disclaimer: the direction is the point. A number from 2009
+    is more biased than one from 2025, and the coverage line is what lets a
+    reader see it."""
+    one = measure(
+        {START: observations(START, [(f"S{j}", float(j), float(j) / 10) for j in range(60)])},
+        measurable="x",
+        horizon=HORIZON,
+    )
+    body = render([one], {})
+    assert "SURVIVORSHIP GROWS WITH DISTANCE FROM TODAY" in body
+    assert "symbols/day min" in body
+    assert "O22" in body

@@ -183,6 +183,46 @@ CREATE INDEX IF NOT EXISTS ix_corporate_actions_symbol_ex
     ON corporate_actions (symbol, ex_date DESC);
 
 
+-- ── Price basis breaks ──────────────────────────────────────────────────────
+--
+-- The date before which a symbol's stored bars cannot be joined to today's.
+-- D24 rests on `prices_daily` being RAW, and `price_basis_check` proves that
+-- by arithmetic every day: a raw series STEPS by the split ratio at the
+-- ex-date. Across the 18-year backfill 166 of 167 unambiguous splits step
+-- exactly as logged, so the assumption holds — and the one that does not
+-- fails a DIFFERENT way from Schwab's pre-adjusted candles, which is why it
+-- needs its own mechanism rather than a repair.
+--
+-- WY 2010-07-20: a REIT conversion paid a $26.42 special dividend ~90% in
+-- STOCK, FMP logged a plain 2:1 split, and the raw series steps 5.2484. FMP's
+-- own split-ADJUSTED series divides the pre-period by exactly 2.0 and STILL
+-- leaves a 2.62x cliff — because `non-split-adjusted` is the adjusted feed
+-- with the split log reversed back out, so one wrong log entry corrupts both
+-- series in opposite directions. There is nothing uncontaminated to re-fetch.
+--
+-- The era is REFUSED rather than repaired: inferring the true ratio from the
+-- observed step would use the price to fix the price, and with a stock
+-- dividend and a cash dividend going ex on the same date no split of 5.2484
+-- between them is identifiable from the bars at all.
+--
+-- A RECORDED BREAK IS A KNOWN STATE, NOT A FAILURE. `price_basis_check` fails
+-- only on violations absent from this table, and `features.technical.load_bars`
+-- drops the pre-break bars — the one chokepoint the lab, the backtest engine
+-- and `backtest.regime` already share. Post-break history is kept; it was
+-- never in doubt. Relational and UPDATE-able: this is a statement ABOUT
+-- history, not history, so the four append-only tables are untouched.
+
+CREATE TABLE IF NOT EXISTS price_basis_breaks (
+    symbol        TEXT        NOT NULL,
+    break_date    DATE        NOT NULL,
+    logged_ratio  NUMERIC(18, 8),
+    observed_step NUMERIC(18, 8),
+    reason        TEXT        NOT NULL,
+    recorded_on   DATE        NOT NULL DEFAULT CURRENT_DATE,
+    PRIMARY KEY (symbol, break_date)
+);
+
+
 -- ============================================================================
 -- 3. OPTION CHAIN SNAPSHOTS  — hypertable  (D7 / D22)
 -- ============================================================================

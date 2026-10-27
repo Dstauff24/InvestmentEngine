@@ -17,7 +17,8 @@ from datetime import date, timedelta
 import pytest
 
 from core import db, settings
-from features.adjustment import split_basis_violations
+from features import technical
+from features.adjustment import RATIO_MISMATCH, split_basis_violations
 from jobs import price_basis_check
 from tests.dbguard import assert_safe_database
 
@@ -45,7 +46,21 @@ def seeded():
 def _clean() -> None:
     db.execute("DELETE FROM prices_daily WHERE symbol = %s", (SYMBOL,))
     db.execute("DELETE FROM corporate_actions WHERE symbol = %s", (SYMBOL,))
+    db.execute("DELETE FROM price_basis_breaks WHERE symbol = %s", (SYMBOL,))
     db.execute("DELETE FROM tickers WHERE symbol = %s", (SYMBOL,))
+    technical.reset_basis_break_cache()
+
+
+def record_break(day: date = EX_DATE) -> None:
+    db.execute(
+        """
+        INSERT INTO price_basis_breaks (symbol, break_date, logged_ratio, observed_step, reason)
+        VALUES (%s, %s, 2.0, 5.2484, 'test')
+        ON CONFLICT (symbol, break_date) DO NOTHING
+        """,
+        (SYMBOL, day),
+    )
+    technical.reset_basis_break_cache()
 
 
 def add_split(ratio: float, ex_date: date = EX_DATE) -> None:
@@ -160,3 +175,103 @@ def test_the_job_records_a_run_and_passes_on_a_raw_series():
     )
     assert row["status"] == "success"
     assert row["is_critical"] is False, "a check buys no history; it must not block the day"
+
+
+# ── the two kinds, and a recorded break (O19) ───────────────────────────────
+
+
+def test_a_wrong_sized_step_is_a_ratio_mismatch_not_pre_adjustment():
+    """WY's shape: the bars DID step, by 5.25 against a logged 2:1.
+
+    Calling this pre-adjustment would send an operator to
+    `--repair-split-basis`, which re-fetches the same bad numbers: FMP's raw
+    feed is its adjusted feed with the split log reversed out.
+    """
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+
+    found = violations()
+    assert len(found) == 1
+    assert found[0]["kind"] == RATIO_MISMATCH
+    assert found[0]["observed_step"] == pytest.approx(5.2484, abs=1e-4)
+
+
+def test_a_recorded_break_is_a_known_state_rather_than_a_violation():
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+    assert violations(), "unrecorded, it fails"
+
+    record_break()
+    assert violations() == [], "recorded, it is a deliberate refusal"
+
+
+def test_a_recorded_break_is_still_reported_when_asked_for():
+    """The check prints what is quarantined, so nobody has to remember it."""
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+    record_break()
+
+    everything = [
+        v for v in split_basis_violations(as_of=AS_OF, include_recorded=True)
+        if v["symbol"] == SYMBOL
+    ]
+    assert len(everything) == 1
+    assert everything[0]["recorded"] is True
+
+
+def test_the_job_passes_with_a_recorded_break_and_names_it_in_the_run():
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+    record_break()
+
+    assert price_basis_check.run(as_of=AS_OF) == 0
+    row = db.fetch_one(
+        "SELECT status, details FROM job_runs WHERE job_name = %s ORDER BY started_at DESC LIMIT 1",
+        (price_basis_check.JOB_NAME,),
+    )
+    assert row["status"] == "success"
+    recorded = row["details"]["recorded_breaks"]
+    assert len(recorded) == 1
+    assert SYMBOL in recorded[0] and "ratio_mismatch" in recorded[0]
+
+
+def test_a_ratio_mismatch_message_does_not_send_the_operator_to_the_repair():
+    """The remedy depends on the kind; re-sourcing cannot fix this one."""
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+
+    with pytest.raises(price_basis_check.BasisViolation) as exc:
+        price_basis_check.run(as_of=AS_OF)
+    message = str(exc.value)
+    assert "--repair-split-basis" not in message
+    assert "price_basis_breaks" in message
+
+
+# ── and the refusal reaches every reader ────────────────────────────────────
+
+
+def test_load_bars_drops_the_refused_era():
+    """`features.technical.load_bars` is the chokepoint the lab, the backtest
+    engine and `backtest.regime` all read through, so one lookup covers them."""
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+    technical.reset_basis_break_cache()
+
+    before = technical.load_bars(SYMBOL, as_of=AS_OF, lookback_days=100_000)
+    assert len(before) == 10
+
+    record_break()
+    after = technical.load_bars(SYMBOL, as_of=AS_OF, lookback_days=100_000)
+    assert len(after) == 5
+    assert after["session_date"].iloc[0] == EX_DATE, "the ex-date bar is the good side"
+
+
+def test_a_date_entirely_inside_the_refused_era_returns_nothing():
+    """Not a short series on a bad basis: nothing. The standing `features/`
+    convention then makes every downstream reading abstain."""
+    add_split(2.0)
+    seed_series(pre=83.66, post=15.94)
+    record_break()
+
+    bars = technical.load_bars(SYMBOL, as_of=EX_DATE - timedelta(days=1), lookback_days=100_000)
+    assert bars.empty

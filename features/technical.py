@@ -37,7 +37,7 @@ from itertools import pairwise
 import pandas as pd
 
 from core import config, db
-from features.adjustment import adjust_bars
+from features.adjustment import adjust_bars, basis_breaks, drop_pre_break
 
 log = logging.getLogger(__name__)
 
@@ -970,11 +970,42 @@ def load_bars(symbol: str, *, as_of: date, lookback_days: int = 400) -> pd.DataF
     rows = db.fetch_all(BARS_SQL, (symbol, as_of))
     if not rows:
         return pd.DataFrame(columns=["session_date", "open", "high", "low", "close", "volume"])
-    bars = pd.DataFrame(rows).tail(lookback_days).reset_index(drop=True)
+    bars = pd.DataFrame(rows)
+    # A RECORDED BASIS BREAK IS APPLIED BEFORE THE LOOKBACK IS CUT, so a symbol
+    # whose early history is refused gets a SHORT frame rather than a long one
+    # padded with bars on an unjoinable basis. Everything that reads history
+    # comes through here — the lab, `backtest.engine`, `backtest.regime` — which
+    # is the only reason one lookup can cover them all (O19).
+    bars = drop_pre_break(bars, _basis_break(symbol))
+    if bars.empty:
+        return pd.DataFrame(columns=["session_date", "open", "high", "low", "close", "volume"])
+    bars = bars.tail(lookback_days).reset_index(drop=True)
     actions = load_actions(symbol, as_of=as_of)
     # SPLIT-ONLY: see the module docstring. Dividend-adjusted MAs do not match
     # the chart the human is looking at.
     return adjust_bars(bars, actions, mode="split_only", as_of=as_of, strict=False)
+
+
+_BREAKS: dict[str, date] | None = None
+
+
+def _basis_break(symbol: str) -> date | None:
+    """The symbol's basis break, from a table read once per process.
+
+    Cached like the sector composites in `scoring/runner.py` and for the same
+    reason: a walk calls `load_bars` once per symbol per session, and the table
+    holds a handful of rows that only change when an operator records one.
+    """
+    global _BREAKS
+    if _BREAKS is None:
+        _BREAKS = basis_breaks()
+    return _BREAKS.get(symbol)
+
+
+def reset_basis_break_cache() -> None:
+    """Forget the cached table. For tests and for a long-lived process."""
+    global _BREAKS
+    _BREAKS = None
 
 
 def load_actions(symbol: str, *, as_of: date) -> pd.DataFrame:

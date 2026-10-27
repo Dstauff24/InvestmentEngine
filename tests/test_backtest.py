@@ -1467,3 +1467,26 @@ def test_a_single_year_needs_only_one_chunk():
     from ingest.fmp_history import chunks
 
     assert len(chunks(date(2026, 1, 1), date(2026, 10, 21))) == 1
+
+
+def test_a_LATE_START_is_a_listing_date_and_not_a_truncated_response():
+    """The live run produced 13 "silent cap" warnings and every one was an IPO
+    — APTV listed Nov 2011, ARES May 2014, ARM Sept 2023, BE July 2018. A log
+    full of spurious warnings is worse than no check: it trains whoever reads
+    it to skip the one that is real.
+
+    Chunks run oldest-first, so "did an earlier chunk return data" is the
+    discriminator. A symbol that existed and then has a missing year is a HOLE;
+    one whose data simply starts late is a LISTING.
+    """
+    import inspect
+
+    from ingest import fmp_history
+
+    source = inspect.getsource(fmp_history.load_symbol_bars)
+    assert "late and seen_any" in source, "a hole needs earlier data to be a hole"
+    assert "consistent with a listing date" in source
+    # The warning must be reachable ONLY with earlier data present.
+    warn_at = source.index("MISSING FROM THE MIDDLE")
+    guard_at = source.index("if late and seen_any:")
+    assert guard_at < warn_at

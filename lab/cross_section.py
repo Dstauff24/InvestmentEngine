@@ -112,6 +112,18 @@ class Result:
     mean_rank_ic: float | None
     ic_t_stat: float | None
     quintile_means: tuple[float, ...] = ()
+    symbols_min: int = 0
+    symbols_median: int = 0
+    symbols_max: int = 0
+    """**HOW MANY SYMBOLS STOOD BEHIND THIS NUMBER, per day.** Required on every
+    deep-window result (O22): the universe is TODAY's constituent list, so the
+    further back a date is, the more of the market that existed then is missing
+    — and what is missing is not random, it is the companies that failed. A
+    spread measured on 180 survivors of 2009 and one measured on 430 symbols of
+    2025 are different claims, and the count is the only thing on the report
+    that says so."""
+    first_day: date | None = None
+    last_day: date | None = None
 
     @property
     def label(self) -> str:
@@ -273,12 +285,18 @@ def measure(
         for (_, r), b in zip(usable, assignment, strict=True):
             buckets[b].append(r)
 
+    counts = sorted(s.symbols for s in kept)
     return Result(
         measurable=measurable,
         horizon=horizon,
         basis=basis,
         days=len(kept),
-        symbol_days=sum(s.symbols for s in kept),
+        symbol_days=sum(counts),
+        symbols_min=counts[0] if counts else 0,
+        symbols_median=counts[len(counts) // 2] if counts else 0,
+        symbols_max=counts[-1] if counts else 0,
+        first_day=min((s.on for s in kept), default=None),
+        last_day=max((s.on for s in kept), default=None),
         mean_spread=statistics.fmean(series) if series else None,
         t_stat=_t_stat(series),
         t_stat_newey_west=newey_west_t(series, horizon),

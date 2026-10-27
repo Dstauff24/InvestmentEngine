@@ -249,16 +249,53 @@ MIN_UNAMBIGUOUS_RATIO = 1.5
 BASIS_TOLERANCE = 0.25
 
 
-def split_basis_violations(*, as_of: date) -> list[dict]:
-    """Splits whose stored series does NOT step by the ratio: adjusted bars.
+# A violation NAMES ITS KIND, because the two have different causes and
+# different fixes and the message used to assert the first one.
+#
+#   PRE_ADJUSTED    the series does not step at all. The provider restated its
+#                   own history (Schwab's candles), so the stored bars are
+#                   adjusted and read-time adjustment double-counts. Re-source
+#                   the affected sessions from a raw feed: repairable.
+#
+#   RATIO_MISMATCH  the series stepped, by the WRONG amount. The action log and
+#                   the bars disagree about what the EVENT was, and FMP's raw
+#                   feed is its adjusted feed with that same log reversed out,
+#                   so both of its series carry the error. Nothing can be
+#                   re-sourced; the pre-event era is refused via
+#                   `price_basis_breaks`.
+PRE_ADJUSTED = "pre_adjusted"
+RATIO_MISMATCH = "ratio_mismatch"
 
-    One row per split that looks pre-adjusted, with the ratio the log claims
-    and the step the bars actually show. An empty list is the assertion D24
-    rests on, checked rather than assumed.
+# How close to 1.0 counts as "did not step at all". Wider than BASIS_TOLERANCE
+# because the ex-date bar carries a real trading day: a 4% move on the day is a
+# flat series, not a 1.04-for-1 split.
+FLAT_TOLERANCE = 0.05
+
+
+def classify_basis_violation(ratio: float, observed: float) -> str | None:
+    """`None` when the series stepped as logged, else the kind of mismatch."""
+    if abs(observed - ratio) <= ratio * BASIS_TOLERANCE:
+        return None
+    return PRE_ADJUSTED if abs(observed - 1.0) <= FLAT_TOLERANCE else RATIO_MISMATCH
+
+
+def split_basis_violations(*, as_of: date, include_recorded: bool = False) -> list[dict]:
+    """Splits whose stored series does not step by its logged ratio.
+
+    One row per mismatch, carrying the ratio the log claims, the step the bars
+    actually show, and the `kind` that says which failure it is. An empty list
+    is the assertion D24 rests on, checked rather than assumed.
+
+    Breaks recorded in `price_basis_breaks` are EXCLUDED by default: a recorded
+    break is a deliberate, visible refusal of that era rather than an open
+    defect, and `load_bars` already drops the bars it covers. Pass
+    `include_recorded=True` to see them anyway — the check prints them, so an
+    operator reads what is quarantined instead of having to remember.
     """
     from core import db
 
     rows = db.fetch_all(BASIS_CHECK_SQL, {"as_of": as_of, "min_ratio": MIN_UNAMBIGUOUS_RATIO})
+    recorded = basis_breaks()
     out = []
     for row in rows:
         before, after = row["close_before"], row["close_after"]
@@ -266,13 +303,47 @@ def split_basis_violations(*, as_of: date) -> list[dict]:
             continue
         ratio = float(row["split_ratio"])
         observed = float(before) / float(after)
-        if abs(observed - ratio) > ratio * BASIS_TOLERANCE:
-            out.append(
-                {
-                    "symbol": row["symbol"],
-                    "ex_date": row["ex_date"],
-                    "ratio": ratio,
-                    "observed_step": round(observed, 4),
-                }
-            )
+        kind = classify_basis_violation(ratio, observed)
+        if kind is None:
+            continue
+        known = recorded.get(row["symbol"]) == row["ex_date"]
+        if known and not include_recorded:
+            continue
+        out.append(
+            {
+                "symbol": row["symbol"],
+                "ex_date": row["ex_date"],
+                "ratio": ratio,
+                "observed_step": round(observed, 4),
+                "kind": kind,
+                "recorded": known,
+            }
+        )
     return out
+
+
+def basis_breaks() -> dict[str, date]:
+    """`{symbol: break_date}` — the first session each symbol can be read from.
+
+    One query, because every caller wants the whole (tiny) table and `load_bars`
+    runs once per symbol per session in a walk. The table has no row for the
+    overwhelming majority of symbols and the dict is the fast path for them.
+    """
+    from core import db
+
+    rows = db.fetch_all("SELECT symbol, break_date FROM price_basis_breaks")
+    return {r["symbol"]: r["break_date"] for r in rows or []}
+
+
+def drop_pre_break(bars: pd.DataFrame, break_date: date | None) -> pd.DataFrame:
+    """Bars from `break_date` forward. Pure; `None` returns the frame unchanged.
+
+    The dropped era is not recoverable from any series the provider serves (see
+    `db/migrations/022_price_basis_breaks.sql`), so this is the standing
+    `features/` convention applied to a whole stretch of history: refuse it
+    rather than hand back a plausible-looking wrong number.
+    """
+    if break_date is None or bars is None or bars.empty:
+        return bars
+    keep = _dates(bars["session_date"]) >= break_date
+    return bars.loc[keep].reset_index(drop=True)

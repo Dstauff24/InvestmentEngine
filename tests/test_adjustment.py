@@ -7,6 +7,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from features import adjustment
 from features.adjustment import AdjustmentError, adjust_bars, compute_adjustment_factors
 
 
@@ -299,3 +300,49 @@ def test_a_spinoff_is_not_yet_applied_as_a_factor():
     acts = actions([{"action_type": "spinoff", "ex_date": "2026-10-07", "cash_amount": 5.0}])
     factors = compute_adjustment_factors(FIVE_DAYS, acts, mode="total_return")
     assert (factors["price_factor"] == 1.0).all()
+
+
+# ── basis violations name their kind (O19) ──────────────────────────────────
+#
+# The two failures have different causes and different fixes, and the check's
+# message used to assert the first one for both.
+
+
+def test_a_series_stepping_as_logged_is_no_violation():
+    assert adjustment.classify_basis_violation(25.0, 25.0) is None
+    assert adjustment.classify_basis_violation(10.0, 10.4) is None, "the ex-date trades too"
+
+
+def test_a_flat_series_is_pre_adjusted():
+    """BKNG's shape: a 25-for-1 and the stored bars do not move."""
+    assert adjustment.classify_basis_violation(25.0, 1.0) == adjustment.PRE_ADJUSTED
+    assert adjustment.classify_basis_violation(2.0, 1.03) == adjustment.PRE_ADJUSTED
+
+
+def test_a_series_stepping_the_wrong_amount_is_a_ratio_mismatch():
+    """WY 2010-07-20: logged 2:1, the bars stepped 5.2484.
+
+    This is NOT pre-adjustment — the series stepped, so the bars are raw. The
+    action log is wrong about what the event was, and because FMP's raw feed is
+    its adjusted feed with that log reversed back out, re-sourcing returns the
+    same error. Hence a different kind with a different remedy.
+    """
+    assert adjustment.classify_basis_violation(2.0, 5.2484) == adjustment.RATIO_MISMATCH
+
+
+def test_drop_pre_break_keeps_the_break_date_itself():
+    """The ex-date bar already trades on the new basis; it is the good side."""
+    bars = pd.DataFrame(
+        {
+            "session_date": [date(2010, 7, 16), date(2010, 7, 19), date(2010, 7, 20)],
+            "close": [81.0, 83.66, 15.94],
+        }
+    )
+    kept = adjustment.drop_pre_break(bars, date(2010, 7, 20))
+    assert list(kept["session_date"]) == [date(2010, 7, 20)]
+    assert list(kept.index) == [0], "the index is reset so callers can position-slice"
+
+
+def test_drop_pre_break_without_a_break_changes_nothing():
+    bars = pd.DataFrame({"session_date": [date(2010, 7, 16)], "close": [81.0]})
+    assert adjustment.drop_pre_break(bars, None) is bars
