@@ -58,6 +58,21 @@ class Hypothesis:
     stage: int = 1
     shape: str = "cross_section"
     notes: str = ""
+    confirmation_withheld: str = ""
+    """**WHY THIS WINDOW CANNOT CONFIRM THE HYPOTHESIS, when it cannot.**
+
+    Non-empty marks a hypothesis whose measurement here is admissible as a
+    REFUSAL and never as a confirmation, and the report carries the reason on
+    every one of its rows plus a footnote. The case it was added for is a
+    hypothesis registered AFTER a related result was already seen: externally
+    motivated (so not a sign flip) and still suggested by what had been seen
+    (so not independent of it). Those two facts coexist, and a result printed
+    without the second would be read as a clean out-of-sample confirmation.
+
+    The text lives here rather than in the renderer because it is part of the
+    pre-registration — it was decided before the measurement, like the
+    direction and the rationale.
+    """
 
     def __post_init__(self) -> None:
         if len(self.rationale.strip()) < MIN_RATIONALE_CHARS:
@@ -388,6 +403,10 @@ _h(
     "lower_is_better",
     "mean_reversion",
     registered_on=date(2026, 10, 27),
+    confirmation_withheld=(
+        "in-window, registered after related results were seen; "
+        "confirmation from forward daily_candidates only"
+    ),
     notes="Jegadeesh (1990) and Lehmann (1990): the documented one-month reversal effect. "
     "EXTERNALLY MOTIVATED, not a re-registration of rsi_reset or relative_strength_vs_sector "
     "with the sign turned round after they came back negative — the horizon and the direction "

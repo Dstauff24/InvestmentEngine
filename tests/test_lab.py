@@ -545,3 +545,45 @@ def test_the_uncomputable_regime_cell_carries_the_survivorship_label():
     assert "bull_calm\n" in body, "a bull cell still carries no flag"
     assert "unknown` is labelled for the same reason" in body
     assert "unknown" in LABELLED_REGIMES
+
+
+# ── a hypothesis this window cannot confirm says so on every row ────────────
+
+
+def test_a_withheld_hypothesis_is_marked_on_every_row_and_footnoted():
+    """`short_term_reversal` is externally motivated (so not a sign flip) AND
+    registered after a related result was seen (so not independent of it). Both
+    are true, and a result printed without the second reads as a clean
+    out-of-sample confirmation."""
+    from lab.registry import REGISTRY
+    from lab.run import render
+
+    results = [
+        measure(
+            {START: observations(START, [(f"S{j}", float(j), float(j) / 10) for j in range(60)])},
+            measurable="short_term_reversal",
+            horizon=h,
+        )
+        for h in (5, 10, 20)
+    ]
+    body = render(results, {})
+
+    assert body.count("<< CANNOT CONFIRM HERE") == 3, "every row, not just the first"
+    assert "admissible as a REFUSAL of the hypothesis, never as" in body
+    assert REGISTRY["short_term_reversal"].confirmation_withheld in body
+    assert "confirmation from forward daily_candidates only" in body
+
+
+def test_a_hypothesis_with_nothing_withheld_carries_no_marker():
+    """The marker has to mean something, so it cannot appear by default."""
+    from lab.run import render
+
+    one = measure(
+        {START: observations(START, [(f"S{j}", float(j), float(j) / 10) for j in range(60)])},
+        measurable="rsi_reset",
+        horizon=HORIZON,
+    )
+    body = render([one], {})
+
+    assert "CANNOT CONFIRM HERE" not in body
+    assert "admissible as a REFUSAL" not in body

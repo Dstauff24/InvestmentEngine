@@ -222,13 +222,37 @@ def render(
         f"{'t(NW)':>7} {'IC':>7}  verdict",
         "-" * 112,
     ]
+    # A hypothesis this window cannot CONFIRM carries the reason on every one of
+    # its rows, not once underneath them: a verdict read on its own line is how
+    # "survives" came to stand in for a contradiction, and a caveat printed only
+    # in a footnote is the same mistake with more steps.
+    withheld = sorted(
+        {
+            REGISTRY[r.measurable].confirmation_withheld
+            for r in primary
+            if r.measurable in REGISTRY and REGISTRY[r.measurable].confirmation_withheld
+        }
+    )
     for r in sorted(primary, key=lambda r: (r.measurable, r.horizon, r.basis)):
         v = verdicts[r.label]
+        note = (
+            "   << CANNOT CONFIRM HERE"
+            if r.measurable in REGISTRY and REGISTRY[r.measurable].confirmation_withheld
+            else ""
+        )
         lines.append(
             f"{r.label[:52]:<52} {r.days:>5} {_num(r.mean_spread):>8} "
             f"{_num(r.t_stat):>7} {_num(r.t_stat_newey_west):>7} "
-            f"{_num(r.mean_rank_ic, 3):>7}  {v.verdict}"
+            f"{_num(r.mean_rank_ic, 3):>7}  {v.verdict}{note}"
         )
+    if withheld:
+        lines += [
+            "",
+            "CANNOT CONFIRM HERE — admissible as a REFUSAL of the hypothesis, never as",
+            "support for it. A result that clears the bar on these rows is NOT evidence FOR",
+            "the signal; only a result that fails is evidence against it.",
+        ]
+        lines += [f"  * {reason}" for reason in withheld]
 
     # COVERAGE FIRST, because it conditions everything below it.
     measured = [r for r in primary if r.days]
