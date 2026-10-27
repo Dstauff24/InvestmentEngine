@@ -151,11 +151,49 @@ accounts:
   # multi-account handling.
   single_account_tax_type: taxable
 
-  # The ONE line the target is measured against while the account is small.
-  # `null` until the symbol is stated, and the target logic REFUSES rather than
-  # guessing: a drift report against an ETF nobody chose is advice about
-  # somebody else's portfolio.
-  core_etf: null
+  # ── The CORE LAYER's target (D52's primary product) ─────────────────────
+  # ONE LINE, 100%: Schwab's S&P 500 index fund. Stated by the operator; the
+  # target logic REFUSES rather than guessing when it is null, because a drift
+  # report against a fund nobody chose is advice about somebody else's
+  # portfolio.
+  core_symbol: SWPPX
+  # **A MUTUAL FUND IS BOUGHT IN DOLLARS, NOT SHARES**, at the day's NAV — so
+  # contribution guidance says "buy $500 of SWPPX" and never a share count.
+  # Stated here rather than inferred from Schwab's `assetType`, because the
+  # guidance has to be right on the first evening, before any position exists.
+  core_symbol_kind: mutual_fund
+  # DIVIDENDS ARE REINVESTED (the operator enables it at Schwab), which is why
+  # the December distribution is RETURN and not a contribution: with
+  # reinvestment the NAV falls and the share count rises, total value is
+  # continuous, and no cash moves — so `decision/performance.py` infers no flow
+  # and the return series carries the distribution exactly as it should.
+  core_dividends_reinvested: true
+  # A DIVIDEND-INCOME TILT WAS CONSIDERED AND DECLINED (Oct 26 2026). In a
+  # growth-phase TAXABLE account a yield tilt pays tax on income that is not
+  # needed yet and gives up total return for a payment schedule nobody is
+  # living on. Revisit only if the goal changes to income — and record that as
+  # a decision, because the alternative is drifting into an income portfolio
+  # one plausible purchase at a time.
+  #
+  # DELIBERATELY A COMMENT AND NOT A KEY: nothing reads it, and a key that
+  # loads while nothing reads it is how an operator comes to believe a rule is
+  # in force when it is not (the same reason D49 rejects a retired key and the
+  # unread-config guard exists). The decision lives here and in O17's log entry.
+
+  # Once core value crosses this, the engine PROPOSES an international index
+  # allocation of roughly this target share — as a RECOMMENDATION FOR REVIEW,
+  # never an automatic purchase (D52: a guess in this layer is advice, and an
+  # automatic one is advice nobody asked for).
+  core_diversification_threshold_usd: 10000   # [OPEN] #87
+  core_international_target_pct: 20.0         # [OPEN] #88
+
+  # The core is benchmarked to the S&P 500 TOTAL RETURN (D19/D35), which the
+  # engine prices as SPY. A persistent gap WIDER than the fund's own expense
+  # ratio is an alert: an index fund should trail its index by about its fee
+  # and nothing more, so a bigger gap is either the wrong fund, a wrong
+  # benchmark, or a tracking problem — all three worth knowing about.
+  core_expense_ratio_pct: 0.02
+  core_tracking_tolerance_pct: 0.15          # [OPEN] #89
 
   # D55: the sleeve trades real capital only when a strategy is past SHADOW and
   # PAPER *and* the account can fund this much. Below it, 2.5% of the sleeve is

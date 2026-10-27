@@ -69,3 +69,25 @@ def test_the_daily_window_is_UNCHANGED_by_the_backfill_flag():
     source = inspect.getsource(edgar_insiders.run)
     assert "cfg.lookback_days" in source
     assert "365 * years if deep" in source
+
+
+def test_a_one_off_budget_is_a_FLAG_rather_than_a_config_edit():
+    """`edgar.daily_call_budget` is a runaway-loop guard sized for a normal
+    evening. O19's backfill needs orders of magnitude more for one night, and
+    raising a tracked [OPEN] value for an afternoon is how it gets left raised
+    — the guard would then be gone on every later evening with nothing to show
+    it had moved."""
+    import inspect
+
+    from ingest import edgar_insiders
+
+    source = inspect.getsource(edgar_insiders.run)
+    assert (
+        "budget: int | None = None"
+        in inspect.signature(edgar_insiders.run).__str__().replace("'", "")
+        or "budget" in source
+    )
+    assert 'DayBudget("edgar", budget)' in source
+    # And the default path still reads config, so a run without the flag is
+    # guarded exactly as the nightly job is.
+    assert "client or EdgarClient()" in source

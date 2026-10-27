@@ -83,7 +83,7 @@ POSITION_UPSERT = """
         average_price     = EXCLUDED.average_price,
         market_value      = EXCLUDED.market_value,
         -- COALESCE: a bucket the operator set by hand must survive a sync that
-        -- has nothing to say about it (`core_etf` unset, or a different symbol).
+        -- has nothing to say about it (`core_symbol` unset, or another symbol).
         bucket            = COALESCE(EXCLUDED.bucket, positions.bucket),
         cost_basis        = EXCLUDED.cost_basis,
         unrealized_pl     = EXCLUDED.unrealized_pl,
@@ -149,16 +149,20 @@ def tax_type_for(accounts: list[dict], *, cfg=None) -> str | None:
 
 
 def bucket_for(symbol: str, *, cfg=None) -> str | None:
-    """D17's bucket, for the one case the engine can know: the core ETF.
+    """The bucket, for the one case the engine can know: the CORE holding.
 
     A position's bucket is a statement of INTENT and the broker has no idea
-    which — so everything else stays NULL for the operator. The core ETF is the
-    exception because the operator has already stated it in config, and while
-    `core_etf` is `null` nothing is marked at all.
+    which — so everything else stays NULL for the operator. `accounts.core_symbol`
+    is the exception because the operator has already stated it, and while it is
+    `null` nothing is marked at all.
+
+    Returns `core` (migration 021) rather than `etf`: D17's five buckets are the
+    GROWTH sleeve's risk categories and the core layer is a separate scoreboard
+    under D35 — and SWPPX is a mutual fund, so `etf` would be wrong twice.
     """
-    core = (cfg or config.risk()).accounts.core_etf
+    core = (cfg or config.risk()).accounts.core_symbol
     if core and symbol.upper() == core.strip().upper():
-        return "etf"
+        return "core"
     return None
 
 

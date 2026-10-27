@@ -141,6 +141,10 @@ class DigestContent:
     """D38's excess (D42 amended): ideas whose sector is already at its limit.
     Surfaced as INFORMATION in a section of their own — outside the actionable
     N, consuming no slot, reserving no book state, and not Shadow Book calls."""
+    core: object | None = None
+    """O17's core-layer plan (`decision.core_plan.CorePlan`), or None when it
+    could not be read. Typed loosely on purpose: the digest renders strings and
+    must not import the adviser's model to do it."""
     evaluated: int = 0
     """Symbols the slot walk looked at."""
     considered: int = 0
@@ -194,6 +198,23 @@ class DigestContent:
         return bool(self.cards) and not self.scoring_incomplete
 
 
+def _core_plan_or_none():
+    """O17's plan, or None if it cannot be read.
+
+    NEVER RAISES. The digest is non-critical in the pipeline (a digest that
+    failed to send is a bad evening; one that stopped the snapshot jobs would
+    be a lost day of unbuyable history), and the newest section in it must not
+    be the thing that takes it down.
+    """
+    try:
+        from decision.core_plan import core_plan
+
+        return core_plan()
+    except Exception:  # a broken section must not take the digest down
+        log.exception("digest: the core-layer plan could not be read; section omitted")
+        return None
+
+
 def build_digest(
     cards: list[str],
     candidates: list[dict],
@@ -204,6 +225,7 @@ def build_digest(
     as_of: date | None = None,
     evaluated: int = 0,
     considered: int = 0,
+    core: object | None = None,
 ) -> DigestContent:
     """Gather the day's material. `candidates` are the top-ranked scored rows.
 
@@ -233,6 +255,11 @@ def build_digest(
         considered=0 if blocked else considered,
         watch_only=[] if blocked else (watch_only or []),
         candidates=[] if blocked else candidates[:MAX_CANDIDATES],
+        # O17: read even on an incomplete evening. A failed SCORING pass says
+        # nothing about the account, and the core layer's plan is not a claim
+        # about ideas — blanking it with the sleeve's sections would hide the
+        # product because the experiment failed.
+        core=core if core is not None else _core_plan_or_none(),
         stats=db.fetch_one(STATS, (day,)),
         closed=db.fetch_all(CHANGES, (day,)),
         open_calls=db.fetch_all(OPEN_CALLS),
@@ -312,6 +339,7 @@ def render(content: DigestContent) -> tuple[str, str]:
     # cannot print either.
     lines.extend(_watch_only_section(content))
     lines.extend(_no_setup_section(content))
+    lines.extend(_core_section(content))
 
     if content.closed:
         lines.append("─" * 40)
@@ -332,6 +360,28 @@ def render(content: DigestContent) -> tuple[str, str]:
         lines.append("")
 
     return subject, "\n".join(lines).rstrip() + "\n"
+
+
+def _core_section(content: DigestContent) -> list[str]:
+    """D52's PRIMARY PRODUCT, printed whether or not the sleeve said anything.
+
+    The core layer has a result every evening — cash to deploy, a target to
+    hold to, a tracking gap to watch — and none of it depends on a recipe
+    firing. It is DELIBERATELY NOT inside the sleeve's branches: an evening
+    with no ideas is a normal evening for the core, and burying its plan under
+    "no setups today" would file the product under the experiment.
+
+    Silent when it has nothing to say. A line that appears nightly saying "no
+    new cash" is a line people stop reading, and the absence of a contribution
+    is not news.
+    """
+    if not content.core or not content.core.lines:
+        return []
+    return [
+        "CORE (the plan you already decided):",
+        *(f"  {line}" for line in content.core.lines),
+        "",
+    ]
 
 
 def _watch_only_section(content: DigestContent) -> list[str]:

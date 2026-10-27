@@ -149,6 +149,26 @@ def squeeze_percentile(bars: pd.DataFrame, window: int = 10, history: int = 252)
     return ranked.shift(1)
 
 
+def rolling_beta(closes: pd.Series, market: pd.Series, window: int = 252) -> pd.Series:
+    """Trailing beta against the market, usable ON the date it is indexed at.
+
+    **SHIFTED BY ONE SESSION, which is the point-in-time part.** A rolling
+    window ending TODAY includes today's return, and today's return is inside
+    the same session the cross-section is formed on — using it would let the
+    adjustment know something about the day it is adjusting. The shift costs one
+    session of beta and buys the claim that nothing here saw the future.
+
+    `cov / var` of DAILY simple returns, the market model. None (NaN) while the
+    history is short, never 1.0: a default of 1.0 is a guess that happens to
+    look neutral, and it would quietly turn a beta adjustment into the SPY
+    shift it exists to improve on.
+    """
+    own = closes.pct_change()
+    mkt = market.reindex(closes.index).pct_change()
+    beta = own.rolling(window).cov(mkt) / mkt.rolling(window).var()
+    return beta.shift(1)
+
+
 def momentum_12_1(closes: pd.Series, long_window: int = 252, skip: int = 21) -> pd.Series:
     """12-month return EXCLUDING the most recent month, in percent.
 
@@ -219,6 +239,11 @@ def cross_sections(
     indices = build_sector_indices(sectors, as_of=as_of)
 
     spy = technical_features.load_bars(BENCHMARK, as_of=as_of, lookback_days=100_000)
+    spy_closes = (
+        spy.set_index("session_date")["close"].astype(float)
+        if not spy.empty
+        else pd.Series(dtype=float)
+    )
     spy_forward = (
         forward_returns(spy.set_index("session_date")["close"].astype(float), horizons)
         if not spy.empty
@@ -237,6 +262,7 @@ def cross_sections(
         index = indices.get(sector or "", pd.Series(dtype=float)).astype(float)
         own_forward = forward_returns(frame["close"], horizons)
         sector_forward = forward_returns(index.reindex(frame.index), horizons)
+        betas = rolling_beta(frame["close"], spy_closes)
 
         for name in measurables:
             try:
@@ -267,6 +293,7 @@ def cross_sections(
                             for h in horizons
                             if pd.notna(sector_forward[h].get(day))
                         },
+                        beta=(float(betas.get(day)) if pd.notna(betas.get(day)) else None),
                     )
                 )
                 seen_days.add(day)

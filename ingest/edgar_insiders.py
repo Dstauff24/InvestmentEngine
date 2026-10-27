@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import clock, config, db
-from core.budget import BudgetExhausted
+from core.budget import BudgetExhausted, DayBudget
 from core.jobs import job_run
 from ingest.edgar_client import (
     EdgarBlockedError,
@@ -299,6 +299,7 @@ def run(
     *,
     symbols: list[str] | None = None,
     years: int | None = None,
+    budget: int | None = None,
 ) -> int:
     """The daily pull, or O19's deep backfill when `years` is given.
 
@@ -306,6 +307,14 @@ def run(
     daily job keeps reading `edgar.lookback_days` from config, so the backfill
     cannot change what the nightly run does.
     """
+    # **A ONE-OFF BUDGET IS A FLAG, NOT A CONFIG EDIT.** `edgar.daily_call_budget`
+    # is 2,000 — a runaway-loop guard sized for a normal evening, and about
+    # seven minutes of work at the SEC's 5 req/s. O19's backfill needs orders
+    # of magnitude more for one night, and raising a tracked [OPEN] value for
+    # an afternoon is how it gets left raised: the guard would then be gone on
+    # every subsequent evening with nothing to show that it had moved.
+    if client is None and budget is not None:
+        client = EdgarClient(budget=DayBudget("edgar", budget))
     client = client or EdgarClient()
     cfg = config.universe().edgar
     day = clock.session_date()
@@ -440,13 +449,19 @@ def main(argv: list[str] | None = None) -> int:
         help="O19's DEEP backfill: walk the older submission pages back this many years "
         "instead of the daily `edgar.lookback_days` window",
     )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        help="override `edgar.daily_call_budget` for THIS invocation only (O19's "
+        "backfill needs far more than the nightly runaway guard allows)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    rows = run(symbols=args.symbols, years=args.years)
+    rows = run(symbols=args.symbols, years=args.years, budget=args.budget)
     print(f"insider transactions: {rows} rows")
     return 0
 

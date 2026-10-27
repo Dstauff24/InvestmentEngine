@@ -622,3 +622,58 @@ def test_a_walk_that_stopped_early_SAYS_SO_rather_than_implying_coverage():
     _, body = digest.render(content)
     assert "evaluated 17 of 429 scored symbol(s)" in body
     assert "the walk stops once the slots are full" in body
+
+
+# ── O17: the core layer's section ───────────────────────────────────────────
+
+
+def test_the_CORE_section_prints_even_when_the_sleeve_said_nothing():
+    """D52's primary product. The core layer has a result every evening — cash
+    to deploy, a target to hold to — and none of it depends on a recipe firing.
+    Burying it under "no setups today" would file the product under the
+    experiment."""
+    from decision.core_plan import CorePlan
+
+    plan = CorePlan(
+        as_of=DAY,
+        core_symbol="SWPPX",
+        core_value=180.0,
+        cash=500.0,
+        total_value=680.0,
+        lines=("plan: buy $500.00 of SWPPX",),
+    )
+    content = digest.build_digest([], [], core=plan, as_of=DAY)
+    _, body = digest.render(content)
+
+    assert "CORE (the plan you already decided)" in body
+    assert "plan: buy $500.00 of SWPPX" in body
+
+
+def test_the_core_section_is_SILENT_when_it_has_nothing_to_say():
+    """A line that appears nightly saying "no new cash" is a line people stop
+    reading, and the absence of a contribution is not news."""
+    from decision.core_plan import CorePlan
+
+    plan = CorePlan(
+        as_of=DAY, core_symbol="SWPPX", core_value=180.0, cash=0.0, total_value=180.0, lines=()
+    )
+    _, body = digest.render(digest.build_digest([], [], core=plan, as_of=DAY))
+    assert "CORE (" not in body
+
+
+def test_a_BROKEN_core_plan_does_not_take_the_digest_down(monkeypatch):
+    """The digest is non-critical in the pipeline — a digest that failed to
+    send is a bad evening, one that stopped the snapshot jobs would be a lost
+    day of unbuyable history — so the newest section in it must not be the
+    thing that takes it down."""
+    import decision.core_plan as core_module
+
+    def explode(*_a, **_kw):
+        raise RuntimeError("account_snapshots does not exist")
+
+    monkeypatch.setattr(core_module, "core_plan", explode)
+    assert digest._core_plan_or_none() is None
+
+    # And the digest still renders, without a CORE section.
+    _, body = digest.render(digest.build_digest([], [], as_of=DAY))
+    assert "CORE (" not in body

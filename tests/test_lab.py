@@ -314,7 +314,85 @@ def test_excess_versus_SPY_is_the_same_test_as_raw_for_a_SPREAD():
     assert raw.quintile_means[0] != pytest.approx(spy.quintile_means[0])
 
 
-def test_the_primary_bases_EXCLUDE_spy_for_that_reason():
+def test_the_primary_bases_EXCLUDE_spy_but_INCLUDE_beta():
+    """`spy` is out because it cannot change a spread. `beta` is in for the
+    opposite reason: it varies by symbol, so it reorders the cross-section and
+    separates a factor from market exposure."""
     from lab.run import BASES
 
-    assert BASES == ("raw", "sector")
+    assert BASES == ("raw", "sector", "beta")
+    assert "spy" not in BASES
+
+
+def test_the_runner_asks_for_EVERY_registered_horizon():
+    """The first baseline run reported all six 60- and 120-session cells
+    UNMEASURED with 0 days, because the runner took the provider's default
+    `(5, 10, 20)` while two hypotheses are registered at `(20, 60, 120)`. The
+    label was honest and a conclusion drawn from it would not have been:
+    "momentum shows nothing at 120 days" and "nobody computed a 120-day
+    return" look identical in the output and are not the same statement."""
+    import inspect
+
+    from lab import run as runner
+
+    source = inspect.getsource(runner.run)
+    assert "for hypothesis in providable for h in hypothesis.horizons" in source
+    assert "horizons=horizons" in source
+
+
+def test_the_BETA_basis_changes_the_ORDERING_where_the_spy_shift_cannot():
+    """THE LOW-VOLATILITY TEST CASE, in miniature. Two groups: high-beta names
+    that returned more only because the market rose, and low-beta names that
+    returned less for the same reason. RAW, the high-beta group wins and the
+    spread is positive. BETA-ADJUSTED, both groups return what their exposure
+    predicts and the spread collapses — which is the difference between a
+    factor and market exposure wearing a factor's name."""
+    days = {}
+    for i in range(40):
+        day = START + timedelta(days=i)
+        market = 1.0  # a steadily rising market
+        rows = []
+        for j in range(MIN_SYMBOLS_PER_DAY):
+            beta = 0.5 + j / (MIN_SYMBOLS_PER_DAY - 1) * 1.5  # 0.5 -> 2.0
+            rows.append(
+                Observation(
+                    on=day,
+                    symbol=f"S{j}",
+                    value=beta,  # the "factor" IS beta here, by construction
+                    forward={HORIZON: beta * market},
+                    benchmark={HORIZON: market},
+                    beta=beta,
+                )
+            )
+        days[day] = rows
+
+    raw = measure(days, measurable="beta_dressed_as_a_factor", horizon=HORIZON, basis="raw")
+    spy = measure(days, measurable="beta_dressed_as_a_factor", horizon=HORIZON, basis="spy")
+    adjusted = measure(days, measurable="beta_dressed_as_a_factor", horizon=HORIZON, basis="beta")
+
+    assert raw.mean_spread > 1.0, "raw, the high-beta quintile wins"
+    assert spy.mean_spread == pytest.approx(raw.mean_spread), (
+        "the flat SPY shift cannot change a spread — that is why it is not a test"
+    )
+    assert adjusted.mean_spread == pytest.approx(0.0, abs=1e-9), (
+        "beta-adjusted, there is nothing left: it was exposure, not a factor"
+    )
+
+
+def test_an_observation_with_NO_beta_drops_out_of_the_beta_basis():
+    """The first 252 sessions of any symbol have no point-in-time beta, and a
+    missing one must remove the observation rather than default to 1.0."""
+    day = START
+    rows = [
+        Observation(
+            on=day,
+            symbol=f"S{j}",
+            value=float(j),
+            forward={HORIZON: float(j)},
+            benchmark={HORIZON: 1.0},
+            beta=None if j < 10 else 1.0,
+        )
+        for j in range(MIN_SYMBOLS_PER_DAY)
+    ]
+    assert rows[0].excess(HORIZON, "beta") is None
+    assert rows[-1].excess(HORIZON, "beta") == pytest.approx(float(MIN_SYMBOLS_PER_DAY - 1) - 1.0)

@@ -53,13 +53,34 @@ class Observation:
     """SPY's return over the same horizons."""
     sector: dict[int, float] = field(default_factory=dict)
     """The symbol's sector composite over the same horizons."""
+    beta: float | None = None
+    """Trailing 252-session beta against SPY, estimated from data STRICTLY
+    BEFORE this date. None while the history is too short — never 1.0, which
+    would be a guess that happens to look neutral."""
 
     def excess(self, horizon: int, basis: str) -> float | None:
+        """The return on one of four bases, or None when it cannot be formed.
+
+        **`spy` AND `beta` ARE NOT THE SAME CORRECTION, and the difference is
+        the whole reason the second exists.** Subtracting SPY's return shifts
+        every symbol by the SAME number, so it cannot change the ordering and a
+        top-minus-bottom spread is identical to raw (measured: identical on all
+        twelve pairs). Beta VARIES BY SYMBOL, so subtracting `beta x market`
+        reorders the cross-section — which is what separates a factor from
+        plain market exposure. A spread that survives raw and collapses
+        beta-adjusted was high-beta leadership in a rising market wearing a
+        factor's name.
+        """
         own = self.forward.get(horizon)
         if own is None:
             return None
         if basis == "raw":
             return own
+        if basis == "beta":
+            market = self.benchmark.get(horizon)
+            if market is None or self.beta is None:
+                return None
+            return own - self.beta * market
         against = (self.benchmark if basis == "spy" else self.sector).get(horizon)
         return None if against is None else own - against
 

@@ -1252,17 +1252,41 @@ class Accounts(Base):
     """Applied by the sync ONLY when exactly one account comes back. More than
     one makes it refuse rather than mislabel — the tripwire that un-defers
     multi-account handling."""
-    core_etf: str | None = None
-    """The one line the target is measured against. `null` until stated, and
-    the target logic REFUSES rather than guessing: a drift report against an
-    ETF nobody chose is advice about somebody else's portfolio."""
+    core_symbol: str | None = None
+    """The one line the core target is measured against, 100% of it. `null`
+    until stated, and the target logic REFUSES rather than guessing: a drift
+    report against a fund nobody chose is advice about somebody else's
+    portfolio. Renamed from `core_etf` when the answer turned out to be a
+    MUTUAL FUND — a field called `core_etf` holding SWPPX would be wrong in the
+    one place somebody checks to see what the core is."""
+    core_symbol_kind: Literal["etf", "mutual_fund"] = "etf"
+    """**A MUTUAL FUND IS BOUGHT IN DOLLARS AT NAV; AN ETF IS BOUGHT IN
+    SHARES.** Contribution guidance has to say which, and it has to be right
+    on the first evening — before any position exists for Schwab's `assetType`
+    to be read off. So it is stated, not inferred."""
+    core_dividends_reinvested: bool = True
+    """Reinvestment ON means a distribution never appears as cash: the NAV
+    falls, the share count rises, total value is continuous. So the December
+    distribution is RETURN, which `decision/performance.py` gets right by
+    inferring no flow at all — not by classifying one."""
+    core_diversification_threshold_usd: Annotated[float, Field(gt=0)]  # [OPEN] #87
+    core_international_target_pct: Annotated[float, Field(ge=0, le=100)]  # [OPEN] #88
+    core_expense_ratio_pct: Annotated[float, Field(ge=0)]
+    """The fund's own fee. An index fund should trail its index by about this
+    and no more, which is what makes a WIDER gap an alert rather than noise."""
+    core_tracking_tolerance_pct: Annotated[float, Field(ge=0)]  # [OPEN] #89
     minimum_sleeve_usd: Annotated[float, Field(gt=0)]  # [OPEN] #85 — D55
 
+    @property
+    def buys_in_dollars(self) -> bool:
+        """Mutual funds settle at NAV in dollar amounts, so guidance says `$X`."""
+        return self.core_symbol_kind == "mutual_fund"
+
     @model_validator(mode="after")
-    def _core_etf_looks_like_a_symbol(self):
-        if self.core_etf is not None and not self.core_etf.strip():
+    def _core_symbol_looks_like_a_symbol(self):
+        if self.core_symbol is not None and not self.core_symbol.strip():
             raise ValueError(
-                "accounts.core_etf is blank. Use `null` to mean 'not chosen yet' — an "
+                "accounts.core_symbol is blank. Use `null` to mean 'not chosen yet' — an "
                 "empty string would read as a symbol everywhere downstream"
             )
         return self

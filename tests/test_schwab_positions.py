@@ -21,11 +21,11 @@ DAY = date(2026, 10, 23)
 MOMENT = datetime(2026, 10, 23, 20, 0, tzinfo=UTC)
 
 
-def _with_core_etf(symbol: str | None):
+def _with_core_symbol(symbol: str | None):
     """The shipped risk config with one field moved, so these tests do not
-    depend on whether `core_etf` has been answered yet."""
+    depend on what the core holding happens to be."""
     base = config.risk().model_dump()
-    base["accounts"] = {**base["accounts"], "core_etf": symbol}
+    base["accounts"] = {**base["accounts"], "core_symbol": symbol}
     return config.RiskConfig(**base)
 
 
@@ -143,27 +143,29 @@ def test_the_bucket_is_left_for_the_operator():
     """D17's bucket is a statement of INTENT — the same ETF is a core holding
     in one account and a tactical trade in another, and the broker has no idea
     which. Guessing it would put a position into the heat cap, or out of it, on
-    the engine's assumption rather than a decision. While `core_etf` is unset,
+    the engine's assumption rather than a decision. While `core_symbol` is unset,
     nothing is marked at all."""
-    cfg = _with_core_etf(None)
+    cfg = _with_core_symbol(None)
     [row] = sp.parse_positions(
         account_payload(positions=[equity()]), as_of_date=DAY, as_of=MOMENT, cfg=cfg
     )
     assert row["bucket"] is None
 
 
-def test_the_stated_core_etf_is_the_one_bucket_the_engine_can_know():
+def test_the_stated_core_holding_is_the_one_bucket_the_engine_can_know():
     """The exception to the rule above, and only because the operator already
-    stated it: `accounts.core_etf` IS the core sleeve (D35), so a position in
-    it is `etf` by the operator's own definition. Everything else stays NULL."""
-    cfg = _with_core_etf("VTI")
+    stated it: `accounts.core_symbol` IS the core sleeve (D35), so a position in
+    it is `core` by the operator's own definition — not `etf`, which is a
+    GROWTH-sleeve risk category and would be wrong twice for a mutual fund.
+    Everything else stays NULL."""
+    cfg = _with_core_symbol("VTI")
     rows = sp.parse_positions(
         account_payload(positions=[equity(symbol="VTI"), equity(symbol="MSFT")]),
         as_of_date=DAY,
         as_of=MOMENT,
         cfg=cfg,
     )
-    assert {r["symbol"]: r["bucket"] for r in rows} == {"VTI": "etf", "MSFT": None}
+    assert {r["symbol"]: r["bucket"] for r in rows} == {"VTI": "core", "MSFT": None}
 
 
 def test_a_hand_set_bucket_survives_a_sync_that_has_nothing_to_say():

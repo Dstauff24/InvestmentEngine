@@ -38,7 +38,7 @@ from lab.registry import REGISTRY, Hypothesis
 
 log = logging.getLogger(__name__)
 
-BASES = ("raw", "sector")
+BASES = ("raw", "sector", "beta")
 """**EXCESS VERSUS SPY IS NOT A SEPARATE TEST, AND THE FIRST RUN PROVED IT.**
 SPY's return is the same number for every symbol on a given day, so subtracting
 it shifts the whole cross-section by a constant — and a TOP-MINUS-BOTTOM spread
@@ -50,7 +50,14 @@ third for no information and made the bar needlessly strict.
 It is NOT redundant for absolute bucket returns, which do shift — so
 `Result.quintile_means` is still worth reading on a market-excess basis, and
 that is a descriptive view rather than a test. `sector` stays: a sector
-composite varies BY symbol, so subtracting it changes the ordering."""
+composite varies BY symbol, so subtracting it changes the ordering.
+
+**`beta` IS THE THIRD BASIS AND IT IS A REAL TEST**, for the same reason:
+beta varies by symbol, so `own - beta x market` REORDERS the cross-section
+where the flat SPY shift could not. It is what separates a factor from market
+exposure — `low_volatility`'s positive raw spread over 2021-2026 is the case
+it was added for, since a spread that collapses beta-adjusted was high-beta
+leadership in a rising market rather than a volatility premium."""
 # D50's two windows. Selection first, then the window no design choice saw.
 WINDOWS = {
     "in-sample 2022-10..2024-10": (date(2022, 10, 1), date(2024, 10, 1)),
@@ -74,8 +81,20 @@ def run(
     if absent:
         log.info("UNMEASURED (no provider; see the registry notes): %s", ", ".join(absent))
 
+    # **THE UNION OF EVERY HYPOTHESIS'S HORIZONS, not the provider default.**
+    # The first baseline run reported all six 60- and 120-session cells
+    # UNMEASURED with 0 days, and the cause was this call: it used
+    # `cross_sections`' default `(5, 10, 20)`, so no forward return existed at
+    # the horizons the two long-horizon factors are registered at. The label
+    # was honest and the conclusion would not have been — "momentum shows
+    # nothing at 120 days" and "nobody computed a 120-day return" are different
+    # statements, and the second one looked exactly like the first.
+    horizons = sorted({h for hypothesis in providable for h in hypothesis.horizons})
     sections, regimes = providers.cross_sections(
-        [h.measurable for h in providable], as_of=as_of, symbols=symbols
+        [h.measurable for h in providable],
+        as_of=as_of,
+        horizons=horizons,
+        symbols=symbols,
     )
 
     primary: list[Result] = []

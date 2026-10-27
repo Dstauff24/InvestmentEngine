@@ -342,7 +342,22 @@ raw series steps by the split ratio at an ex-date, an adjusted one does not. If
 it fails, `python -m ingest.fmp_history --repair-split-basis` re-sources the
 restated sessions.
 
-### Deeper history, once (O19) — on the VM, in this order
+### Deeper history, once (O19) — in the CODESPACE dev database
+
+**DEEP HISTORY LIVES IN THE DEV DATABASE, NOT ON THE VM.** The lab and the
+backtests run here, and they are the only things that read eighteen years of
+bars; the VM scores today and needs five. So this is a DEV-side one-off and the
+VM keeps its current depth.
+
+**IT IS RE-FETCHABLE, WHICH IS WHY IT CAN LIVE ON A DISPOSABLE BOX.** Everything
+below comes from FMP and the SEC on request: a lost codespace costs the time to
+pull it again (about an hour for prices, longer for Form 4s) and loses nothing
+that cannot be bought back — unlike `option_chain_snapshots`, `estimate_snapshots`
+and `iv_daily`, which are accumulated daily and gone for good if lost (D7/D22).
+That asymmetry is the reason the backup rules differ: deep history is a cache,
+the snapshot series is the asset.
+
+Run it in this order:
 
 O7's five years is enough for the recipes and **not** enough for a regime split:
 `bear_normal` has 19 SPY sessions in the stored window, so D45's cells cannot

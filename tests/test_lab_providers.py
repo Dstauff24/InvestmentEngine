@@ -147,3 +147,50 @@ def test_volatility_is_annualised_the_SAME_WAY_the_regime_code_does_it():
     expected = returns.iloc[-60:].std() * (252**0.5) * 100
     assert vol.iloc[-1] == pytest.approx(expected)
     assert 5 < vol.iloc[-1] < 40, "a plausible annualised percentage, not a decimal"
+
+
+# ── the beta basis: the correction that can change the ordering ─────────────
+
+
+def test_beta_is_one_for_a_symbol_that_IS_the_market():
+    frame = bars(400)
+    spy = frame.set_index("session_date")["close"]
+    beta = providers.rolling_beta(spy, spy)
+    assert beta.iloc[-1] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_beta_is_two_for_a_symbol_that_moves_TWICE_the_market():
+    """Constructed rather than fitted: a symbol whose daily return is exactly
+    2x the market's must come back at 2.0, or the estimator is wrong in a way
+    no real series would reveal."""
+    frame = bars(400)
+    spy = frame.set_index("session_date")["close"].astype(float)
+    market_returns = spy.pct_change().fillna(0.0)
+    levered = 100 * (1 + 2 * market_returns).cumprod()
+
+    beta = providers.rolling_beta(levered, spy)
+    assert beta.iloc[-1] == pytest.approx(2.0, abs=0.02)
+
+
+def test_beta_is_POINT_IN_TIME_and_cannot_see_its_own_session():
+    """A rolling window ending today includes today's return, and today is the
+    session the cross-section is formed on. The shift costs one session of beta
+    and buys the claim that nothing here saw the future."""
+    frame = bars(400)
+    spy = frame.set_index("session_date")["close"].astype(float)
+    own = frame.set_index("session_date")["close"].astype(float)
+
+    full = providers.rolling_beta(own, spy)
+    # Mutating the LAST close must not change the beta indexed at that date,
+    # because that beta was estimated from data strictly before it.
+    tampered = own.copy()
+    tampered.iloc[-1] = tampered.iloc[-1] * 1.25
+    assert providers.rolling_beta(tampered, spy).iloc[-1] == pytest.approx(full.iloc[-1])
+
+
+def test_a_short_history_gives_NO_beta_rather_than_one():
+    """A default of 1.0 is a guess that happens to look neutral, and it would
+    quietly turn the beta basis into the SPY shift it exists to improve on."""
+    frame = bars(100)
+    spy = frame.set_index("session_date")["close"].astype(float)
+    assert providers.rolling_beta(spy, spy).isna().all()

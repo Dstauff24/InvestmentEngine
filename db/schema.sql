@@ -749,7 +749,11 @@ CREATE TABLE IF NOT EXISTS positions (
                           'EQUITY', 'ETF', 'OPTION', 'MUTUAL_FUND',
                           'FIXED_INCOME', 'CASH', 'OTHER')),
     -- D17 bucket. The heat cap counts 'swing' + 'option' only.
-    bucket            TEXT CHECK (bucket IN ('etf', 'hold', 'swing', 'option', 'cash')),
+    -- D17's five, plus O17's `core` for what the core layer holds (migration
+    -- 021). Heat counts `swing` + `option` only, so `core` is outside the cap
+    -- by construction — the same place holds and ETFs sit.
+    bucket            TEXT CHECK (bucket IN ('core', 'etf', 'hold', 'swing',
+                                             'option', 'cash')),
 
     quantity          NUMERIC(20, 6) NOT NULL,
     average_price     NUMERIC(18, 6),

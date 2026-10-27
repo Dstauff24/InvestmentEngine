@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from core import clock, db
+from core import clock, config, db
 
 log = logging.getLogger(__name__)
 
@@ -425,6 +425,20 @@ def render(result: Performance | None, *, account: str | None = None) -> str:
         lines.extend(
             f"    {f.on}  {_usd(f.amount):>14}  {f.kind:<8} {f.basis:<8} {f.why}"
             for f in result.flows
+        )
+    accounts = config.risk().accounts
+    if accounts.core_dividends_reinvested:
+        # WHY THIS LINE EXISTS: with reinvestment on, a distribution never
+        # appears as cash — the NAV falls, the share count rises, and total
+        # value is continuous. So the December distribution is counted as
+        # RETURN by the value series itself, and no flow is inferred for it.
+        # The share count DOES change, so that session shows up as
+        # unattributed below; the return is unaffected, because an unattributed
+        # day assumes no flow rather than inventing one.
+        lines.append(
+            f"  distributions on {accounts.core_symbol or 'the core holding'} are REINVESTED, "
+            "so they raise the share count instead of cash: counted as return by the value "
+            "series, never as a contribution"
         )
     if result.inferred:
         lines.append(
