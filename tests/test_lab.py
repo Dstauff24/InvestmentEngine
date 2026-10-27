@@ -587,3 +587,37 @@ def test_a_hypothesis_with_nothing_withheld_carries_no_marker():
 
     assert "CANNOT CONFIRM HERE" not in body
     assert "admissible as a REFUSAL" not in body
+
+
+# ── the positive control's caveat, pre-registered before it runs ────────────
+
+
+def test_the_positive_control_carries_a_pre_registered_vendor_estimate_caveat():
+    """The control decides how far the lab's nulls can be trusted, so the thing
+    that could make it fail for a measurement reason rather than a market one
+    is named BEFORE it runs — otherwise the explanation gets invented after a
+    result nobody liked."""
+    from lab.registry import REGISTRY
+
+    caveat = REGISTRY["earnings_surprise_magnitude"].caveat
+    assert caveat, "the control must not run without its caveat"
+    assert "VENDOR ESTIMATES" in caveat
+    assert "lastUpdated" in caveat, "the diagnostic names the field it keys on"
+    # BOTH branches are pre-committed, which is what makes it a rule rather
+    # than a line of prose: a diagnostic only written down for the failure
+    # case would leave a passing result free of the same limitation.
+    assert "ON FAILURE" in caveat
+    assert "ON SUCCESS" in caveat
+
+
+def test_a_caveat_and_a_withheld_confirmation_are_different_claims():
+    """One bounds what the number means; the other says this window cannot
+    support the hypothesis at all. Collapsing them would let a bounded result
+    read as an unusable one, or the reverse."""
+    from lab.registry import REGISTRY
+
+    control = REGISTRY["earnings_surprise_magnitude"]
+    reversal = REGISTRY["short_term_reversal"]
+
+    assert control.caveat and not control.confirmation_withheld
+    assert reversal.confirmation_withheld and not reversal.caveat

@@ -58,6 +58,16 @@ class Hypothesis:
     stage: int = 1
     shape: str = "cross_section"
     notes: str = ""
+    caveat: str = ""
+    """**A LIMIT ON WHAT THE NUMBER MEANS, pre-registered and printed with the
+    result whichever way it comes out.**
+
+    Distinct from `confirmation_withheld`, which says this window cannot
+    support the hypothesis at all. A caveat lets the result stand and bounds
+    what may be claimed from it — and where it names a diagnostic to run on
+    failure, that diagnostic is pre-committed, so it cannot be invented
+    afterwards to explain a result somebody did not like.
+    """
     confirmation_withheld: str = ""
     """**WHY THIS WINDOW CANNOT CONFIRM THE HYPOTHESIS, when it cannot.**
 
@@ -291,7 +301,28 @@ _h(
     "Point-in-time rules are D49's throughout: the effective report date is the LATER of the "
     "dates held, the reaction window gates the event, and forward returns start from the next "
     "session. If this comes back null, the SUSPECT IS THE HARNESS AND NOT THE MARKET, which "
-    "is exactly what momentum's null could not establish.",
+    "is exactly what momentum's null could not establish. "
+    "PREREQUISITE OF THE FAILURE BRANCH, checked Oct 27 2026 before the control ran: the "
+    "vendor's `lastUpdated` IS NOT STORED ANYWHERE. `events` holds eps_estimate/eps_actual "
+    "with no revision timestamp, and `estimate_snapshots` holds OUR capture date, which is "
+    "point-in-time by construction but starts 2026-10-22 and so covers none of the historical "
+    "window. So the caveat's diagnostic is not runnable as written until that field is "
+    "captured onto the estimate rows (a probe, a column, a re-fetch). DEFERRING IT CANNOT "
+    "BIAS THE ANSWER: a `lastUpdated` read later reflects MORE revisions than one read "
+    "earlier, so the exclusion filter only ever gets STRICTER with delay — it can shrink the "
+    "sample but never flatter the result.",
+    caveat=(
+        "SURPRISE MAGNITUDES USE VENDOR ESTIMATES, WHICH ARE REVISED AFTER THE FACT "
+        "(D48's caveat: one estimate row carried `lastUpdated` sixteen months after the "
+        "report it belongs to). A quintile cut on surprise is therefore cut on a number "
+        "that may not be the consensus anybody held at the time. "
+        "ON FAILURE, THIS IS CHECKED BEFORE THE HARNESS IS BLAMED: restrict to events whose "
+        "estimate rows show no `lastUpdated` after the report date and measure again, "
+        "because a revised estimate scrambles the magnitude ordering and would produce "
+        "exactly the null that otherwise convicts the instrument. "
+        "ON SUCCESS, THE SAME CAVEAT ATTACHES TO THE MAGNITUDE: the control would have "
+        "shown the effect is detectable, and not how large it is."
+    ),
 )
 _h(
     "post_report_gap_and_hold",
