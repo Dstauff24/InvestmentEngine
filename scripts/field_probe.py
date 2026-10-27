@@ -213,7 +213,17 @@ CONTRACTS: tuple[Contract, ...] = (
         "fmp",
         "/stable/earnings",
         "ingest/fmp_events.py:parse_symbol_earnings",
-        ("date", "epsActual", "epsEstimated", "revenueActual", "revenueEstimated"),
+        (
+            "date",
+            "epsActual",
+            "epsEstimated",
+            "revenueActual",
+            "revenueEstimated",
+            # O23: the vendor's revision stamp. In the registry so a rename is
+            # caught — it was published all along and simply never read, which
+            # is the failure this probe exists for.
+            "lastUpdated",
+        ),
         None,
         lambda c: c.symbol_earnings(SYMBOL, limit=4),
         note="D47's radar. THE endpoint whose rename started all this.",

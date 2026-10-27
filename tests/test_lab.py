@@ -621,3 +621,66 @@ def test_a_caveat_and_a_withheld_confirmation_are_different_claims():
 
     assert control.caveat and not control.confirmation_withheld
     assert reversal.confirmation_withheld and not reversal.caveat
+
+
+# ── the lab refuses a dirty tree, as `backtest/` does ───────────────────────
+
+
+def test_the_lab_CLI_refuses_a_dirty_tree_before_doing_any_work(monkeypatch):
+    """A screen whose survivors are what stage 2 measures and what a decision
+    cites is evidence, so the same rule binds on it. The argument that
+    labelling was enough did not survive contact: the 2026-10-27 re-run came
+    back NON-BASELINE because edits landed while it was in flight, and 25
+    minutes had to be spent again."""
+    import backtest.provenance as prov
+    from lab import run as lab_run
+
+    seen = {}
+
+    def fake_current(*, allow_dirty=False, models=()):
+        seen["allow_dirty"] = allow_dirty
+        if not allow_dirty:
+            raise prov.DirtyTree("tree is not clean")
+        raise AssertionError("reached the measurement, which this test must not")
+
+    monkeypatch.setattr(prov, "current", fake_current)
+
+    with pytest.raises(prov.DirtyTree):
+        lab_run.main([])
+    assert seen["allow_dirty"] is False
+
+
+def test_the_refusal_happens_before_the_universe_is_touched(monkeypatch):
+    """Refusing at render time would discover the problem once the run had
+    already cost its 25 minutes, which is the opposite of the point."""
+    import backtest.provenance as prov
+    from lab import providers
+    from lab import run as lab_run
+
+    def explode(*a, **kw):
+        raise AssertionError("the universe was read despite a dirty tree")
+
+    monkeypatch.setattr(prov, "current", lambda **kw: (_ for _ in ()).throw(prov.DirtyTree("x")))
+    monkeypatch.setattr(providers, "cross_sections", explode)
+    monkeypatch.setattr(providers, "universe", explode)
+
+    with pytest.raises(prov.DirtyTree):
+        lab_run.main([])
+
+
+def test_allow_dirty_is_the_single_visible_override(monkeypatch):
+    """Passed through to the stamp, so the output carries NON-BASELINE for ever
+    rather than the override being invisible after the fact."""
+    import backtest.provenance as prov
+    from lab import run as lab_run
+
+    seen = {}
+
+    def fake_current(*, allow_dirty=False, models=()):
+        seen["allow_dirty"] = allow_dirty
+        raise prov.DirtyTree("stop here; the flag is what this test checks")
+
+    monkeypatch.setattr(prov, "current", fake_current)
+    with pytest.raises(prov.DirtyTree):
+        lab_run.main(["--allow-dirty"])
+    assert seen["allow_dirty"] is True

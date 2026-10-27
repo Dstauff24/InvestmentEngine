@@ -52,12 +52,14 @@ UPSERT_EVENT = """
     INSERT INTO events (
         symbol, event_type, event_date, event_time, is_confirmed, title,
         eps_estimate, eps_actual, revenue_estimate, revenue_actual,
-        dividend_amount, declaration_date, record_date, payment_date, source
+        dividend_amount, declaration_date, record_date, payment_date, source,
+        vendor_last_updated, vendor_last_updated_first_seen
     ) VALUES (
         %(symbol)s, %(event_type)s, %(event_date)s, %(event_time)s, %(is_confirmed)s,
         %(title)s, %(eps_estimate)s, %(eps_actual)s, %(revenue_estimate)s,
         %(revenue_actual)s, %(dividend_amount)s, %(declaration_date)s,
-        %(record_date)s, %(payment_date)s, 'fmp'
+        %(record_date)s, %(payment_date)s, 'fmp',
+        %(vendor_last_updated)s, %(vendor_last_updated)s
     )
     ON CONFLICT (symbol, event_type, event_date) DO UPDATE SET
         event_time       = COALESCE(EXCLUDED.event_time, events.event_time),
@@ -71,6 +73,23 @@ UPSERT_EVENT = """
         declaration_date = COALESCE(EXCLUDED.declaration_date, events.declaration_date),
         record_date      = COALESCE(EXCLUDED.record_date, events.record_date),
         payment_date     = COALESCE(EXCLUDED.payment_date, events.payment_date),
+        -- O23's revision stamp. THREE DIFFERENT RULES, on purpose:
+        --   the stamp itself takes the LATEST value (what the vendor says now),
+        --   `first_seen` is COALESCEd so the first observation stands for ever,
+        --   and the counter increments only when the stamp actually MOVED.
+        -- A counter that rose on every pull would measure how often we looked.
+        vendor_last_updated = COALESCE(
+            EXCLUDED.vendor_last_updated, events.vendor_last_updated
+        ),
+        vendor_last_updated_first_seen = COALESCE(
+            events.vendor_last_updated_first_seen, EXCLUDED.vendor_last_updated_first_seen
+        ),
+        vendor_revisions = events.vendor_revisions + CASE
+            WHEN EXCLUDED.vendor_last_updated IS NOT NULL
+             AND events.vendor_last_updated IS NOT NULL
+             AND EXCLUDED.vendor_last_updated <> events.vendor_last_updated
+            THEN 1 ELSE 0
+        END,
         updated_at       = now()
 """
 # is_confirmed is OR-ed, never overwritten: once actuals have landed, a later
@@ -133,6 +152,7 @@ def _blank_event(symbol: str, event_type: str, event_date: date) -> dict:
         "title": None,
         "eps_estimate": None,
         "eps_actual": None,
+        "vendor_last_updated": None,
         "revenue_estimate": None,
         "revenue_actual": None,
         "dividend_amount": None,
@@ -207,6 +227,11 @@ def parse_symbol_earnings(rows: list[dict], symbol: str) -> list[dict]:
                 "eps_actual": eps_actual,
                 "revenue_estimate": as_float(row.get("revenueEstimated")),
                 "revenue_actual": revenue_actual,
+                # O23: the vendor's own revision stamp, captured from now on
+                # because it is not recoverable later. Only this endpoint
+                # publishes one; `/stable/analyst-estimates` carries no
+                # revision field at all (probed 2026-10-27).
+                "vendor_last_updated": _as_date(row.get("lastUpdated")),
             }
         )
     return out

@@ -220,3 +220,110 @@ def test_a_split_row_is_ignored_entirely():
     scan = flag_dividend_cuts()
     assert scan.cuts == 0
     assert scan.rows_touched == 1, "only the dividend row is considered"
+
+
+# ── the vendor's revision stamp (O23, migration 023) ────────────────────────
+#
+# Measured live 2026-10-27: `/stable/earnings` publishes `lastUpdated` and 100%
+# of 2,607 reported rows carried a stamp AFTER their own report date, in
+# per-symbol bulk blocks. So the stamp alone proves nothing about a single row;
+# what makes it evidence is the date WE first saw it plus a count of the times
+# we have watched it move, and both only accrue forward.
+
+
+def store_earnings(symbol: str, when: date, last_updated: date | None) -> None:
+    from ingest.fmp_events import UPSERT_EVENT, parse_symbol_earnings
+
+    rows = parse_symbol_earnings(
+        [
+            {
+                "date": when.isoformat(),
+                "epsActual": 2.02,
+                "epsEstimated": 1.89,
+                "revenueActual": 1.0,
+                "revenueEstimated": 2.0,
+                "lastUpdated": last_updated.isoformat() if last_updated else None,
+            }
+        ],
+        symbol,
+    )
+    for params in rows:
+        db.execute(UPSERT_EVENT, params)
+
+
+def stamp(symbol: str, when: date) -> dict:
+    return db.fetch_one(
+        "SELECT vendor_last_updated, vendor_last_updated_first_seen, vendor_revisions "
+        "FROM events WHERE symbol = %s AND event_type = 'earnings' AND event_date = %s",
+        (symbol, when),
+    )
+
+
+def test_the_vendor_stamp_is_stored_with_the_date_we_first_saw_it():
+    ensure_ticker("AAPL")
+    reported, seen = date(2026, 7, 30), date(2026, 10, 27)
+    store_earnings("AAPL", reported, seen)
+
+    got = stamp("AAPL", reported)
+    assert got["vendor_last_updated"] == seen
+    assert got["vendor_last_updated_first_seen"] == seen
+    assert got["vendor_revisions"] == 0
+
+
+def test_re_pulling_the_same_stamp_does_not_count_as_a_revision():
+    """A counter that rose on every pull would measure how often we looked."""
+    ensure_ticker("MSFT")
+    reported, seen = date(2026, 7, 30), date(2026, 10, 27)
+    store_earnings("MSFT", reported, seen)
+    store_earnings("MSFT", reported, seen)
+    store_earnings("MSFT", reported, seen)
+
+    assert stamp("MSFT", reported)["vendor_revisions"] == 0
+
+
+def test_a_moved_stamp_counts_as_a_revision_and_keeps_the_first_sighting():
+    """THE WHOLE POINT: we watched the vendor rewrite this row. `first_seen`
+    must not move, because it is what fixes the earlier claim to a date."""
+    ensure_ticker("JNJ")
+    reported = date(2026, 7, 30)
+    store_earnings("JNJ", reported, date(2026, 10, 27))
+    store_earnings("JNJ", reported, date(2026, 11, 15))
+
+    got = stamp("JNJ", reported)
+    assert got["vendor_revisions"] == 1
+    assert got["vendor_last_updated"] == date(2026, 11, 15), "the stamp takes the latest"
+    assert got["vendor_last_updated_first_seen"] == date(2026, 10, 27), "never overwritten"
+
+
+def test_a_missing_stamp_never_erases_one_already_held():
+    """The calendar payload carries no `lastUpdated`, so a calendar re-pull must
+    not blank what the per-symbol endpoint gave us."""
+    ensure_ticker("KO")
+    reported = date(2026, 7, 30)
+    store_earnings("KO", reported, date(2026, 10, 27))
+    store_earnings("KO", reported, None)
+
+    got = stamp("KO", reported)
+    assert got["vendor_last_updated"] == date(2026, 10, 27)
+    assert got["vendor_revisions"] == 0, "absence is not a revision"
+
+
+def test_the_forward_diagnostic_selects_only_rows_never_seen_to_move():
+    """`vendor_revisions = 0 AND vendor_last_updated <= event_date` is the only
+    form of "not revised after the report" the vendor permits us to establish
+    (O23). On history it selects nothing, which is the finding."""
+    for sym in ("PG", "XOM", "T"):
+        ensure_ticker(sym)
+    reported = date(2026, 7, 30)
+    store_earnings("PG", reported, date(2026, 7, 29))      # stamped before the report
+    store_earnings("XOM", reported, date(2026, 10, 27))    # restamped after it
+    store_earnings("T", reported, date(2026, 7, 29))
+    store_earnings("T", reported, date(2026, 11, 1))       # and then moved
+
+    rows = db.fetch_all(
+        "SELECT symbol FROM events WHERE event_type = 'earnings' AND event_date = %s "
+        "AND vendor_revisions = 0 AND vendor_last_updated <= event_date "
+        "AND symbol = ANY(%s) ORDER BY symbol",
+        (reported, ["PG", "XOM", "T"]),
+    )
+    assert [r["symbol"] for r in rows] == ["PG"]

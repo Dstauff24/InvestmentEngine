@@ -345,6 +345,12 @@ def test_every_event_row_carries_the_full_parameter_set():
         "declaration_date",
         "record_date",
         "payment_date",
+        # O23. In EVERY event row, not just the earnings ones: the upsert names
+        # the column unconditionally, so a parser omitting the key would be a
+        # psycopg error at executemany time. `_blank_event` supplies None and
+        # the COALESCE keeps whatever is stored, so a dividend row cannot blank
+        # an earnings row's stamp.
+        "vendor_last_updated",
     }
     div_events, _ = parse_dividends(fx.DIVIDEND_CALENDAR, UNIVERSE)
     split_events, _ = parse_splits(fx.SPLIT_CALENDAR, UNIVERSE)

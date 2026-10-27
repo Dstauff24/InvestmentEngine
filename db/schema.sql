@@ -486,6 +486,20 @@ CREATE TABLE IF NOT EXISTS events (
     revenue_estimate NUMERIC(24, 4),
     revenue_actual   NUMERIC(24, 4),
 
+    -- The vendor's own revision stamp (O23). Captured from 2026-10-27 forward
+    -- because it is not recoverable later: FMP publishes `lastUpdated` on
+    -- `/stable/earnings` and rewrites whole symbol histories at once, so
+    -- across 2,607 reported rows 100% carried a stamp AFTER their own report
+    -- date. The stamp alone therefore proves nothing about any single row; what
+    -- makes it evidence is pairing it with the date WE first saw it and a count
+    -- of the times we have watched it MOVE, both of which only accrue forward.
+    -- `vendor_revisions = 0 AND vendor_last_updated <= event_date` is the only
+    -- form of "this estimate was not revised after the report" the vendor
+    -- permits anyone to establish.
+    vendor_last_updated             DATE,
+    vendor_last_updated_first_seen  DATE,
+    vendor_revisions                INTEGER NOT NULL DEFAULT 0,
+
     -- Dividends (D19)
     dividend_amount  NUMERIC(18, 6),
     declaration_date DATE,

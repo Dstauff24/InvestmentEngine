@@ -163,6 +163,10 @@ def render(
     primary: list[Result],
     windowed: dict[str, list[Result]],
     *,
+    # Only affects the STAMP: the refusal lives in `main`, so a direct caller
+    # (a test, a notebook) can render without a clean tree while the CLI — the
+    # thing that produces citable output — cannot.
+    allow_dirty: bool = True,
     regime_results: dict[str, list[Result]] | None = None,
     unmeasured: Sequence[str] = (),
 ) -> str:
@@ -192,12 +196,20 @@ def render(
     # PROVENANCE, as on any backtest report. A stage-1 screen adopts nothing by
     # itself, but its survivors are what stage 2 and later decisions cite, and
     # "the lab found an IC of 0.03" is not checkable while "on `abc1234`,
-    # config `deadbeef`" is. A dirty tree is stamped rather than refused:
-    # unlike a backtest this run changes no strategy, so the honest move is to
-    # label it, not to block it.
+    # config `deadbeef`" is.
+    #
+    # **A DIRTY TREE IS REFUSED HERE AS IT IS IN `backtest/`, and the argument
+    # for stamping instead did not survive contact.** It ran that a stage-1
+    # screen changes no strategy, so labelling was enough — but a screen whose
+    # survivors are what stage 2 measures and what a decision cites is evidence,
+    # and the same rule has to bind on it. It was not academic: the labelled
+    # re-run of 2026-10-27 came back stamped NON-BASELINE because the caveat
+    # work landed WHILE it was in flight, and a 25-minute run had to be done
+    # again. `--allow-dirty` is the single visible override and stamps the
+    # output NON-BASELINE for ever, exactly as a backtest's does.
     from backtest.provenance import current as provenance_current
 
-    stamp = provenance_current(allow_dirty=True)
+    stamp = provenance_current(allow_dirty=allow_dirty)
 
     lines = [
         "=" * 112,
@@ -341,7 +353,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hypothesis", action="append", help="name(s); default every one")
     parser.add_argument("--symbols", nargs="*", help="restrict the universe (smoke runs)")
     parser.add_argument("--as-of", help="ISO date; default today's session")
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="run with uncommitted changes and stamp the output NON-BASELINE for ever",
+    )
     args = parser.parse_args(argv)
+
+    # **CHECKED BEFORE ANY WORK, not at render time.** The provenance stamp was
+    # taken inside `render`, which is after the measurement — so a dirty tree
+    # was discovered once the 25 minutes had already been spent. The whole
+    # point of refusing is to refuse early.
+    from backtest.provenance import current as provenance_current
+
+    provenance_current(allow_dirty=args.allow_dirty)
 
     chosen = (
         [REGISTRY[name] for name in args.hypothesis] if args.hypothesis else list(REGISTRY.values())
@@ -354,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         render(
             primary,
             windowed,
+            allow_dirty=args.allow_dirty,
             regime_results=by_regime(providable, sections, regimes),
             unmeasured=absent,
         )
